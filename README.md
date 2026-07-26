@@ -1,14 +1,17 @@
-# Portable Codex subagents
+# Portable Codex and OpenCode subagents
 
-This repository packages custom Codex subagent definitions and the routing rules
-used by this setup. It contains no credentials, `config.toml`, or project data.
+This repository packages equivalent custom subagent definitions and routing
+rules for Codex and OpenCode. It contains no credentials or project data.
 
 ## Repository layout
 
 - `agents/` — TOML definitions for the available custom agents.
+- `opencode/agents/` — native OpenCode Markdown definitions for the same roles.
 - `rules/SUBAGENT_ROUTING.md` — delegation, ownership, validation, and role-selection rules.
+- `rules/OPENCODE_SUBAGENT_ROUTING.md` — routing rules using OpenCode's native task semantics.
 - `templates/AGENTS.md.template` — a minimal manual global-instructions example.
-- `install.sh` / `uninstall.sh` — guarded install and removal scripts.
+- `install.sh` / `uninstall.sh` — guarded installer and remover for Codex.
+- `install-opencode.sh` / `uninstall-opencode.sh` — guarded installer and remover for OpenCode.
 
 ## Subagent catalog
 
@@ -16,9 +19,9 @@ Use the exact agent name when delegating work.
 
 | Agent | Model / effort | Primary responsibility |
 | --- | --- | --- |
-| `code-explorer` | GPT-5.6 Luna / medium | Read-only repository discovery and decision-ready findings. |
+| `code-explorer` | GPT-5.6 Luna / low | Read-only repository discovery and decision-ready findings. |
 | `quick-implementer` | GPT-5.6 Luna / low | Small, well-scoped one- or two-file changes with focused checks. |
-| `implementer` | GPT-5.6 Luna / high | Features and bug fixes, including targeted unit tests. |
+| `implementer` | GPT-5.6 Luna / medium | Features and bug fixes, including targeted unit tests. |
 | `code-validator` | GPT-5.4 Mini / low | Read-only, focused test, build, lint, or type-check verification. |
 | `code-reviewer` | GPT-5.6 Sol / low | Read-only review for high-risk, public-API, or difficult changes. |
 | `commit-pusher` | GPT-5.6 Luna / low | Intentional staging, conventional commit, and push—only on explicit request. |
@@ -60,18 +63,27 @@ requested.
   (`tomllib`) or the installable `tomli` package. A missing parser or malformed
   TOML stops installation before destinations are changed.
 
-By default, files are installed under `$HOME/.codex`. Set `CODEX_HOME` to use a
-different Codex home:
+Codex files default to `$HOME/.codex`; OpenCode files default to
+`$HOME/.config/opencode`. Set `CODEX_HOME` or `OPENCODE_HOME` to override them:
 
 ```sh
 CODEX_HOME=/path/to/.codex ./install.sh
+OPENCODE_HOME=/path/to/opencode ./install-opencode.sh
 ```
 
 ## Install
 
 ```sh
 ./install.sh
+./install-opencode.sh
 ```
+
+The OpenCode installer writes agents to
+`$OPENCODE_HOME/agents` (default `~/.config/opencode/agents`), installs the
+OpenCode routing rules, and adds a managed import to `AGENTS.md`. Each OpenCode
+agent pins the `openai/` equivalent of its Codex model and uses `variant` to
+match the Codex reasoning effort. Restart OpenCode after installing because its
+configuration is not hot-reloaded.
 
 The installer copies agent definitions to `$CODEX_HOME/agents`, installs
 `SUBAGENT_ROUTING.md`, and adds a managed import block to
@@ -90,7 +102,12 @@ an existing multi-agent feature table.
 
 ```sh
 ./uninstall.sh
+./uninstall-opencode.sh
 ```
+
+The OpenCode command removes package-managed OpenCode files using its independent
+state manifest while preserving modified or pre-existing files. Each uninstaller
+only affects its corresponding tool.
 
 Uninstall uses the state manifest to remove only package-owned files whose bytes
 still match, restoring backups for replaced files. It removes only the exact

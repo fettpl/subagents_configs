@@ -98,3 +98,4 @@ if updated!=old:
 json.dump({'files':current,'global':g},sf.open('w'),indent=2); sf.write_text(sf.read_text()+'\n')
 PY
 echo "Codex subagents installed under $CODEX_HOME"
+echo "Restart Codex to load the new agents and instructions"

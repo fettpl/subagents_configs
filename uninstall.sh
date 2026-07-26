@@ -1,8 +1,7 @@
 #!/bin/sh
 set -eu
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CODEX_HOME=${CODEX_HOME:-"$HOME/.codex"}
-export SCRIPT_DIR CODEX_HOME
+export CODEX_HOME
 python3 - <<'PY'
 import base64,hashlib,json,os,pathlib,shutil,time
 home=pathlib.Path(os.environ['CODEX_HOME']).expanduser(); sf=home/'.subagents_configs-state.json'
@@ -12,7 +11,7 @@ def backup(p):
  while out.exists(): out=p.with_name(p.name+'.subagents_configs.bak-'+stamp+f'-{n}'); n+=1
  shutil.copy2(p,out); print('backup:',out)
 try: state=json.loads(sf.read_text())
-except (FileNotFoundError,json.JSONDecodeError): print('No installer state; nothing removed safely'); raise SystemExit
+except (FileNotFoundError,json.JSONDecodeError): print('No Codex installer state; nothing removed safely'); state={}
 for item in state.get('files',{}).values():
  p=pathlib.Path(item['target'])
  if not p.exists() or h(p)!=item['installed_hash']: print('preserved modified/missing:',p); continue
