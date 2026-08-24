@@ -111,8 +111,11 @@ def _dict(value: object, expected: set[str], label: str) -> dict[str, Any]:
     return value
 
 
-def _schema(value: object) -> int:
-    if type(value) is not int or value not in {1, SCHEMA_VERSION}:
+def _schema(value: object, *, allow_legacy: bool = False) -> int:
+    versions = {SCHEMA_VERSION}
+    if allow_legacy:
+        versions.add(1)
+    if type(value) is not int or value not in versions:
         raise ValueError("unsupported schema_version")
     return value
 
@@ -125,6 +128,8 @@ def _evidence(value: object, field: str) -> IdentityEvidence | None:
     for key in numeric:
         if type(item[key]) is not int or item[key] < 0:
             raise ValueError(f"{field}.{key} must be a non-negative integer")
+    if item["nlink"] < 1:
+        raise ValueError(f"{field}.nlink must be positive")
     mode = item["mode"]
     if mode > 0o777:
         raise ValueError(f"{field}.mode is invalid")
@@ -390,10 +395,11 @@ def _decode_manifest(
     descriptor: TargetDescriptor,
     home: Path,
     *,
+    allow_legacy: bool = False,
     verify_backups: bool,
 ) -> Manifest:
     value = _dict(raw, _MANIFEST_KEYS, "manifest")
-    schema_version = _schema(value["schema_version"])
+    schema_version = _schema(value["schema_version"], allow_legacy=allow_legacy)
     target = _target(value["target"], descriptor)
     if type(value["entries"]) is not list:
         raise ValueError("manifest entries must be an array")
@@ -573,10 +579,11 @@ def _decode_journal(
     descriptor: TargetDescriptor,
     home: Path,
     *,
+    allow_legacy: bool = False,
     verify_backups: bool,
 ) -> Journal:
     value = _dict(raw, _JOURNAL_KEYS, "journal")
-    schema_version = _schema(value["schema_version"])
+    schema_version = _schema(value["schema_version"], allow_legacy=allow_legacy)
     transaction_id = _safe_id(value["transaction_id"], "transaction_id")
     target = _target(value["target"], descriptor)
     if type(value["participants"]) is not list:
@@ -1004,7 +1011,9 @@ def migrate_manifest_schema(
 
     if type(raw) is not dict or raw.get("schema_version") != 1:
         raise ValueError("manifest migration requires schema version 1")
-    legacy = _decode_manifest(raw, descriptor, home, verify_backups=True)
+    legacy = _decode_manifest(
+        raw, descriptor, home, allow_legacy=True, verify_backups=True
+    )
     for entry in legacy.entries:
         candidate = normalized_absolute(home / PurePosixPath(entry.relative_path))
         evidence = capture_evidence(candidate, f"legacy manifest {entry.identifier}")
@@ -1024,7 +1033,9 @@ def inspect_legacy_journal(
 
     if type(raw) is not dict or raw.get("schema_version") != 1:
         raise ValueError("legacy journal inspection requires schema version 1")
-    journal = _decode_journal(raw, descriptor, home, verify_backups=False)
+    journal = _decode_journal(
+        raw, descriptor, home, allow_legacy=True, verify_backups=False
+    )
     if not journal.operations:
         raise ValueError("legacy journal has no operations")
     evidence = LegacyJournalEvidence(

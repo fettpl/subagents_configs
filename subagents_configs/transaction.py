@@ -790,9 +790,7 @@ def _journal_operation(
     backup = _transaction_backup(prepared, target_plan, operation, operation_id, path)
     before_identity = operation.expected_before_evidence
     if operation.expected_before_hash is not None and before_identity is None:
-        before_identity = capture_evidence(path, "transaction journal target")
-        if before_identity is None:
-            raise TransactionError("transaction journal target disappeared")
+        raise TransactionError("transaction journal target lacks identity evidence")
     return JournalOperation(
         operation_id,
         operation.identifier,
@@ -842,6 +840,16 @@ def _journal_for_plan(plan: TransactionPlan, transaction_id: str) -> Journal:
             ),
         )
     )
+
+    def current_identity(operation: PlannedOperation) -> IdentityEvidence | None:
+        path = _canonical_path(target_plan, operation)
+        if not path.parent.exists():
+            return None
+        try:
+            return capture_evidence(path, "journal plan target")
+        except FileNotFoundError:
+            return None
+
     operations = tuple(
         JournalOperation(
             _operation_id(target_plan.target, index, operation.identifier),
@@ -854,6 +862,17 @@ def _journal_for_plan(plan: TransactionPlan, transaction_id: str) -> Journal:
             None,
             None,
             "planned",
+            operation.expected_before_evidence
+            if operation.expected_before_evidence is not None
+            else current_identity(operation)
+            if operation.expected_before_hash is not None
+            else None,
+            operation.expected_after_evidence
+            if operation.expected_after_evidence is not None
+            else current_identity(operation)
+            if operation.expected_after_hash is not None
+            and operation.expected_before_hash is None
+            else None,
         )
         for index, operation in enumerate(ordered)
     )
@@ -907,12 +926,14 @@ def _prepare(plan: TransactionPlan) -> _Prepared:
     _validate_plan(plan)
     prepared = _Prepared(plan, secrets.token_hex(16))
     participants = tuple(item.target for item in plan.targets)
+    prepared_operations: dict[Target, tuple[PlannedOperation, ...]] = {}
     # Parent directories are created before any journal is persisted. This is
     # also the point at which all expected current hashes/modes are rechecked.
     for target_plan in plan.targets:
         filesystem.ensure_directory(target_plan.home)
         filesystem.ensure_private_directory(_state(target_plan.home))
         filesystem.ensure_private_directory(_state(target_plan.home) / "backups")
+        validated_operations: list[PlannedOperation] = []
         for operation in target_plan.operations:
             path = _canonical_path(target_plan, operation)
             parent = path.parent
@@ -922,18 +943,28 @@ def _prepare(plan: TransactionPlan) -> _Prepared:
                     or _state(target_plan.home) in parent.parents
                 )
                 filesystem.ensure_directory(parent, private=private_parent)
+            before_identity = capture_evidence(path, "transaction precondition")
             _check_evidence(
                 path,
                 operation.expected_before_hash,
                 operation.expected_before_mode,
                 present=operation.expected_before_hash is not None,
+                expected_identity=before_identity,
             )
+            if operation.expected_before_hash is not None and before_identity is None:
+                raise TransactionError(
+                    "transaction precondition lacks identity evidence"
+                )
+            validated_operations.append(
+                replace(operation, expected_before_evidence=before_identity)
+            )
+        prepared_operations[target_plan.target] = tuple(validated_operations)
         filesystem.sync_directory(target_plan.home)
         filesystem.sync_directory(_state(target_plan.home))
         filesystem.sync_directory(_state(target_plan.home) / "backups")
     for target_plan in plan.targets:
         ordered = sorted(
-            target_plan.operations,
+            prepared_operations[target_plan.target],
             key=lambda item: (
                 item.action == "write-manifest",
                 item.relative_path,
@@ -1013,7 +1044,7 @@ def _apply_operation(
     path = _canonical_path(target_plan, operation)
     before_identity = operation.expected_before_evidence
     if operation.expected_before_hash is not None and before_identity is None:
-        before_identity = capture_evidence(path, "transaction target")
+        raise TransactionError("transaction target lacks prepared identity evidence")
     if operation.expected_after_hash is None:
         result = filesystem.compare_and_swap(
             path, before_identity, None, None, "unlink"
@@ -1036,6 +1067,7 @@ def _apply_operation(
         operation.expected_after_hash,
         operation.expected_after_mode,
         present=operation.expected_after_hash is not None,
+        expected_identity=result,
     )
     return result
 
@@ -1056,7 +1088,7 @@ def _backup_bytes(home: Path, journal_operation: JournalOperation) -> bytes:
 
 def _reverse_operation(
     target_plan: TargetPlan, journal_operation: JournalOperation
-) -> None:
+) -> IdentityEvidence | None:
     operation = next(
         item
         for item in target_plan.operations
@@ -1069,21 +1101,26 @@ def _reverse_operation(
     current = _read_regular(path)
     current_hash = _digest(current[0]) if current else None
     current_mode = current[1] if current else None
+    current_identity = capture_evidence(path, "rollback target")
+    expected_before_identity = journal_operation.expected_before_evidence
+    expected_after_identity = journal_operation.expected_after_evidence
     if (
         current_hash == operation.expected_before_hash
         and current_mode == operation.expected_before_mode
+        and current_identity == expected_before_identity
     ):
-        return
+        return current_identity
     if (
         current_hash != operation.expected_after_hash
         or current_mode != operation.expected_after_mode
+        or current_identity != expected_after_identity
     ):
         raise IncompleteRollbackError(
             f"ambiguous rollback state for {operation.identifier}"
         )
     before_identity = journal_operation.expected_after_evidence
-    if before_identity is None and operation.expected_after_hash is not None:
-        before_identity = capture_evidence(path, "rollback target")
+    if operation.expected_after_hash is not None and before_identity is None:
+        raise IncompleteRollbackError("rollback target lacks after identity evidence")
     if operation.expected_before_hash is None:
         filesystem.compare_and_swap(path, before_identity, None, None, "unlink")
     else:
@@ -1095,12 +1132,14 @@ def _reverse_operation(
             operation.expected_before_mode or 0o600,
             "replace",
         )
+    result = capture_evidence(path, "rollback target")
     _check_evidence(
         path,
         operation.expected_before_hash,
         operation.expected_before_mode,
         present=operation.expected_before_hash is not None,
     )
+    return result
 
 
 def _sync_and_remove_journal(home: Path, journal: Journal) -> None:
@@ -1143,7 +1182,17 @@ def _rollback(prepared: _Prepared, primary: BaseException) -> None:
             if operation.status not in {"applying", "applied"}:
                 continue
             try:
-                _reverse_operation(target_plan, operation)
+                restored_identity = _reverse_operation(target_plan, operation)
+                journal = prepared.journals[target_plan.target]
+                prepared.journals[target_plan.target] = replace(
+                    journal,
+                    operations=tuple(
+                        replace(item, expected_before_evidence=restored_identity)
+                        if position == index
+                        else item
+                        for position, item in enumerate(journal.operations)
+                    ),
+                )
                 _update_operation(prepared, target_plan.target, index, "rolled-back")
             except BaseException as exc:
                 rollback_error = rollback_error or exc
@@ -1223,6 +1272,7 @@ def _apply_transaction_unlocked(
                     operation.expected_before_hash,
                     operation.expected_before_mode,
                     present=operation.expected_before_hash is not None,
+                    expected_identity=operation.expected_before_evidence,
                 )
                 if failure_injector is not None:
                     failure_injector.before_operation(journal_operation.operation_id)
@@ -1338,12 +1388,18 @@ def _verify_complete_journal(
         ):
             raise IncompleteRollbackError("complete journal operation order is invalid")
         path = _path_for_journal_operation(home, descriptor, operation)
-        _check_evidence(
-            path,
-            operation.expected_after_hash,
-            operation.expected_after_mode,
-            present=operation.expected_after_hash is not None,
-        )
+        try:
+            _check_evidence(
+                path,
+                operation.expected_after_hash,
+                operation.expected_after_mode,
+                present=operation.expected_after_hash is not None,
+                expected_identity=operation.expected_after_evidence,
+            )
+        except (TransactionError, ValueError) as exc:
+            raise IncompleteRollbackError(
+                "complete journal target identity evidence is invalid"
+            ) from exc
     manifest_operation = manifest_operations[0]
     from .state import load_manifest
 
@@ -1381,12 +1437,18 @@ def _verify_rollback_complete_journal(
         raise IncompleteRollbackError(str(exc)) from exc
     for operation in journal.operations:
         path = _path_for_journal_operation(home, descriptor, operation)
-        _check_evidence(
-            path,
-            operation.expected_before_hash,
-            operation.expected_before_mode,
-            present=operation.expected_before_hash is not None,
-        )
+        try:
+            _check_evidence(
+                path,
+                operation.expected_before_hash,
+                operation.expected_before_mode,
+                present=operation.expected_before_hash is not None,
+                expected_identity=operation.expected_before_evidence,
+            )
+        except (TransactionError, ValueError) as exc:
+            raise IncompleteRollbackError(
+                "rollback journal target identity evidence is invalid"
+            ) from exc
 
 
 def _recover_single(home: Path, descriptor) -> None:
@@ -1433,8 +1495,9 @@ def _recover_single(home: Path, descriptor) -> None:
                         operation.expected_before_hash,
                         operation.expected_before_mode,
                         present=operation.expected_before_hash is not None,
+                        expected_identity=operation.expected_before_evidence,
                     )
-                except ValueError as exc:
+                except (TransactionError, ValueError) as exc:
                     errors.append(str(exc))
             continue
         try:
@@ -1545,6 +1608,11 @@ def _recover_participants(homes: Mapping[Target, Path]) -> None:
                     current_hash == operation.expected_after_hash
                     and current_mode == operation.expected_after_mode
                 )
+                current_identity = capture_evidence(path, "participant recovery target")
+                before = (
+                    before and current_identity == operation.expected_before_evidence
+                )
+                after = after and current_identity == operation.expected_after_evidence
                 if not before and not after:
                     raise IncompleteRollbackError(
                         f"ambiguous participant state for {operation.identifier}"
@@ -1557,6 +1625,7 @@ def _recover_participants(homes: Mapping[Target, Path]) -> None:
                     operation.expected_before_hash,
                     operation.expected_before_mode,
                     present=operation.expected_before_hash is not None,
+                    expected_identity=operation.expected_before_evidence,
                 )
             else:
                 raise IncompleteRollbackError(
@@ -1573,11 +1642,20 @@ def _recover_participants(homes: Mapping[Target, Path]) -> None:
                 operation = journal.operations[index]
                 if operation.status not in {"applying", "applied"}:
                     continue
-                _reverse_operation(target_plans[target], operation)
+                restored_identity = _reverse_operation(target_plans[target], operation)
                 journal = replace(
                     journal,
                     operations=tuple(
                         replace(item, status="rolled-back")
+                        if position == index
+                        else item
+                        for position, item in enumerate(journal.operations)
+                    ),
+                )
+                journal = replace(
+                    journal,
+                    operations=tuple(
+                        replace(item, expected_before_evidence=restored_identity)
                         if position == index
                         else item
                         for position, item in enumerate(journal.operations)

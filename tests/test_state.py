@@ -39,7 +39,7 @@ class StateTests(unittest.TestCase):
 
     def _manifest(self, **entry_overrides):
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "target": "codex",
             "entries": [self._entry(**entry_overrides)],
         }
@@ -58,6 +58,43 @@ class StateTests(unittest.TestCase):
         self.assertNotIn(b"base64", encoded)
         self.assertNotIn(b"private prior bytes", encoded)
         self.assertEqual(json.loads(encoded), self._manifest())
+
+    def test_v1_requires_explicit_manifest_migration_and_legacy_journal_inspection(
+        self,
+    ):
+        from subagents_configs.state import (
+            decode_journal,
+            decode_manifest,
+            inspect_legacy_journal,
+            migrate_manifest_schema,
+        )
+
+        descriptor = descriptor_for(Target.CODEX)
+        legacy_manifest = {
+            "schema_version": 1,
+            "target": "codex",
+            "entries": [],
+        }
+        legacy_journal = self._journal_raw("create", self._journal_operation("create"))
+        legacy_journal["schema_version"] = 1
+        legacy_journal["rollback_status"] = "complete"
+        legacy_journal["operations"][0]["status"] = "applied"
+        legacy_journal["operations"][0].pop("expected_before_evidence")
+        legacy_journal["operations"][0].pop("expected_after_evidence")
+        with tempfile.TemporaryDirectory(dir=self._TEMP_DIR) as temporary:
+            root = Path(temporary)
+            with self.assertRaises(ValueError):
+                decode_manifest(legacy_manifest, descriptor, root)
+            with self.assertRaises(ValueError):
+                decode_journal(legacy_journal, descriptor, root)
+            self.assertEqual(
+                migrate_manifest_schema(
+                    legacy_manifest, descriptor, root
+                ).schema_version,
+                2,
+            )
+            evidence = inspect_legacy_journal(legacy_journal, descriptor, root)
+            self.assertEqual(evidence.operation_count, 1)
 
     def test_manifest_rejects_unknown_fields_and_duplicate_identifiers(self):
         from subagents_configs.state import decode_manifest
@@ -154,7 +191,7 @@ class StateTests(unittest.TestCase):
 
         descriptor = descriptor_for(Target.CODEX)
         raw = {
-            "schema_version": 1,
+            "schema_version": 2,
             "transaction_id": "tx-1",
             "target": "codex",
             "participants": ["codex", "opencode"],
@@ -171,6 +208,22 @@ class StateTests(unittest.TestCase):
                     "backup_path": None,
                     "backup_hash": None,
                     "status": "planned",
+                    "expected_before_evidence": {
+                        "device": 1,
+                        "inode": 1,
+                        "size": 1,
+                        "nlink": 1,
+                        "mode": 0o600,
+                        "sha256": "a" * 64,
+                    },
+                    "expected_after_evidence": {
+                        "device": 1,
+                        "inode": 1,
+                        "size": 1,
+                        "nlink": 1,
+                        "mode": 0o600,
+                        "sha256": "a" * 64,
+                    },
                 }
             ],
             "rollback_status": "not-started",
@@ -205,7 +258,7 @@ class StateTests(unittest.TestCase):
             installed_block_hash=None,
             unresolved_reason=None,
         )
-        invalid_manifest = Manifest(1, Target.CODEX, (invalid_entry,))
+        invalid_manifest = Manifest(2, Target.CODEX, (invalid_entry,))
         with self.assertRaises(ValueError):
             encode_manifest(invalid_manifest)
 
@@ -680,7 +733,7 @@ class StateTests(unittest.TestCase):
             state = root / ".subagents_configs"
             state.mkdir(mode=0o700)
             (state / "manifest.json").write_bytes(
-                encode_manifest(Manifest(1, Target.CODEX, tuple()))
+                encode_manifest(Manifest(2, Target.CODEX, tuple()))
             )
             (state / "manifest.json").chmod(0o600)
             alternate = root / "alternate"
@@ -690,7 +743,7 @@ class StateTests(unittest.TestCase):
             alternate_manifest.write_bytes(
                 encode_manifest(
                     Manifest(
-                        1,
+                        2,
                         Target.CODEX,
                         (alternate_entry,),
                     )
@@ -793,7 +846,7 @@ class StateTests(unittest.TestCase):
             state = root / ".subagents_configs"
             state.mkdir(mode=0o700)
             (state / "manifest.json").write_bytes(
-                encode_manifest(Manifest(1, Target.CODEX, tuple()))
+                encode_manifest(Manifest(2, Target.CODEX, tuple()))
             )
             (state / "manifest.json").chmod(0o600)
             relative_runtime = Path(*runtime.parts[1:])
@@ -825,7 +878,7 @@ class StateTests(unittest.TestCase):
             state.mkdir(mode=0o700)
             manifest_path = state / "manifest.json"
             manifest_path.write_bytes(
-                encode_manifest(Manifest(1, Target.CODEX, tuple()))
+                encode_manifest(Manifest(2, Target.CODEX, tuple()))
             )
             manifest_path.chmod(0o700)
             with self.assertRaises(ValueError):
@@ -863,7 +916,7 @@ class StateTests(unittest.TestCase):
             state = root / ".subagents_configs"
             state.mkdir(mode=0o700)
             (state / "manifest.json").write_bytes(
-                encode_manifest(Manifest(1, Target.CODEX, tuple()))
+                encode_manifest(Manifest(2, Target.CODEX, tuple()))
             )
             (state / "manifest.json").chmod(0o600)
             backups = state / "backups"
@@ -966,7 +1019,7 @@ class StateTests(unittest.TestCase):
             (state / "manifest.json").write_bytes(
                 encode_manifest(
                     Manifest(
-                        1,
+                        2,
                         Target.CODEX,
                         tuple(),
                     )
@@ -1056,17 +1109,38 @@ class StateTests(unittest.TestCase):
         identifier = "routing-codex" if "block" in action else "state/manifest"
         if action in {"create", "remove"}:
             identifier = "code-explorer"
+        before_hash = None if action == "create" else "a" * 64
+        after_hash = None if action == "remove" else digest
         return {
             "operation_id": "op-1",
             "identifier": identifier,
             "action": action,
-            "expected_before_hash": None if action == "create" else "a" * 64,
-            "expected_after_hash": None if action == "remove" else digest,
+            "expected_before_hash": before_hash,
+            "expected_after_hash": after_hash,
             "expected_before_mode": None if action == "create" else 0o600,
             "expected_after_mode": None if action == "remove" else 0o600,
             "backup_path": None,
             "backup_hash": None,
             "status": "planned",
+            "expected_before_evidence": self._evidence(
+                before_hash, None if action == "create" else 0o600
+            ),
+            "expected_after_evidence": self._evidence(
+                after_hash, None if action == "remove" else 0o600
+            ),
+        }
+
+    @staticmethod
+    def _evidence(digest, mode=0o600):
+        if digest is None:
+            return None
+        return {
+            "device": 1,
+            "inode": 1,
+            "size": 1,
+            "nlink": 1,
+            "mode": mode,
+            "sha256": digest,
         }
 
     def _operation(
@@ -1089,11 +1163,24 @@ class StateTests(unittest.TestCase):
             "backup_path": None,
             "backup_hash": None,
             "status": "planned",
+            "expected_before_evidence": self._evidence(before_hash, before_mode),
+            "expected_after_evidence": self._evidence(after_hash, after_mode),
         }
 
     def _journal_raw(self, action, operation):
+        operation = {
+            **operation,
+            "expected_before_evidence": self._evidence(
+                operation.get("expected_before_hash"),
+                operation.get("expected_before_mode", 0o600),
+            ),
+            "expected_after_evidence": self._evidence(
+                operation.get("expected_after_hash"),
+                operation.get("expected_after_mode", 0o600),
+            ),
+        }
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "transaction_id": "tx-1",
             "target": "codex",
             "participants": ["codex"],
