@@ -242,10 +242,21 @@ python3 scripts/run-validation-isolated.py -- COMMAND ARG...
 
 The required `--` preserves an argv boundary; there is no shell command-string
 mode and no unsandboxed fallback. The helper snapshots tracked and non-ignored
-untracked files into a private temporary root without `.git`, ignored files,
-secrets, caches, or files outside the worktree. It starts the child with a
-filtered empty-derived environment, private `HOME` and caches, deterministic
-locale, and Git settings that disable global/system configuration and prompts.
+untracked files into a private temporary root without `.git`, ignored
+untracked files, environment files (`.env`, `.env.*`, and `.envrc`), cache
+directories (`cache`, `.cache`, `__pycache__`, `.pytest_cache`, `.ruff_cache`,
+and `node_modules`), or the explicitly excluded credential paths
+(`credentials.json`, `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`,
+`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ecdsa_sk`, `id_ed25519`,
+`id_ed25519_sk`, `private.key`, `private.pem`, `private_key`,
+`private_key.pem`, `.aws/credentials`, `.config/gh/hosts.yml`,
+`.config/gcloud/application_default_credentials.json`, and
+`.docker/config.json`). It starts the child with a filtered empty-derived
+environment, private `HOME` and caches, deterministic locale, and Git settings
+that disable global/system configuration and prompts. This is an explicit
+path policy, not arbitrary secret-content detection: do not commit secrets
+under unrecognized names and do not place secrets in validation inputs.
+These path-name comparisons are case-insensitive.
 Proxy variables, credential-bearing names, SSH-agent sockets, and names
 containing `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, or `KEY` are excluded.
 The original worktree fingerprint and status are checked after every child

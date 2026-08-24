@@ -57,7 +57,7 @@ class GitSnapshotTests(unittest.TestCase):
             self.assertIsNone(deleted.sha256)
             self.assertIsNone(deleted.mode)
 
-    def test_tracked_ignored_sensitive_file_is_excluded(self):
+    def test_tracked_ignored_source_file_is_included(self):
         with tempfile.TemporaryDirectory() as temporary:
             repository = make_repository(Path(temporary))
             tracked_ignored = repository / "ignored.txt"
@@ -67,9 +67,42 @@ class GitSnapshotTests(unittest.TestCase):
 
             from scripts.validation_isolation.git_snapshot import list_source_paths
 
-            self.assertNotIn(
+            self.assertIn(
                 PurePosixPath("ignored.txt"), list_source_paths(repository)
             )
+
+    def test_common_credential_paths_are_excluded_when_tracked_or_untracked(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = make_repository(Path(temporary))
+            credential_paths = (
+                "credentials.json",
+                ".npmrc",
+                ".pypirc",
+                ".netrc",
+                "id_rsa",
+                "private.key",
+                ".aws/credentials",
+                ".docker/config.json",
+                ".git-credentials",
+            )
+            for path in credential_paths:
+                tracked = repository / "tracked" / path
+                tracked.parent.mkdir(parents=True, exist_ok=True)
+                tracked.write_text("credential\n", encoding="utf-8")
+                untracked = repository / "untracked" / path
+                untracked.parent.mkdir(parents=True, exist_ok=True)
+                untracked.write_text("credential\n", encoding="utf-8")
+            git(repository, "add", "--all", "-f", "tracked")
+            git(repository, "commit", "--quiet", "-m", "credentials")
+
+            from scripts.validation_isolation.git_snapshot import list_source_paths
+
+            paths = list_source_paths(repository)
+            self.assertNotIn(PurePosixPath("tracked/credentials.json"), paths)
+            self.assertNotIn(PurePosixPath("untracked/credentials.json"), paths)
+            for path in credential_paths:
+                self.assertNotIn(PurePosixPath("tracked", path), paths)
+                self.assertNotIn(PurePosixPath("untracked", path), paths)
 
     def test_deleted_tracked_parent_is_in_fingerprint_as_absent(self):
         with tempfile.TemporaryDirectory() as temporary:

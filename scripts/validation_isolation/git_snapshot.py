@@ -16,6 +16,34 @@ GIT_EXECUTABLE = Path("/usr/bin/git")
 _CHUNK_SIZE = 1024 * 1024
 GitRunner = Callable[[Sequence[str], Path], subprocess.CompletedProcess[bytes]]
 
+_COMMON_SECRET_BASENAMES = frozenset(
+    {
+        ".git-credentials",
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        "credentials.json",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ecdsa_sk",
+        "id_ed25519",
+        "id_ed25519_sk",
+        "id_rsa",
+        "private.key",
+        "private.pem",
+        "private_key",
+        "private_key.pem",
+    }
+)
+_COMMON_SECRET_PATH_SUFFIXES = frozenset(
+    {
+        ".aws/credentials",
+        ".config/gh/hosts.yml",
+        ".config/gcloud/application_default_credentials.json",
+        ".docker/config.json",
+    }
+)
+
 
 def _trusted_git() -> Path:
     path = GIT_EXECUTABLE
@@ -174,6 +202,14 @@ def _relative_path(raw: bytes) -> PurePosixPath | None:
         raise GitSnapshotError("Git inventory contains a malformed path")
     if ".git" in path.parts:
         raise GitSnapshotError("Git inventory exposed .git")
+    if (
+        path.name.casefold() in _COMMON_SECRET_BASENAMES
+        or any(
+            path.as_posix().casefold().endswith(suffix)
+            for suffix in _COMMON_SECRET_PATH_SUFFIXES
+        )
+    ):
+        return None
     if any(
         component
         in {
@@ -213,14 +249,18 @@ def list_source_paths(
     worktree: Path, git_runner: GitRunner = run_git
 ) -> tuple[PurePosixPath, ...]:
     worktree = _safe_directory(worktree, "Git worktree")
-    result = _checked_git(
-        ("ls-files", "--cached", "--others", "--exclude-standard", "-z"),
+    tracked_result = _checked_git(
+        ("ls-files", "--cached", "-z"),
         worktree,
         git_runner,
     )
-    inventory = _parse_nul_inventory(result.stdout)
+    untracked_result = _checked_git(
+        ("ls-files", "--others", "--exclude-standard", "-z"),
+        worktree,
+        git_runner,
+    )
     ignored_result = git_runner(
-        ("ls-files", "--cached", "--ignored", "--exclude-standard", "-z"),
+        ("ls-files", "--others", "--ignored", "--exclude-standard", "-z"),
         worktree,
     )
     if not isinstance(ignored_result.stdout, bytes) or not isinstance(
@@ -230,12 +270,14 @@ def list_source_paths(
     if ignored_result.returncode != 0:
         detail = ignored_result.stderr.decode("utf-8", "replace")[:160]
         raise GitSnapshotError(f"Git ignored-file inventory failed: {detail}")
-    ignored = (
-        set(_parse_nul_inventory(ignored_result.stdout))
-        if ignored_result.stdout
-        else set()
+    tracked = _parse_nul_inventory(tracked_result.stdout)
+    untracked = _parse_nul_inventory(untracked_result.stdout)
+    _parse_nul_inventory(ignored_result.stdout)
+    if set(tracked).intersection(untracked):
+        raise GitSnapshotError("Git inventories contain overlapping paths")
+    return tuple(
+        sorted(set(tracked).union(untracked), key=lambda item: item.as_posix())
     )
-    return tuple(path for path in inventory if path not in ignored)
 
 
 def _open_directory(path: Path, label: str) -> int:

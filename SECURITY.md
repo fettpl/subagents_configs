@@ -37,7 +37,16 @@ not a permission to read or publish the original content.
 
 Validation accepts only the argv form
 `python3 scripts/run-validation-isolated.py -- COMMAND ARG...`. It creates a
-private snapshot without `.git`, filters secrets and proxy variables from an
+private snapshot without `.git`, ignored untracked files, environment files
+(`.env`, `.env.*`, and `.envrc`), cache directories (`cache`, `.cache`,
+`__pycache__`, `.pytest_cache`, `.ruff_cache`, and `node_modules`), and the
+explicitly excluded credential paths (`credentials.json`, `.npmrc`, `.pypirc`,
+`.netrc`, `.git-credentials`, `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ecdsa_sk`,
+`id_ed25519`, `id_ed25519_sk`, `private.key`, `private.pem`, `private_key`,
+`private_key.pem`, and the credential-store paths `.aws/credentials`,
+`.config/gh/hosts.yml`,
+`.config/gcloud/application_default_credentials.json`, and
+`.docker/config.json`). It filters secrets and proxy variables from an
 empty-derived environment, and checks the original worktree fingerprint and
 status after the child exits, times out, mutates, or fails cleanup. macOS
 requires a usable `/usr/bin/sandbox-exec` deny-network profile. Linux requires
@@ -45,7 +54,11 @@ a usable fixed Bubblewrap backend with an unshared network namespace and
 minimal read-only system mounts. Unsupported or unusable backends fail closed
 before the requested command starts; there is no unsandboxed fallback.
 
-These controls are not perfect sandboxing. A validation dependency may still
+The snapshot credential policy is an explicit path policy, not arbitrary
+secret-content detection; do not commit secrets under unrecognized names or
+place them in validation inputs. These path-name comparisons are
+case-insensitive. These controls are not perfect sandboxing. A
+validation dependency may still
 contain a vulnerability, and client behavior can change. Do not place secrets
 in prompts, repository files, fixtures, logs, or issue reports. Do not grant
 network, credential, external-directory, or write authority merely to make a
