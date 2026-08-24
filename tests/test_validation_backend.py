@@ -8,11 +8,17 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.validation_isolated_test_support import make_repository
+from tests.validation_isolated_test_support import make_repository, system_executable
 
 MACOS_SANDBOX = Path("/usr/bin/sandbox-exec")
-SYSTEM_LAUNCHER = Path("/usr/bin/true").resolve(strict=True)
-SYSTEM_PYTHON = Path("/usr/bin/python3").resolve(strict=True)
+
+
+def _system_launcher() -> Path:
+    return system_executable("true")
+
+
+def _system_python() -> Path:
+    return system_executable("python3")
 
 
 def _executable(path: Path) -> Path:
@@ -50,7 +56,7 @@ class BackendSelectionTests(unittest.TestCase):
     def test_selects_only_fixed_macos_launcher(self):
         from scripts.validation_isolation.backend import select_backend
 
-        backend = select_backend("darwin", MACOS_SANDBOX, None, SYSTEM_PYTHON)
+        backend = select_backend("darwin", MACOS_SANDBOX, None, _system_python())
         self.assertEqual(backend.name, "macos")
         self.assertEqual(backend.launcher, MACOS_SANDBOX)
 
@@ -65,7 +71,7 @@ class BackendSelectionTests(unittest.TestCase):
                     "linux",
                     MACOS_SANDBOX,
                     launcher,
-                    SYSTEM_PYTHON,
+                    _system_python(),
                 )
                 self.assertEqual(backend.name, "linux")
                 self.assertEqual(backend.launcher, launcher)
@@ -74,15 +80,17 @@ class BackendSelectionTests(unittest.TestCase):
         from scripts.validation_isolation.backend import select_backend
 
         with self.assertRaises(ValueError):
-            select_backend("win32", MACOS_SANDBOX, None, SYSTEM_PYTHON)
+            select_backend("win32", MACOS_SANDBOX, None, _system_python())
         with self.assertRaises(ValueError):
-            select_backend("darwin", Path("/invalid/sandbox-exec"), None, SYSTEM_PYTHON)
+            select_backend(
+                "darwin", Path("/invalid/sandbox-exec"), None, _system_python()
+            )
         with self.assertRaises(ValueError):
             select_backend(
                 "linux",
                 MACOS_SANDBOX,
                 Path("/invalid/bwrap"),
-                SYSTEM_PYTHON,
+                _system_python(),
             )
 
     def test_backend_selection_ignores_inherited_path(self):
@@ -92,7 +100,7 @@ class BackendSelectionTests(unittest.TestCase):
             fake = _executable(Path(temporary) / "sandbox-exec")
             with patch.dict(os.environ, {"PATH": temporary}, clear=False):
                 with self.assertRaises(ValueError):
-                    select_backend("darwin", fake, None, SYSTEM_PYTHON)
+                    select_backend("darwin", fake, None, _system_python())
 
 
 class BackendArgumentTests(unittest.TestCase):
@@ -118,7 +126,7 @@ class BackendArgumentTests(unittest.TestCase):
                 ("socket", home / "run" / "socket"),
                 ("credential", home / ".ssh" / "id_rsa"),
             )
-            backend = BackendSpec("macos", SYSTEM_LAUNCHER, SYSTEM_PYTHON)
+            backend = BackendSpec("macos", _system_launcher(), _system_python())
             for spelling in spellings:
                 for name, path in protected:
                     encoded = str(path).replace("/", spelling)
@@ -150,7 +158,7 @@ class BackendArgumentTests(unittest.TestCase):
                                     _environment(temp),
                                 )
 
-            validate_command_argv((str(SYSTEM_PYTHON), "/dev/null"), worktree, home)
+            validate_command_argv((str(_system_python()), "/dev/null"), worktree, home)
             build_backend_argv(
                 backend,
                 (str(worktree / "guest.py"),),
@@ -169,14 +177,14 @@ class BackendArgumentTests(unittest.TestCase):
                     render_macos_profile(
                         Path("/private/tmp") / unsafe,
                         Path("/private/tmp/temp"),
-                        SYSTEM_PYTHON,
+                        _system_python(),
                     )
             with self.subTest(path="temp", unsafe=repr(unsafe)):
                 with self.assertRaises(ValueError):
                     render_macos_profile(
                         Path("/private/tmp/snapshot"),
                         Path("/private/tmp") / unsafe,
-                        SYSTEM_PYTHON,
+                        _system_python(),
                     )
             with self.subTest(path="python", unsafe=repr(unsafe)):
                 with self.assertRaises(ValueError):
@@ -192,7 +200,7 @@ class BackendArgumentTests(unittest.TestCase):
         profile = render_macos_profile(
             Path("/private/tmp/snapshot"),
             Path("/private/tmp/temp"),
-            SYSTEM_PYTHON,
+            _system_python(),
         )
         self.assertIn("(deny network*)", profile)
         self.assertIn("/private/tmp/snapshot", profile)
@@ -200,6 +208,12 @@ class BackendArgumentTests(unittest.TestCase):
         self.assertIn("(deny file-write*)", profile)
         self.assertNotIn("/Users/pawel/Documents/GitHub", profile)
         self.assertNotIn('(subpath "/")', profile)
+        for optional_root in (Path("/bin"), Path("/sbin")):
+            if (
+                optional_root.exists()
+                and optional_root.resolve(strict=True) != optional_root
+            ):
+                self.assertNotIn(f'(subpath "{optional_root}")', profile)
 
     def test_macos_profile_rejects_custom_home_interpreter_and_broad_reads(self):
         from scripts.validation_isolation.backend import render_macos_profile
@@ -213,7 +227,7 @@ class BackendArgumentTests(unittest.TestCase):
         profile = render_macos_profile(
             Path("/private/tmp/snapshot"),
             Path("/private/tmp/temp"),
-            SYSTEM_PYTHON,
+            _system_python(),
         )
         for broad in ("/etc", "/Library", "/System", "/Users", "/home"):
             self.assertNotIn(f'(subpath "{broad}")', profile)
@@ -221,7 +235,7 @@ class BackendArgumentTests(unittest.TestCase):
     def test_linux_argv_has_namespace_clearenv_and_private_mounts(self):
         from scripts.validation_isolation.backend import BackendSpec, build_backend_argv
 
-        backend = BackendSpec("linux", Path("/usr/bin/bwrap"), SYSTEM_PYTHON)
+        backend = BackendSpec("linux", Path("/usr/bin/bwrap"), _system_python())
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             snapshot = root / "snapshot"
@@ -251,13 +265,24 @@ class BackendArgumentTests(unittest.TestCase):
     def test_linux_mount_plan_is_canonical_minimal_and_no_custom_prefix(self):
         from scripts.validation_isolation.backend import build_linux_mount_plan
 
-        mounts = build_linux_mount_plan(SYSTEM_PYTHON)
+        mounts = build_linux_mount_plan(_system_python())
         for index, mount in enumerate(mounts):
             self.assertEqual(mount, mount.resolve(strict=True))
             self.assertNotIn(mount.parts[1:2], (("Users",), ("home",)))
             for other in mounts[index + 1 :]:
                 self.assertNotIn(mount, other.parents)
                 self.assertNotIn(other, mount.parents)
+        for optional_root in (
+            Path("/bin"),
+            Path("/sbin"),
+            Path("/lib"),
+            Path("/lib64"),
+        ):
+            if (
+                optional_root.exists()
+                and optional_root.resolve(strict=True) != optional_root
+            ):
+                self.assertNotIn(optional_root, mounts)
         self.assertNotIn(Path("/etc"), mounts)
         with self.assertRaises(ValueError):
             build_linux_mount_plan(Path("/Users/pawel/python"))
@@ -265,7 +290,7 @@ class BackendArgumentTests(unittest.TestCase):
     def test_backend_rejects_arbitrary_environment_mapping_and_values(self):
         from scripts.validation_isolation.backend import BackendSpec, build_backend_argv
 
-        backend = BackendSpec("macos", SYSTEM_LAUNCHER, SYSTEM_PYTHON)
+        backend = BackendSpec("macos", _system_launcher(), _system_python())
         with self.assertRaises(ValueError):
             build_backend_argv(
                 backend,
@@ -350,7 +375,7 @@ class BackendArgumentTests(unittest.TestCase):
             temp.mkdir(mode=0o700)
             with self.assertRaises(ValueError):
                 build_backend_argv(
-                    BackendSpec("macos", SYSTEM_LAUNCHER, SYSTEM_PYTHON),
+                    BackendSpec("macos", _system_launcher(), _system_python()),
                     ("python3", "-c", f"open('{worktree}/secret')"),
                     snapshot,
                     temp,
@@ -369,7 +394,7 @@ class BackendArgumentTests(unittest.TestCase):
             temp = root / "temp"
             snapshot.mkdir(mode=0o700)
             temp.mkdir(mode=0o700)
-            backend = BackendSpec("macos", SYSTEM_LAUNCHER, SYSTEM_PYTHON)
+            backend = BackendSpec("macos", _system_launcher(), _system_python())
 
             def failed_runner(*args, **kwargs):
                 del args, kwargs
@@ -417,7 +442,7 @@ class BackendArgumentTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(ValueError, "probe output") as raised:
                     probe_backend(
-                        BackendSpec("macos", SYSTEM_LAUNCHER, SYSTEM_PYTHON),
+                        BackendSpec("macos", _system_launcher(), _system_python()),
                         snapshot,
                         temp,
                         _environment(temp),
@@ -450,7 +475,7 @@ class BackendArgumentTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(ValueError, "probe output"):
                     probe_backend(
-                        BackendSpec("macos", SYSTEM_LAUNCHER, SYSTEM_PYTHON),
+                        BackendSpec("macos", _system_launcher(), _system_python()),
                         snapshot,
                         temp,
                         _environment(temp),
@@ -553,7 +578,7 @@ class BackendPathValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             interpreter = _executable(root / "python")
-            launcher = SYSTEM_LAUNCHER
+            launcher = _system_launcher()
             interpreter_item = os.lstat(interpreter)
             launcher_item = os.lstat(launcher)
             backend = BackendSpec(
@@ -586,7 +611,7 @@ class BackendPathValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             interpreter = _executable(root / "python")
-            launcher = SYSTEM_LAUNCHER
+            launcher = _system_launcher()
             interpreter_item = os.lstat(interpreter)
             launcher_item = os.lstat(launcher)
             spec = backend.BackendSpec(
@@ -647,7 +672,7 @@ class BackendPathValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             interpreter = _executable(root / "python")
-            launcher = SYSTEM_LAUNCHER
+            launcher = _system_launcher()
             launcher_item = os.lstat(launcher)
             interpreter_item = os.lstat(interpreter)
             spec = backend.BackendSpec(

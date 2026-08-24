@@ -26,6 +26,7 @@ from tests.helpers import (
     real_repository,
     tree_snapshot,
 )
+from tests.validation_isolated_test_support import system_executable
 
 TARGETS = DESCRIPTOR_ORDER
 COMBINATIONS = tuple(
@@ -581,7 +582,7 @@ class FullInstallMatrixTests(unittest.TestCase):
             (temp / "cache").mkdir(mode=0o700)
             (temp / "config").mkdir(mode=0o700)
             backend = BackendSpec(
-                "macos", Path("/usr/bin/sandbox-exec"), Path("/usr/bin/python3")
+                "macos", system_executable("true"), system_executable("python3")
             )
             protected = (
                 worktree / "secret.txt",

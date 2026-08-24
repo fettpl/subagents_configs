@@ -7,13 +7,29 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.validation_isolated_test_support import make_repository
+from tests.validation_isolated_test_support import make_repository, system_executable
 
-SYSTEM_LAUNCHER = Path("/usr/bin/true").resolve(strict=True)
-SYSTEM_PYTHON = Path("/usr/bin/python3").resolve(strict=True)
+
+def _system_launcher() -> Path:
+    return system_executable("true")
+
+
+def _system_python() -> Path:
+    return system_executable("python3")
 
 
 class RunnerTests(unittest.TestCase):
+    def test_trusted_executable_directories_are_canonical_and_skip_aliases(self):
+        from scripts.validation_isolation.runner import _trusted_executable_dirs
+
+        directories = _trusted_executable_dirs(_system_python())
+        self.assertTrue(directories)
+        for directory in directories:
+            self.assertEqual(directory, directory.resolve(strict=True))
+        for candidate in (Path("/usr/bin"), Path("/bin")):
+            if candidate.exists() and candidate.resolve(strict=True) != candidate:
+                self.assertNotIn(candidate, directories)
+
     def test_runs_probe_before_child_and_preserves_argv_boundary(self):
         from scripts.validation_isolation.runner import run_isolated
 
@@ -37,8 +53,8 @@ class RunnerTests(unittest.TestCase):
                     (),
                     {
                         "name": "macos",
-                        "launcher": SYSTEM_LAUNCHER,
-                        "python_executable": SYSTEM_PYTHON,
+                        "launcher": _system_launcher(),
+                        "python_executable": _system_python(),
                     },
                 )()
                 with patch("scripts.validation_isolation.runner.probe_backend"):
@@ -75,8 +91,8 @@ class RunnerTests(unittest.TestCase):
                     (),
                     {
                         "name": "macos",
-                        "launcher": SYSTEM_LAUNCHER,
-                        "python_executable": SYSTEM_PYTHON,
+                        "launcher": _system_launcher(),
+                        "python_executable": _system_python(),
                     },
                 )()
                 result = run_isolated(("false",), repository, "darwin", process_runner)
@@ -99,8 +115,8 @@ class RunnerTests(unittest.TestCase):
                     (),
                     {
                         "name": "macos",
-                        "launcher": SYSTEM_LAUNCHER,
-                        "python_executable": SYSTEM_PYTHON,
+                        "launcher": _system_launcher(),
+                        "python_executable": _system_python(),
                     },
                 )()
                 with self.assertRaisesRegex(ValueError, "output is invalid") as raised:
@@ -156,7 +172,7 @@ class RunnerTests(unittest.TestCase):
             interpreter = root / "python"
             interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             interpreter.chmod(0o755)
-            launcher = SYSTEM_LAUNCHER
+            launcher = _system_launcher()
             interpreter_item = os.lstat(interpreter)
             launcher_item = os.lstat(launcher)
             spec = backend_module.BackendSpec(
@@ -179,7 +195,7 @@ class RunnerTests(unittest.TestCase):
                 return result
 
             with (
-                patch.object(runner.sys, "executable", str(SYSTEM_PYTHON)),
+                patch.object(runner.sys, "executable", str(_system_python())),
                 patch.object(runner, "select_backend", return_value=spec),
                 patch.object(runner, "probe_backend"),
                 patch(
@@ -208,7 +224,7 @@ class RunnerTests(unittest.TestCase):
             interpreter = root / "python"
             interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             interpreter.chmod(0o755)
-            launcher = SYSTEM_LAUNCHER
+            launcher = _system_launcher()
             interpreter_item = os.lstat(interpreter)
             launcher_item = os.lstat(launcher)
             spec = backend_module.BackendSpec(
@@ -231,7 +247,7 @@ class RunnerTests(unittest.TestCase):
                     return result
 
                 with (
-                    patch.object(runner.sys, "executable", str(SYSTEM_PYTHON)),
+                    patch.object(runner.sys, "executable", str(_system_python())),
                     patch.object(runner, "select_backend", return_value=spec),
                     patch.object(runner, "probe_backend"),
                     patch(
@@ -275,8 +291,8 @@ class RunnerTests(unittest.TestCase):
                     (),
                     {
                         "name": "macos",
-                        "launcher": SYSTEM_LAUNCHER,
-                        "python_executable": SYSTEM_PYTHON,
+                        "launcher": _system_launcher(),
+                        "python_executable": _system_python(),
                     },
                 )()
                 with self.assertRaises(ValueError):
@@ -305,8 +321,8 @@ class RunnerTests(unittest.TestCase):
                     (),
                     {
                         "name": "macos",
-                        "launcher": SYSTEM_LAUNCHER,
-                        "python_executable": SYSTEM_PYTHON,
+                        "launcher": _system_launcher(),
+                        "python_executable": _system_python(),
                     },
                 )()
                 with self.assertRaises(ValueError):
@@ -341,8 +357,8 @@ class RunnerTests(unittest.TestCase):
                     (),
                     {
                         "name": "macos",
-                        "launcher": SYSTEM_LAUNCHER,
-                        "python_executable": SYSTEM_PYTHON,
+                        "launcher": _system_launcher(),
+                        "python_executable": _system_python(),
                     },
                 )()
                 with self.assertRaisesRegex(ValueError, "timed out") as raised:
@@ -372,8 +388,8 @@ class RunnerTests(unittest.TestCase):
                     (),
                     {
                         "name": "macos",
-                        "launcher": SYSTEM_LAUNCHER,
-                        "python_executable": SYSTEM_PYTHON,
+                        "launcher": _system_launcher(),
+                        "python_executable": _system_python(),
                     },
                 )()
                 with self.assertRaisesRegex(ValueError, "mutation"):
