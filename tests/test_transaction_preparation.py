@@ -269,6 +269,104 @@ class TransactionPreparationTests(unittest.TestCase):
                 tree_snapshot(home),
             )
 
+    def test_recovery_keeps_replacement_after_validation_before_cleanup(self):
+        from subagents_configs.targets import descriptor_for
+
+        home = self.root / "codex-home"
+        plan = preflight_install(
+            self.repository,
+            planning_request("install", {Target.CODEX: home}),
+        )
+        with patch.object(transaction, "_sync_and_remove_journal"):
+            transaction.apply_transaction(plan)
+        journal_path = home / ".subagents_configs/journal.json"
+        real_verify = transaction._verify_complete_journal
+
+        def verify_then_replace(home, descriptor, journal, all_journals=None):
+            result = real_verify(home, descriptor, journal, all_journals)
+            journal_path.write_bytes(b"attacker journal replacement\n")
+            journal_path.chmod(0o600)
+            return result
+
+        with patch.object(
+            transaction, "_verify_complete_journal", side_effect=verify_then_replace
+        ):
+            with self.assertRaises(transaction.TransactionError):
+                transaction._recover_single(home, descriptor_for(Target.CODEX))
+        self.assertEqual(journal_path.read_bytes(), b"attacker journal replacement\n")
+
+    def test_participant_recovery_keeps_replacement_after_validation(self):
+        homes = {
+            Target.CODEX: self.root / "codex-home",
+            Target.OPENCODE: self.root / "opencode-home",
+        }
+        plan = preflight_install(
+            self.repository,
+            planning_request("install", homes),
+        )
+        with patch.object(transaction, "_sync_and_remove_journal"):
+            transaction.apply_transaction(plan)
+        replaced_path = homes[Target.OPENCODE] / ".subagents_configs/journal.json"
+        real_verify = transaction._verify_complete_journal
+
+        def verify_then_replace(home, descriptor, journal, all_journals=None):
+            result = real_verify(home, descriptor, journal, all_journals)
+            if descriptor.target is Target.OPENCODE:
+                replaced_path.write_bytes(b"attacker participant journal\n")
+                replaced_path.chmod(0o600)
+            return result
+
+        with patch.object(
+            transaction, "_verify_complete_journal", side_effect=verify_then_replace
+        ):
+            with self.assertRaises(transaction.TransactionError):
+                transaction._recover_participants(homes)
+        self.assertEqual(replaced_path.read_bytes(), b"attacker participant journal\n")
+
+    def test_prepare_consumes_precomputed_backup_derivations(self):
+        home = self.root / "codex-home"
+        destination = home / "agents/code-explorer.toml"
+        destination.parent.mkdir(parents=True)
+        before_content = b"user bytes\n"
+        destination.write_bytes(before_content)
+        destination.chmod(0o640)
+        plan = preflight_install(
+            self.repository,
+            planning_request("install", {Target.CODEX: home}),
+        )
+        with transaction.locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+            evidence = transaction._collect_readonly_evidence(plan)
+            real_digest = transaction._digest
+
+            def fail_after_first_artifact(content):
+                if content == before_content and (home / ".subagents_configs").exists():
+                    raise AssertionError("backup digest computed after preparation")
+                return real_digest(content)
+
+            with patch.object(
+                transaction, "_digest", side_effect=fail_after_first_artifact
+            ):
+                prepared = transaction._prepare(plan, evidence)
+        self.assertTrue(prepared.journals[Target.CODEX].operations)
+
+    def test_directory_cleanup_preserves_replacement_during_atomic_detach(self):
+        home = self.root / "codex-home"
+        home.mkdir(mode=0o700)
+        target = home / "owned-directory"
+        owned: list[transaction.OwnedArtifact] = []
+        transaction._ensure_owned_directory(target, owned)
+        real_rename = os.rename
+
+        def replace_after_detach(source, destination, *args, **kwargs):
+            result = real_rename(source, destination, *args, **kwargs)
+            if Path(source).name == target.name:
+                target.mkdir(mode=0o700)
+            return result
+
+        with patch.object(os, "rename", side_effect=replace_after_detach):
+            transaction._cleanup_preparation(owned)
+        self.assertTrue(target.is_dir())
+
 
 if __name__ == "__main__":
     unittest.main()

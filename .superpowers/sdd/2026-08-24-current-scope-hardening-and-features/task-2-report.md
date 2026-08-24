@@ -97,3 +97,47 @@ Commit: `fix: bind cleanup to validated transaction identities` (final fix-round
 
 - A write wrapper that reports failure after replacement without returning identity intentionally leaves its journal for recovery; this is the fail-closed behavior required when cleanup ownership cannot be proved.
 - Existing internal exceptions remain chained for debugging, while public CLI diagnostics stay fixed and sanitized.
+
+## Fix round 2/5 — recovery authority, precomputed derivations, and directory detach
+
+Status: complete
+
+Commit: `fix: preserve validated recovery identities and atomic cleanup` (final fix-round commit)
+
+### RED / GREEN evidence
+
+- RED recovery race:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tests.test_transaction_preparation.TransactionPreparationTests.test_recovery_keeps_replacement_after_validation_before_cleanup -v`
+  failed because `_recover_single` recaptured a replacement journal as fresh cleanup authority and did not raise.
+- RED digest boundary:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tests.test_transaction_preparation.TransactionPreparationTests.test_prepare_consumes_precomputed_backup_derivations -v`
+  failed with `AssertionError: backup digest computed after preparation` from `_ensure_permanent_backup`.
+- RED directory race:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tests.test_transaction_preparation.TransactionPreparationTests.test_directory_cleanup_preserves_replacement_during_atomic_detach -v`
+  failed because pathname `rmdir` removed the replacement.
+- GREEN focused suite:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tests.test_transaction_preparation tests.test_planning tests.test_full_install_matrix tests.test_cli_integration -q`
+  — 79 tests passed.
+- GREEN full discovery:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest discover -s tests -p 'test_*.py' -q`
+  — 387 tests passed.
+- Static checks passed: `.venv/bin/ruff check subagents_configs tests`, `.venv/bin/ruff format --check subagents_configs tests`, and `git diff --check`.
+
+### Changed files in this fix round
+
+- `subagents_configs/filesystem.py`
+- `subagents_configs/transaction.py`
+- `tests/test_transaction_preparation.py`
+
+### Requirement mapping
+
+- Single-home recovery now carries the initial journal identity captured before/after load through verification and cleanup; participant recovery does the same for every mapping entry. Fresh journal recapture cannot authorize deletion after validation.
+- Backup digest checks and backup-source derivations are completed in `_collect_readonly_evidence`; `_prepare`, `_ensure_permanent_backup`, and `_transaction_backup` consume expected/precomputed values without post-artifact digest computation.
+- Directory cleanup opens and verifies the exact directory identity, atomically detaches it to an unpredictable descriptor-relative quarantine name, verifies the detached identity, and only then removes it. A replacement at the managed path remains intact.
+- Added adversarial tests for single-home and participant journal replacement races, late derivation guards, and replacement during directory cleanup. Existing lock lifetime, six-field CAS/schema, dry-run boundary, and strict matrix behavior remain intact.
+
+### Self-review and concerns
+
+- Recovery retains the attacker replacement and raises a typed cleanup error; participant cleanup cannot use a post-validation journal identity.
+- The quarantine path is random and descriptor-relative; if detach identity or removal cannot be proved, cleanup restores when safe or leaves evidence in place.
+- No Task 9 strict dry-run, Pi, network, or unrelated behavior was added.

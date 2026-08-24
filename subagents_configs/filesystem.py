@@ -365,6 +365,69 @@ def ensure_private_directory(path: Path) -> None:
     ensure_directory(path, private=True)
 
 
+def remove_owned_directory(
+    path: Path, expected_identity: tuple[int, int, int, int]
+) -> None:
+    """Detach and remove a directory only after proving its opened identity."""
+
+    target = normalized_absolute(path)
+    with _pinned_directory(target.parent, "owned-directory cleanup") as parent_fd:
+        _after_parent_pin("owned-directory-cleanup", target.parent)
+        descriptor = _open_directory_component(
+            target.name, parent_fd, "owned-directory cleanup"
+        )
+        try:
+            result = os.fstat(descriptor)
+            identity = (
+                result.st_dev,
+                result.st_ino,
+                result.st_nlink,
+                stat.S_IMODE(result.st_mode),
+            )
+            if identity != expected_identity:
+                return
+            quarantine_name = f".{target.name}.cleanup-{secrets.token_hex(16)}"
+            os.rename(
+                target.name,
+                quarantine_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            moved = _stat_at_no_follow(parent_fd, quarantine_name)
+            if moved is None or (moved.st_dev, moved.st_ino) != (
+                result.st_dev,
+                result.st_ino,
+            ):
+                try:
+                    if _stat_at_no_follow(parent_fd, target.name) is None:
+                        os.rename(
+                            quarantine_name,
+                            target.name,
+                            src_dir_fd=parent_fd,
+                            dst_dir_fd=parent_fd,
+                        )
+                except OSError:
+                    pass
+                return
+            try:
+                os.rmdir(quarantine_name, dir_fd=parent_fd)
+            except BaseException:
+                try:
+                    if _stat_at_no_follow(parent_fd, target.name) is None:
+                        os.rename(
+                            quarantine_name,
+                            target.name,
+                            src_dir_fd=parent_fd,
+                            dst_dir_fd=parent_fd,
+                        )
+                except OSError:
+                    pass
+                raise
+            _sync_parent_directory_fd(parent_fd)
+        finally:
+            os.close(descriptor)
+
+
 def _sync_parent_directory_fd(descriptor: int) -> None:
     try:
         os.fsync(descriptor)

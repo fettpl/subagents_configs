@@ -778,19 +778,16 @@ def _ensure_permanent_backup(
         )
         if before_content is None:
             raise TransactionPreparationError("backup source evidence is missing")
-        digest = _digest(before_content)
+        if operation.expected_before_hash != entry.backup_hash:
+            raise TransactionPreparationError(
+                "permanent backup does not match before-state"
+            )
         identity = filesystem.exclusive_write(destination, before_content, 0o600)
         _record_owned(prepared.owned, destination, "backup", identity)
         prepared.backup_evidence[destination] = identity
         prepared.backup_contents[destination] = before_content
-        if digest != entry.backup_hash or digest != operation.expected_before_hash:
-            raise ValueError("permanent backup does not match before-state")
         return
-    if (
-        existing_content is None
-        or _digest(existing_content) != entry.backup_hash
-        or existing_identity is None
-    ):
+    if existing_content is None or existing_identity is None:
         raise ValueError("permanent backup hash does not match manifest")
 
 
@@ -820,7 +817,11 @@ def _transaction_backup(
         raise TransactionPreparationError(
             "transaction backup source evidence is missing"
         )
-    digest = _digest(before_content)
+    digest = operation.expected_before_hash
+    if digest is None:
+        raise TransactionPreparationError(
+            "transaction backup source evidence is missing"
+        )
     try:
         identity = filesystem.exclusive_write(destination, before_content, 0o600)
     except FileExistsError as exc:
@@ -828,8 +829,6 @@ def _transaction_backup(
     _record_owned(prepared.owned, destination, "backup", identity)
     prepared.backup_evidence[destination] = identity
     prepared.backup_contents[destination] = before_content
-    if digest != operation.expected_before_hash:
-        raise ValueError("transaction backup does not match before-state")
     prepared.backups[key] = (relative, digest)
     return relative, digest
 
@@ -1038,16 +1037,9 @@ def _cleanup_preparation(owned: Sequence[OwnedArtifact]) -> None:
             continue
         try:
             if artifact.kind == "directory":
-                item = artifact.path.lstat()
-                identity = (
-                    item.st_dev,
-                    item.st_ino,
-                    item.st_nlink,
-                    stat.S_IMODE(item.st_mode),
-                )
-                if identity != artifact.identity or not stat.S_ISDIR(item.st_mode):
+                if not isinstance(artifact.identity, tuple):
                     continue
-                artifact.path.rmdir()
+                filesystem.remove_owned_directory(artifact.path, artifact.identity)
                 continue
             current = capture_evidence(artifact.path, "preparation cleanup")
             if current != artifact.identity:
@@ -1104,6 +1096,11 @@ def _collect_readonly_evidence(
                         or _digest(backup[0]) != entry.backup_hash
                     ):
                         raise TransactionError("backup evidence is invalid")
+                elif (
+                    operation.expected_before_hash != entry.backup_hash
+                    or entry.backup_hash is None
+                ):
+                    raise TransactionError("backup evidence is invalid")
                 backup_records.append(
                     (
                         backup_path,
@@ -1406,14 +1403,13 @@ def _sync_and_remove_journal(
 
 
 def _validated_journal_evidence(
-    home: Path, journal: Journal
+    home: Path,
+    journal: Journal,
+    *,
+    journal_identity: IdentityEvidence,
 ) -> tuple[IdentityEvidence, dict[Path, IdentityEvidence]]:
-    """Capture cleanup identities only after validating the loaded journal."""
+    """Capture backup identities while retaining the loaded journal identity."""
 
-    journal_path = _journal_path(home)
-    journal_identity = capture_evidence(journal_path, "validated journal")
-    if journal_identity is None:
-        raise IncompleteRollbackError("validated journal is missing")
     backups: dict[Path, IdentityEvidence] = {}
     for operation in journal.operations:
         if operation.backup_path is None:
@@ -1758,7 +1754,9 @@ def _recover_single(home: Path, descriptor) -> None:
             _verify_rollback_complete_journal(home, descriptor, journal)
         else:
             _verify_complete_journal(home, descriptor, journal)
-        journal_identity, backup_evidence = _validated_journal_evidence(home, journal)
+        journal_identity, backup_evidence = _validated_journal_evidence(
+            home, journal, journal_identity=loaded_identity
+        )
         _sync_and_remove_journal(
             home,
             journal,
@@ -1798,7 +1796,9 @@ def _recover_single(home: Path, descriptor) -> None:
             errors.append("rollback operation evidence is invalid")
     if errors:
         raise IncompleteRollbackError("; ".join(errors))
-    journal_identity, backup_evidence = _validated_journal_evidence(home, journal)
+    journal_identity, backup_evidence = _validated_journal_evidence(
+        home, journal, journal_identity=loaded_identity
+    )
     _sync_and_remove_journal(
         home,
         journal,
@@ -1831,9 +1831,9 @@ def _recover_participants(homes: Mapping[Target, Path]) -> None:
                 "participant journal changed during validation"
             )
         journals[target] = journal
-        journal_evidence[target] = validated_identity
+        journal_evidence[target] = loaded_identity
         _, backup_evidence_by_target[target] = _validated_journal_evidence(
-            home, journal
+            home, journal, journal_identity=loaded_identity
         )
     first = next(iter(journals.values()))
     participants = first.participants
