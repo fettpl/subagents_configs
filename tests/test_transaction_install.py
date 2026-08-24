@@ -1245,7 +1245,7 @@ class TransactionInstallTests(unittest.TestCase):
                 (self._home(target) / ".subagents_configs/journal.json").exists()
             )
 
-    def test_post_replace_journal_failure_also_cleans_every_installed_journal(self):
+    def test_post_replace_journal_failure_retains_unproven_journal(self):
         from subagents_configs import transaction
         from subagents_configs.transaction import apply_transaction
 
@@ -1266,10 +1266,15 @@ class TransactionInstallTests(unittest.TestCase):
         with patch.object(transaction.filesystem, "atomic_write", fail_after_replace):
             with self.assertRaises(transaction.TransactionPreparationError):
                 apply_transaction(plan)
-        for target in (Target.CODEX, Target.OPENCODE):
-            self.assertFalse(
-                (self._home(target) / ".subagents_configs/journal.json").exists()
-            )
+        self.assertFalse(
+            (self._home(Target.CODEX) / ".subagents_configs/journal.json").exists()
+        )
+        # The second atomic write replaced its journal before reporting the
+        # post-replace failure. Its exact identity was not returned, so the
+        # preparation cleanup must retain that recovery evidence.
+        self.assertTrue(
+            (self._home(Target.OPENCODE) / ".subagents_configs/journal.json").exists()
+        )
 
     def test_injected_baseexception_rolls_back_then_reraises_primary(self):
         from subagents_configs.transaction import apply_transaction
@@ -1413,8 +1418,10 @@ class TransactionInstallTests(unittest.TestCase):
         ):
             with self.assertRaises(transaction.IncompleteRollbackError) as error:
                 apply_transaction(plan, FailBefore())
-        self.assertIn("primary failure", str(error.exception))
-        self.assertIn("cleanup", str(error.exception))
+        self.assertEqual(
+            str(error.exception),
+            "transaction failed and rolled back, but journal cleanup failed",
+        )
         self.assertTrue((self._home() / ".subagents_configs/journal.json").exists())
 
     def test_environment_cannot_activate_a_failure_injector(self):
@@ -1554,7 +1561,7 @@ class TransactionInstallTests(unittest.TestCase):
             "sync_directory",
             side_effect=[OSError("state fsync failed"), None],
         ):
-            with self.assertRaises(OSError):
+            with self.assertRaises(transaction.TransactionError):
                 transaction.recover_incomplete_journal(home, descriptor)
         self.assertTrue((home / ".subagents_configs/journal.json").exists())
         transaction.recover_incomplete_journal(home, descriptor)
@@ -1581,8 +1588,9 @@ class TransactionInstallTests(unittest.TestCase):
         ):
             with self.assertRaises(transaction.TransactionError) as error:
                 transaction.recover_incomplete_journal(home, descriptor)
-        self.assertIn("state fsync failed", str(error.exception))
-        self.assertIn("journal recreate failed", str(error.exception))
+        self.assertEqual(
+            str(error.exception), "journal restoration could not be proved"
+        )
 
     def test_complete_recovery_rejects_sparse_journal_with_original_transaction_id(
         self,

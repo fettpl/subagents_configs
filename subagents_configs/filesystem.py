@@ -110,17 +110,23 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _evidence_from_descriptor(descriptor: int, label: str) -> IdentityEvidence:
+def _evidence_from_descriptor(
+    descriptor: int, label: str, *, known_content: bytes | None = None
+) -> IdentityEvidence:
     result = os.fstat(descriptor)
     if not stat.S_ISREG(result.st_mode):
         raise ValueError(f"{label} must be a regular file")
-    digest = hashlib.sha256()
-    os.lseek(descriptor, 0, os.SEEK_SET)
-    while True:
-        chunk = os.read(descriptor, _CHUNK_SIZE)
-        if not chunk:
-            break
-        digest.update(chunk)
+    if known_content is None:
+        digest = hashlib.sha256()
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(descriptor, _CHUNK_SIZE)
+            if not chunk:
+                break
+            digest.update(chunk)
+        sha256 = digest.hexdigest()
+    else:
+        sha256 = hashlib.sha256(known_content).hexdigest()
     after = os.fstat(descriptor)
     if (
         result.st_dev,
@@ -142,7 +148,7 @@ def _evidence_from_descriptor(descriptor: int, label: str) -> IdentityEvidence:
         size=result.st_size,
         nlink=result.st_nlink,
         mode=stat.S_IMODE(result.st_mode),
-        sha256=digest.hexdigest(),
+        sha256=sha256,
     )
 
 
@@ -305,12 +311,15 @@ def compare_and_swap(
             os.close(descriptor)
 
 
-def ensure_directory(path: Path, *, private: bool = False) -> None:
+def ensure_directory(
+    path: Path, *, private: bool = False
+) -> list[tuple[Path, tuple[int, int, int, int]]]:
     """Create a directory chain without following existing links."""
 
     absolute = normalized_absolute(path)
     descriptor = os.open("/", _DIRECTORY_FLAGS)
     current = Path(absolute.anchor)
+    created_identities: list[tuple[Path, tuple[int, int, int, int]]] = []
     try:
         components = absolute.parts[1:]
         for index, component in enumerate(components):
@@ -332,8 +341,22 @@ def ensure_directory(path: Path, *, private: bool = False) -> None:
             if index == len(components) - 1 and not created and private:
                 if stat.S_IMODE(os.fstat(descriptor).st_mode) & 0o077:
                     raise ValueError(f"existing directory is not private: {current}")
+            if created:
+                result = os.fstat(descriptor)
+                created_identities.append(
+                    (
+                        current,
+                        (
+                            result.st_dev,
+                            result.st_ino,
+                            result.st_nlink,
+                            stat.S_IMODE(result.st_mode),
+                        ),
+                    )
+                )
     finally:
         os.close(descriptor)
+    return created_identities
 
 
 def ensure_private_directory(path: Path) -> None:
@@ -363,7 +386,7 @@ def _temporary_path(parent: Path, target: Path) -> Path:
     return parent / f".{target.name}.tmp-{secrets.token_hex(16)}"
 
 
-def atomic_write(path: Path, content: bytes, mode: int = 0o600) -> None:
+def atomic_write(path: Path, content: bytes, mode: int = 0o600) -> IdentityEvidence:
     """Replace a regular target with complete, durably flushed bytes."""
 
     if not isinstance(content, bytes):
@@ -389,6 +412,9 @@ def atomic_write(path: Path, content: bytes, mode: int = 0o600) -> None:
             _write_all(descriptor, content)
             os.fchmod(descriptor, mode)
             os.fsync(descriptor)
+            evidence = _evidence_from_descriptor(
+                descriptor, "atomic-write target", known_content=content
+            )
             expected_identity = os.fstat(descriptor)
             os.replace(
                 temporary.name,
@@ -409,6 +435,7 @@ def atomic_write(path: Path, content: bytes, mode: int = 0o600) -> None:
             os.close(descriptor)
             descriptor = None
             _sync_parent_directory_fd(parent_fd)
+            return evidence
         finally:
             if descriptor is not None:
                 try:
@@ -510,7 +537,7 @@ def exclusive_backup(source: Path, destination: Path) -> str:
         os.close(source_descriptor)
 
 
-def exclusive_write(path: Path, content: bytes, mode: int = 0o600) -> None:
+def exclusive_write(path: Path, content: bytes, mode: int = 0o600) -> IdentityEvidence:
     """Create private bytes exactly once and durably flush file and parent."""
 
     if not isinstance(content, bytes):
@@ -531,9 +558,13 @@ def exclusive_write(path: Path, content: bytes, mode: int = 0o600) -> None:
             _write_all(descriptor, content)
             os.fchmod(descriptor, mode)
             os.fsync(descriptor)
+            evidence = _evidence_from_descriptor(
+                descriptor, "exclusive-write target", known_content=content
+            )
             os.close(descriptor)
             descriptor = None
             _sync_parent_directory_fd(parent_fd)
+            return evidence
         except BaseException:
             if descriptor is not None:
                 try:

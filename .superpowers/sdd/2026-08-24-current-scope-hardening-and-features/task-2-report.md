@@ -43,3 +43,57 @@ Commit: `fix: separate preflight evidence from transaction preparation` (this ta
 
 - The existing transaction diagnostic exception strings retain internal exception chaining for callers/tests, while CLI output remains fixed and sanitized. A later diagnostics task can centralize the typed public rendering without changing this transaction boundary.
 - The task adds three focused tests, bringing discovery from the 374-test baseline to 377 tests.
+
+## Fix round 1/5 — identity-bound cleanup and late-read boundary
+
+Status: complete
+
+Commit: `fix: bind cleanup to validated transaction identities` (final fix-round commit)
+
+### RED / GREEN evidence
+
+- RED (adversarial cleanup tests):
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tests.test_transaction_preparation tests.test_planning -v`
+  initially exposed journal cleanup lacking the required identity argument and directory replacement being treated as installer-owned.
+- RED (write-identity regression):
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tests.test_transaction_preparation tests.test_transaction_install -q`
+  observed 70 tests with 56 `OSError: [Errno 9] Bad file descriptor` errors after attempting to read write-only descriptors, plus two cascading cleanup/preparation failures.
+- GREEN focused transaction suites:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tests.test_transaction_preparation tests.test_transaction_install -q`
+  — 70 tests passed.
+- GREEN exact brief suite:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tests.test_transaction_preparation tests.test_planning tests.test_full_install_matrix tests.test_cli_integration -v`
+  — 75 tests passed.
+- GREEN full discovery:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest discover -s tests -p 'test_*.py' -q`
+  — 383 tests passed.
+- Static checks passed: `.venv/bin/ruff check subagents_configs tests`, `.venv/bin/ruff format --check subagents_configs tests`, and `git diff --check`.
+
+### Changed files in this fix round
+
+- `subagents_configs/filesystem.py`
+- `subagents_configs/transaction.py`
+- `tests/test_transaction_preparation.py`
+- `tests/test_transaction_install.py`
+- `tests/test_full_install_matrix.py`
+
+### Requirement mapping
+
+- Journal cleanup now requires validated `IdentityEvidence` for the journal and every referenced backup, verifies identity immediately before unlink, and fails closed for missing/replaced/changed artifacts.
+- Journal restoration after unlink or directory-sync failure uses expected-absence CAS only; an attacker-created replacement is never overwritten. Fixed typed diagnostics preserve the primary failure and avoid raw underlying exception interpolation.
+- Read-only evidence captures source bytes, backup bytes, validation, identity, and derived backup inputs before `_prepare`; `_transaction_backup` consumes those precomputed bytes and performs no late source/backup read.
+- Directory ownership records only exact identities returned from this invocation’s directory creation; cleanup checks identity and removes in reverse order, never claiming a concurrent/pre-existing replacement.
+- Write primitives return exact identity evidence from the still-open descriptor using known payload bytes, avoiding a post-close capture race. Preparation records returned marker/journal identities directly; uncertain post-replace writes are retained as recovery evidence.
+- `OwnedArtifact.identity` uses the concrete `IdentityEvidence | DirectoryIdentity` union. Task 1 six-field CAS/schema contracts, persistent lock anchors, lock lifetime, dry-run boundary, and strict matrix snapshots remain unchanged.
+
+### Self-review
+
+- Added adversarial coverage for replaced/missing journals and backups, restoration replacement races, directory ownership races, and late backup-read zero-write behavior.
+- Recovery, rollback, apply, and cleanup callers thread the identity captured at validation or write time. Cleanup-only errors remain typed and cannot replace the primary sanitized diagnostic.
+- The post-replace journal-write failure test now asserts the safe outcome: a journal whose exact identity was not returned is retained rather than guessed at and deleted.
+- No Task 9 strict dry-run, Pi, network, package-manager, service, telemetry, or unrelated behavior was added.
+
+### Concerns
+
+- A write wrapper that reports failure after replacement without returning identity intentionally leaves its journal for recovery; this is the fail-closed behavior required when cleanup ownership cannot be proved.
+- Existing internal exceptions remain chained for debugging, while public CLI diagnostics stay fixed and sanitized.

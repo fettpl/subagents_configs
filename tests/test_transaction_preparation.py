@@ -1,5 +1,7 @@
 import io
+import os
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -7,6 +9,7 @@ from subagents_configs import transaction
 from subagents_configs.models import Target
 from subagents_configs.orchestrator import EXIT_INCOMPLETE_ROLLBACK, run
 from subagents_configs.planning import preflight_install
+from subagents_configs.state import encode_journal
 from tests.helpers import (
     planning_repository,
     planning_request,
@@ -107,6 +110,164 @@ class TransactionPreparationTests(unittest.TestCase):
         self.assertEqual(status, EXIT_INCOMPLETE_ROLLBACK)
         self.assertEqual(err.getvalue(), "error: apply failed; rollback incomplete\n")
         self.assertNotIn("cleanup-only failure", err.getvalue())
+
+    def _prepared(self, home, *, preexisting=False):
+        if preexisting:
+            destination = home / "agents/code-explorer.toml"
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(b"user bytes\n")
+            destination.chmod(0o640)
+        plan = preflight_install(
+            self.repository,
+            planning_request("install", {Target.CODEX: home}),
+        )
+        with transaction.locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+            evidence = transaction._collect_readonly_evidence(plan)
+            return transaction._prepare(plan, evidence)
+
+    def test_journal_replacement_after_validation_is_retained(self):
+        home = self.root / "codex-home"
+        prepared = self._prepared(home)
+        journal = prepared.journals[Target.CODEX]
+        path = home / ".subagents_configs/journal.json"
+        expected = transaction.capture_evidence(path, "test journal")
+        replacement = replace(journal, transaction_id="attacker-replacement")
+        path.write_bytes(encode_journal(replacement))
+        path.chmod(0o600)
+        with self.assertRaises(transaction.TransactionError):
+            transaction._sync_and_remove_journal(
+                home, journal, journal_evidence=expected
+            )
+        self.assertEqual(path.read_bytes(), encode_journal(replacement))
+
+    def test_backup_replacement_after_validation_is_retained_with_journal(self):
+        home = self.root / "codex-home"
+        prepared = self._prepared(home, preexisting=True)
+        journal = prepared.journals[Target.CODEX]
+        operation = next(
+            item for item in journal.operations if item.backup_path is not None
+        )
+        journal_path = home / ".subagents_configs/journal.json"
+        journal_evidence = transaction.capture_evidence(journal_path, "test journal")
+        backup_path = home / ".subagents_configs" / operation.backup_path
+        backup_evidence = transaction.capture_evidence(backup_path, "test backup")
+        backup_path.write_bytes(b"attacker backup\n")
+        backup_path.chmod(0o600)
+        with self.assertRaises(transaction.TransactionError):
+            transaction._sync_and_remove_journal(
+                home,
+                journal,
+                journal_evidence=journal_evidence,
+                backup_evidence={backup_path: backup_evidence},
+            )
+        self.assertTrue(journal_path.exists())
+        self.assertEqual(backup_path.read_bytes(), b"attacker backup\n")
+
+    def test_missing_journal_or_backup_fails_closed(self):
+        home = self.root / "codex-home"
+        prepared = self._prepared(home, preexisting=True)
+        journal = prepared.journals[Target.CODEX]
+        journal_path = home / ".subagents_configs/journal.json"
+        journal_evidence = transaction.capture_evidence(journal_path, "test journal")
+        operation = next(
+            item for item in journal.operations if item.backup_path is not None
+        )
+        backup_path = home / ".subagents_configs" / operation.backup_path
+        backup_evidence = transaction.capture_evidence(backup_path, "test backup")
+        journal_path.unlink()
+        with self.assertRaises(transaction.TransactionError):
+            transaction._sync_and_remove_journal(
+                home,
+                journal,
+                journal_evidence=journal_evidence,
+                backup_evidence={backup_path: backup_evidence},
+            )
+        journal_path.write_bytes(encode_journal(journal))
+        journal_path.chmod(0o600)
+        journal_evidence = transaction.capture_evidence(journal_path, "test journal")
+        backup_path.unlink()
+        with self.assertRaises(transaction.TransactionError):
+            transaction._sync_and_remove_journal(
+                home,
+                journal,
+                journal_evidence=journal_evidence,
+                backup_evidence={backup_path: backup_evidence},
+            )
+        self.assertTrue(journal_path.exists())
+
+    def test_journal_restore_does_not_overwrite_replacement(self):
+        home = self.root / "codex-home"
+        prepared = self._prepared(home)
+        journal = prepared.journals[Target.CODEX]
+        journal_path = home / ".subagents_configs/journal.json"
+        expected = transaction.capture_evidence(journal_path, "test journal")
+        real_cas = transaction.filesystem.compare_and_swap
+
+        def race(path, before, content, mode, action):
+            if action == "unlink":
+                result = real_cas(path, before, content, mode, action)
+                journal_path.write_bytes(b"attacker replacement\n")
+                journal_path.chmod(0o600)
+                return result
+            return real_cas(path, before, content, mode, action)
+
+        with (
+            patch.object(transaction.filesystem, "compare_and_swap", side_effect=race),
+            patch.object(
+                transaction.filesystem,
+                "sync_directory",
+                side_effect=[OSError("sync failure"), None],
+            ),
+        ):
+            with self.assertRaises(transaction.TransactionError):
+                transaction._sync_and_remove_journal(
+                    home, journal, journal_evidence=expected
+                )
+        self.assertEqual(journal_path.read_bytes(), b"attacker replacement\n")
+
+    def test_directory_identity_race_is_not_recorded_for_cleanup(self):
+        home = self.root / "codex-home"
+        home.mkdir(mode=0o700)
+        target = home / "agents"
+        owned = []
+        real_ensure = transaction.filesystem.ensure_directory
+
+        def race(path, *, private=False):
+            created = real_ensure(path, private=private)
+            if Path(path) == target:
+                replacement = target.with_name("agents-replacement")
+                replacement.mkdir(mode=0o700)
+                os.replace(replacement, target)
+            return created
+
+        with patch.object(transaction.filesystem, "ensure_directory", side_effect=race):
+            transaction._ensure_owned_directory(target, owned)
+        transaction._cleanup_preparation(owned)
+        self.assertTrue(target.is_dir())
+
+    def test_late_backup_read_fails_before_preparation_writes(self):
+        home = self.root / "codex-home"
+        destination = home / "agents/code-explorer.toml"
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(b"user bytes\n")
+        destination.chmod(0o640)
+        plan = preflight_install(
+            self.repository,
+            planning_request("install", {Target.CODEX: home}),
+        )
+        before = tree_snapshot(home)
+        with transaction.locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+            with patch.object(
+                transaction,
+                "_read_regular",
+                side_effect=OSError("late backup read"),
+            ):
+                with self.assertRaises(OSError):
+                    transaction._collect_readonly_evidence(plan)
+            self.assertEqual(
+                before | {".subagents_configs.lock": ("file", 0o600, b"")},
+                tree_snapshot(home),
+            )
 
 
 if __name__ == "__main__":

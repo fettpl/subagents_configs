@@ -123,9 +123,9 @@ class FullInstallMatrixTests(unittest.TestCase):
         journals = {}
         real_cleanup = transaction._sync_and_remove_journal
 
-        def capture(home, journal):
+        def capture(home, journal, *args, **kwargs):
             journals[journal.target] = journal
-            return real_cleanup(home, journal)
+            return real_cleanup(home, journal, *args, **kwargs)
 
         with patch.object(transaction, "_sync_and_remove_journal", side_effect=capture):
             result = self._run(operation, argv, root, repository=repository)
