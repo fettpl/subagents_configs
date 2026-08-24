@@ -172,7 +172,7 @@ class PlanningTests(unittest.TestCase):
             for item in first.resulting_manifest.entries
             if item.identifier == "codex-multi-agent-v2"
         )
-        self._write_manifest(home, Manifest(1, Target.CODEX, (entry,)))
+        self._write_manifest(home, Manifest(2, Target.CODEX, (entry,)))
         second = preflight_install(
             self.repository,
             planning_request(
@@ -193,7 +193,7 @@ class PlanningTests(unittest.TestCase):
         entry = self._manifest_entry(
             "commit-pusher", "agents/commit-pusher.toml", content
         )
-        self._write_manifest(home, Manifest(1, Target.CODEX, (entry,)))
+        self._write_manifest(home, Manifest(2, Target.CODEX, (entry,)))
         plan = preflight_install(
             self.repository,
             planning_request("install", {Target.CODEX: home}),
@@ -226,7 +226,7 @@ class PlanningTests(unittest.TestCase):
             for item in first.resulting_manifest.entries
             if item.identifier == "code-explorer"
         )
-        self._write_manifest(home, Manifest(1, Target.CODEX, (entry,)))
+        self._write_manifest(home, Manifest(2, Target.CODEX, (entry,)))
         source = self.repository / "agents/code-explorer.toml"
         try:
             source.write_bytes(original + b"\n# source update\n")
@@ -274,7 +274,7 @@ class PlanningTests(unittest.TestCase):
         )
         self.assertEqual(entry.ownership, "preexisting")
         self.assertEqual(entry.original_mode, 0o600)
-        self._write_manifest(home, Manifest(1, Target.CODEX, (entry,)))
+        self._write_manifest(home, Manifest(2, Target.CODEX, (entry,)))
         uninstall = preflight_uninstall(
             self.repository,
             planning_request("uninstall", {Target.CODEX: home}),
@@ -533,7 +533,7 @@ class PlanningTests(unittest.TestCase):
             source.read_bytes(),
             unresolved_reason="previous drift",
         )
-        self._write_manifest(home, Manifest(1, Target.CODEX, (entry,)))
+        self._write_manifest(home, Manifest(2, Target.CODEX, (entry,)))
         plan = preflight_install(
             self.repository,
             planning_request("install", {Target.CODEX: home}),
@@ -573,7 +573,7 @@ class PlanningTests(unittest.TestCase):
             installed_block_hash=source_block.sha256,
             unresolved_reason="previous drift",
         )
-        self._write_manifest(home, Manifest(1, Target.CODEX, (entry,)))
+        self._write_manifest(home, Manifest(2, Target.CODEX, (entry,)))
         plan = preflight_install(
             self.repository,
             planning_request(
@@ -603,7 +603,7 @@ class PlanningTests(unittest.TestCase):
             entry = self._manifest_entry(
                 "commit-pusher", "agents/commit-pusher.toml", b"managed"
             )
-            self._write_manifest(home, Manifest(1, Target.CODEX, (entry,)))
+            self._write_manifest(home, Manifest(2, Target.CODEX, (entry,)))
             plan = preflight_install(
                 self.repository,
                 planning_request("install", {Target.CODEX: home}),
@@ -863,7 +863,7 @@ class PlanningTests(unittest.TestCase):
         )
         self._write_manifest(
             home,
-            Manifest(1, Target.CODEX, (entry,)),
+            Manifest(2, Target.CODEX, (entry,)),
         )
         before = destination.stat()
         second = preflight_install(
@@ -958,7 +958,7 @@ class PlanningTests(unittest.TestCase):
         backup.write_bytes(replaced_original)
         backup.chmod(0o600)
         manifest = Manifest(
-            1,
+            2,
             Target.CODEX,
             (
                 self._manifest_entry(
@@ -1133,7 +1133,7 @@ class PlanningTests(unittest.TestCase):
         self._write_manifest(
             home,
             Manifest(
-                1,
+                2,
                 Target.CODEX,
                 (
                     self._manifest_entry(

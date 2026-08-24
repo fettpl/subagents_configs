@@ -383,6 +383,7 @@ class FullInstallMatrixTests(unittest.TestCase):
                 self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
 
     def _assert_exact_inventory(self, home: Path, expected: set[str]) -> None:
+        expected = {*expected, ".subagents_configs.lock"}
         entries = {
             path.relative_to(home).as_posix(): path.lstat() for path in home.rglob("*")
         }
@@ -416,6 +417,11 @@ class FullInstallMatrixTests(unittest.TestCase):
                 "agents",
             },
         )
+        lock = home / ".subagents_configs.lock"
+        lock_item = lock.lstat()
+        self.assertTrue(stat.S_ISREG(lock_item.st_mode))
+        self.assertEqual(lock_item.st_nlink, 1)
+        self.assertEqual(stat.S_IMODE(lock_item.st_mode), 0o600)
 
     def _assert_exact_extra_files(
         self,
@@ -928,6 +934,11 @@ class FullInstallMatrixTests(unittest.TestCase):
                                     if operation["backup_path"] is not None
                                 }
                                 expected_after = dict(before[target])
+                                expected_after[".subagents_configs.lock"] = (
+                                    "file",
+                                    0o600,
+                                    b"",
+                                )
                                 for relative in transaction_backups:
                                     expected_after.pop(relative, None)
                                 expected_after.pop(
@@ -1106,6 +1117,7 @@ class FullInstallMatrixTests(unittest.TestCase):
                                 drifted.relative_to(home).as_posix(),
                             }
                         expected_files |= {"user-notes.txt", "user-link"}
+                        expected_files.add(".subagents_configs.lock")
                         actual_files = {
                             path.relative_to(home).as_posix()
                             for path in home.rglob("*")
@@ -1455,6 +1467,7 @@ class FullInstallMatrixTests(unittest.TestCase):
                     for target in selected:
                         expected_recovery[target].update(
                             {
+                                ".subagents_configs.lock": ("file", 0o600, b""),
                                 ".subagents_configs": ("directory", 0o700, None),
                                 ".subagents_configs/backups": (
                                     "directory",
