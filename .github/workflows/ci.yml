@@ -32,8 +32,10 @@ jobs:
           trap 'rm -rf "$ci_root"' EXIT
           mkdir -p "$ci_root/home" "$ci_root/codex" "$ci_root/opencode" "$ci_root/claude" "$ci_root/tmp"
           mkdir -p "$ci_root/pycache"
+          mkdir -p "$ci_root/ruff-cache"
           chmod 700 "$ci_root" "$ci_root/home" "$ci_root/codex" "$ci_root/opencode" "$ci_root/claude" "$ci_root/tmp"
           chmod 700 "$ci_root/pycache"
+          chmod 700 "$ci_root/ruff-cache"
           export HOME="$ci_root/home"
           export CODEX_HOME="$ci_root/codex"
           export OPENCODE_HOME="$ci_root/opencode"
@@ -41,6 +43,7 @@ jobs:
           export TMPDIR="$ci_root/tmp"
           export PYTHONDONTWRITEBYTECODE=1
           export PYTHONPYCACHEPREFIX="$ci_root/pycache"
+          export RUFF_CACHE_DIR="$ci_root/ruff-cache"
 
           bwrap=""
           for candidate in /usr/bin/bwrap /bin/bwrap; do

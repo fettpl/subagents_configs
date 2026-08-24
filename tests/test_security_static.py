@@ -203,7 +203,7 @@ def _wrapper_issues_from_source(
 ) -> list[str]:
     lines = tuple(source.splitlines())
     issues: list[str] = []
-    if len(lines) != 11:
+    if len(lines) < 11:
         issues.append("wrapper shape")
     if sum(line.startswith("exec ") for line in lines) != 1:
         issues.append("wrapper exec count")
@@ -225,8 +225,36 @@ def _expected_wrapper_lines(relative: str) -> tuple[str, ...]:
     if relative in {"install.sh", "uninstall.sh"}:
         operation = relative.removesuffix(".sh")
         final = (
-            f'exec python3 -I "$SCRIPT_DIR/scripts/manage-subagents-configs.py" '
+            f'exec "$PYTHON" -I "$SCRIPT_DIR/scripts/manage-subagents-configs.py" '
             f'{operation} "$@"'
+        )
+        return (
+            "#!/bin/sh",
+            "set -eu",
+            "umask 077",
+            "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+            "export PATH",
+            'if [ -L "$0" ]; then',
+            '    echo "error: wrapper invocation must not be a symlink" >&2',
+            "    exit 2",
+            "fi",
+            'SCRIPT_DIR=$(CDPATH=\'\' cd -- "$(dirname -- "$0")" && pwd -P)',
+            'if [ "${SUBAGENTS_CONFIGS_PYTHON+x}" = x ]; then',
+            "    PYTHON=$SUBAGENTS_CONFIGS_PYTHON",
+            '    case "$PYTHON" in',
+            "        /*) ;;",
+            '        *) echo "error: SUBAGENTS_CONFIGS_PYTHON must be an '
+            'absolute path" >&2; exit 2 ;;',
+            "    esac",
+            '    if [ ! -f "$PYTHON" ] || [ ! -x "$PYTHON" ]; then',
+            '        echo "error: SUBAGENTS_CONFIGS_PYTHON must name an '
+            'executable file" >&2',
+            "        exit 2",
+            "    fi",
+            "else",
+            "    PYTHON=python3",
+            "fi",
+            final,
         )
     else:
         operation, target = relative.removesuffix(".sh").split("-", 1)
@@ -372,10 +400,9 @@ class StaticSecurityTests(unittest.TestCase):
                 self.assertTrue(path.stat().st_mode & stat.S_IXUSR)
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode) & 0o022, 0)
                 source = path.read_text(encoding="utf-8")
+                expected = _expected_wrapper_lines(relative)
                 self.assertEqual(
-                    _wrapper_issues_from_source(
-                        source, _expected_wrapper_lines(relative)
-                    ),
+                    _wrapper_issues_from_source(source, expected),
                     [],
                 )
                 self.assertRegex(source, r"(?m)^umask 077$")
@@ -390,7 +417,13 @@ class StaticSecurityTests(unittest.TestCase):
                 self.assertNotRegex(source, r"python(?:3)?\s+-c")
                 self.assertRegex(source, r"(?m)^exec .+$")
                 if relative in {"install.sh", "uninstall.sh"}:
-                    self.assertIn("python3 -I", source)
+                    self.assertIn("SUBAGENTS_CONFIGS_PYTHON", source)
+                    self.assertIn("PYTHON=python3", source)
+                    self.assertIn(
+                        'exec "$PYTHON" -I '
+                        '"$SCRIPT_DIR/scripts/manage-subagents-configs.py"',
+                        source,
+                    )
                 else:
                     base = (
                         "install.sh"

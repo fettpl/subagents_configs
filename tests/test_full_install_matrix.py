@@ -169,7 +169,12 @@ class FullInstallMatrixTests(unittest.TestCase):
             }
             plan = preflight_install(
                 self.repository,
-                planning_request("install", homes, targets=selected),
+                planning_request(
+                    "install",
+                    homes,
+                    targets=selected,
+                    include_commit_pusher=True,
+                ),
             )
             for target_plan in plan.targets:
                 for operation in target_plan.operations:
@@ -179,6 +184,7 @@ class FullInstallMatrixTests(unittest.TestCase):
                         "code-validator",
                         "quick-implementer",
                         "implementer",
+                        "commit-pusher",
                     }:
                         continue
                     self.assertIsNotNone(operation.content)

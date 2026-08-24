@@ -8,4 +8,17 @@ if [ -L "$0" ]; then
     exit 2
 fi
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
-exec python3 -I "$SCRIPT_DIR/scripts/manage-subagents-configs.py" uninstall "$@"
+if [ "${SUBAGENTS_CONFIGS_PYTHON+x}" = x ]; then
+    PYTHON=$SUBAGENTS_CONFIGS_PYTHON
+    case "$PYTHON" in
+        /*) ;;
+        *) echo "error: SUBAGENTS_CONFIGS_PYTHON must be an absolute path" >&2; exit 2 ;;
+    esac
+    if [ ! -f "$PYTHON" ] || [ ! -x "$PYTHON" ]; then
+        echo "error: SUBAGENTS_CONFIGS_PYTHON must name an executable file" >&2
+        exit 2
+    fi
+else
+    PYTHON=python3
+fi
+exec "$PYTHON" -I "$SCRIPT_DIR/scripts/manage-subagents-configs.py" uninstall "$@"

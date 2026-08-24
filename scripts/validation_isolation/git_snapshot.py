@@ -202,12 +202,9 @@ def _relative_path(raw: bytes) -> PurePosixPath | None:
         raise GitSnapshotError("Git inventory contains a malformed path")
     if ".git" in path.parts:
         raise GitSnapshotError("Git inventory exposed .git")
-    if (
-        path.name.casefold() in _COMMON_SECRET_BASENAMES
-        or any(
-            path.as_posix().casefold().endswith(suffix)
-            for suffix in _COMMON_SECRET_PATH_SUFFIXES
-        )
+    if path.name.casefold() in _COMMON_SECRET_BASENAMES or any(
+        path.as_posix().casefold().endswith(suffix)
+        for suffix in _COMMON_SECRET_PATH_SUFFIXES
     ):
         return None
     if any(

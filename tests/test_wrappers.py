@@ -1,5 +1,6 @@
 import json
 import runpy
+import shlex
 import shutil
 import stat
 import subprocess
@@ -60,11 +61,91 @@ class WrapperTests(unittest.TestCase):
             ("uninstall.sh", "uninstall"),
         ):
             text = (ROOT / name).read_text(encoding="utf-8")
+            self.assertIn("PYTHON=python3", text)
             self.assertIn(
-                f'exec python3 -I "$SCRIPT_DIR/scripts/manage-subagents-configs.py" '
+                f'exec "$PYTHON" -I "$SCRIPT_DIR/scripts/manage-subagents-configs.py" '
                 f'{operation} "$@"',
                 text,
             )
+
+    def test_generic_wrappers_validate_and_use_absolute_interpreter_override(self):
+        for name, operation in (
+            ("install.sh", "install"),
+            ("uninstall.sh", "uninstall"),
+        ):
+            text = (ROOT / name).read_text(encoding="utf-8")
+            self.assertIn("SUBAGENTS_CONFIGS_PYTHON", text)
+            self.assertRegex(
+                text,
+                rf'exec "\$[A-Z_]+" -I '
+                rf'"\$SCRIPT_DIR/scripts/manage-subagents-configs.py" '
+                rf'{operation} "\$@"',
+            )
+
+    def test_valid_interpreter_override_runs_and_unsafe_overrides_do_not_run_target(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
+            sandbox = Path(directory)
+            capture = sandbox / "interpreter-args.json"
+            interpreter = sandbox / "python-override"
+            real_python = shlex.quote(sys.executable)
+            interpreter.write_text(
+                "#!/bin/sh\n"
+                'printf \'%s\\n\' "$*" > "$CAPTURE"\n'
+                f'exec {real_python} "$@"\n',
+                encoding="utf-8",
+            )
+            interpreter.chmod(0o700)
+            valid = subprocess.run(  # noqa: S603
+                [str(ROOT / "install.sh"), "--help"],
+                env={
+                    "SUBAGENTS_CONFIGS_PYTHON": str(interpreter),
+                    "CAPTURE": str(capture),
+                },
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            self.assertIn("-I", capture.read_text(encoding="utf-8"))
+            self.assertIn(
+                "manage-subagents-configs.py", capture.read_text(encoding="utf-8")
+            )
+
+            for unsafe in (
+                "python-override",
+                str(sandbox / "missing"),
+                str(sandbox / "directory"),
+            ):
+                if unsafe.endswith("directory"):
+                    Path(unsafe).mkdir()
+                marker = sandbox / f"marker-{len(unsafe)}"
+                target = sandbox / "target-script"
+                target.write_text(f"#!/bin/sh\nprintf x > {marker}\n", encoding="utf-8")
+                target.chmod(0o700)
+                result = subprocess.run(  # noqa: S603
+                    [str(ROOT / "install.sh"), "--help"],
+                    env={"SUBAGENTS_CONFIGS_PYTHON": unsafe, "TARGET": str(target)},
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(marker.exists())
+
+            interpreter.chmod(0o600)
+            result = subprocess.run(  # noqa: S603
+                [str(ROOT / "uninstall.sh"), "--help"],
+                env={
+                    "SUBAGENTS_CONFIGS_PYTHON": str(interpreter),
+                    "CAPTURE": str(capture),
+                },
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(result.returncode, 0)
 
     def test_fixed_path_is_set_before_dirname_and_fake_python_is_ignored(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:

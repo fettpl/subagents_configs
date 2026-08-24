@@ -153,6 +153,20 @@ class CiContractTests(unittest.TestCase):
             r'export PYTHONPYCACHEPREFIX="\$ci_root/[^"\n]*"',
         )
 
+    def test_ruff_cache_writes_are_confined_to_ci_root(self):
+        self.assertRegex(
+            self.text,
+            r'mkdir -p "\$ci_root/[^"\n]*ruff[^"\n]*"',
+        )
+        self.assertRegex(
+            self.text,
+            r'chmod 700[^\n]*"\$ci_root/[^"\n]*ruff[^"\n]*"',
+        )
+        self.assertRegex(
+            self.text,
+            r'export RUFF_CACHE_DIR="\$ci_root/[^"\n]*"',
+        )
+
     def test_checkout_cleanliness_is_enforced_fail_closed(self):
         self.assertRegex(
             self.text,

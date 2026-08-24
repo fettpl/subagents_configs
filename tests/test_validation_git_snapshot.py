@@ -67,23 +67,32 @@ class GitSnapshotTests(unittest.TestCase):
 
             from scripts.validation_isolation.git_snapshot import list_source_paths
 
-            self.assertIn(
-                PurePosixPath("ignored.txt"), list_source_paths(repository)
-            )
+            self.assertIn(PurePosixPath("ignored.txt"), list_source_paths(repository))
 
     def test_common_credential_paths_are_excluded_when_tracked_or_untracked(self):
         with tempfile.TemporaryDirectory() as temporary:
             repository = make_repository(Path(temporary))
             credential_paths = (
-                "credentials.json",
+                ".git-credentials",
+                ".netrc",
                 ".npmrc",
                 ".pypirc",
-                ".netrc",
+                "credentials.json",
+                "id_dsa",
+                "id_ecdsa",
+                "id_ecdsa_sk",
+                "id_ed25519",
+                "id_ed25519_sk",
                 "id_rsa",
                 "private.key",
+                "private.pem",
+                "private_key",
+                "private_key.pem",
                 ".aws/credentials",
+                ".config/gh/hosts.yml",
+                ".config/gcloud/application_default_credentials.json",
                 ".docker/config.json",
-                ".git-credentials",
+                "CrEdEnTiAlS.JsOn",
             )
             for path in credential_paths:
                 tracked = repository / "tracked" / path

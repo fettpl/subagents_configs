@@ -164,6 +164,26 @@ no-argument invocation of generic `install.sh` or `uninstall.sh` valid.
 ./uninstall.sh --target codex --dry-run
 ```
 
+The wrappers require Python 3.11 or newer. They use the fixed-PATH `python3`
+as the safe default, pass `-I`, and never install dependencies or download
+anything. OpenCode and Claude Code validation requires the pinned PyYAML
+runtime from `requirements.txt`; Codex-only validation lazily avoids importing
+PyYAML. To use the pinned runtime, create a virtual environment and install
+the requirements explicitly before invoking a wrapper. This is a standard
+`venv`/virtualenv setup, and the wrapper does not create it for you:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install --requirement requirements.txt
+SUBAGENTS_CONFIGS_PYTHON="$PWD/.venv/bin/python" ./install.sh --target opencode
+```
+
+`SUBAGENTS_CONFIGS_PYTHON` is the only supported interpreter override. When
+set, it takes precedence over the fixed-PATH default and must be an existing,
+executable, absolute path; unsafe values are rejected before the target
+script runs. The selected interpreter is still invoked with `-I`, and target
+compatibility wrappers inherit the same selection.
+
 Install options are `--target TARGET`, `--all`, `--home TARGET=PATH`,
 `--enable-global-routing`, `--enable-codex-multi-agent`,
 `--include-commit-pusher`, `--dry-run`, and sole-argument `--help`.

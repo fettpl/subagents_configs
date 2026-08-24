@@ -258,6 +258,22 @@ class ReadmeContractTests(unittest.TestCase):
         self.assertIn("display", self.lower)
         self.assertIn("install-only", self.lower)
 
+    def test_wrapper_python_runtime_and_override_contract_is_documented(self):
+        for phrase in (
+            "Python 3.11",
+            "requirements.txt",
+            "virtualenv",
+            "SUBAGENTS_CONFIGS_PYTHON",
+            "absolute",
+            "executable",
+            "-I",
+            "PyYAML",
+            "Codex-only",
+            "OpenCode",
+            "Claude",
+        ):
+            self.assertIn(phrase.lower(), self.lower)
+
     def test_reinstall_contract_is_explicit(self):
         heading = "## Reinstall and drift"
         self.assertIn(heading, self.text)
