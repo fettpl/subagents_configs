@@ -156,11 +156,21 @@ class CiContractTests(unittest.TestCase):
     def test_checkout_cleanliness_is_enforced_fail_closed(self):
         self.assertRegex(
             self.text,
-            r'if\s+test\s+-n\s+"\$\(git status --short\)";\s+then',
+            r'if\s+test\s+-n\s+"\$checkout_status";\s+then',
         )
         self.assertRegex(
             self.text,
             r"git status --short[\s\S]*?exit 1",
+        )
+
+    def test_checkout_status_errors_fail_closed(self):
+        self.assertRegex(
+            self.text,
+            r'if\s+!\s+checkout_status="\$\(git status --short\)";\s+then',
+        )
+        self.assertRegex(
+            self.text,
+            r'checkout_status="\$\(git status --short\)"[\s\S]*?exit 1',
         )
 
     def test_negative_ci_mutations_trigger_contract_guards(self):

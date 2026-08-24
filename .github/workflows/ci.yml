@@ -75,8 +75,12 @@ jobs:
           "$shellcheck" install.sh uninstall.sh install-codex.sh uninstall-codex.sh install-opencode.sh uninstall-opencode.sh install-claude-code.sh uninstall-claude-code.sh
           python -m compileall -q subagents_configs scripts tests
           git diff --check
-          if test -n "$(git status --short)"; then
+          if ! checkout_status="$(git status --short)"; then
+            echo "Unable to determine checkout status; refusing to claim a clean checkout"
+            exit 1
+          fi
+          if test -n "$checkout_status"; then
             echo "CI left checkout changes:"
-            git status --short
+            printf '%s\n' "$checkout_status"
             exit 1
           fi
