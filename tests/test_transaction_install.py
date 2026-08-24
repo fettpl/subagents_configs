@@ -84,6 +84,7 @@ class TransactionInstallTests(unittest.TestCase):
         plan = self._plan(Target.CODEX, Target.OPENCODE)
         events = []
         original_atomic = transaction.filesystem.atomic_write
+        original_compare_and_swap = transaction.filesystem.compare_and_swap
 
         def record(path, content, mode=0o600):
             events.append(
@@ -91,11 +92,19 @@ class TransactionInstallTests(unittest.TestCase):
             )
             original_atomic(path, content, mode)
 
+        def record_compare_and_swap(path, before, content, mode, action):
+            events.append(
+                ("write", Path(path).relative_to(self.root).as_posix(), content)
+            )
+            return original_compare_and_swap(path, before, content, mode, action)
+
         transaction.filesystem.atomic_write = record
+        transaction.filesystem.compare_and_swap = record_compare_and_swap
         try:
             transaction.apply_transaction(plan)
         finally:
             transaction.filesystem.atomic_write = original_atomic
+            transaction.filesystem.compare_and_swap = original_compare_and_swap
         first_managed = next(
             i
             for i, event in enumerate(events)

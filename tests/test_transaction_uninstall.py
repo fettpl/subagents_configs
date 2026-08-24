@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from subagents_configs import filesystem
 from subagents_configs.blocks import _markers
 from subagents_configs.models import Target
 from subagents_configs.planning import preflight_install, preflight_uninstall
@@ -608,11 +609,19 @@ class UninstallTests(unittest.TestCase):
         unrelated = home / "unrelated.txt"
         unrelated.write_bytes(b"keep me\n")
 
-        def fail_mode(path, mode):
-            raise OSError("mode application interrupted")
+        original_compare_and_swap = filesystem.compare_and_swap
+
+        def fail_broad_mode(path, before, content, mode, action):
+            if mode == 0o644:
+                # Simulate content replacement completing before the broad
+                # restore mode reaches disk, then interrupt the operation.
+                original_compare_and_swap(path, before, content, 0o600, action)
+                raise OSError("mode application interrupted")
+            return original_compare_and_swap(path, before, content, mode, action)
 
         with patch(
-            "subagents_configs.transaction.filesystem.set_regular_mode", fail_mode
+            "subagents_configs.transaction.filesystem.compare_and_swap",
+            fail_broad_mode,
         ):
             with self.assertRaises(IncompleteRollbackError):
                 apply_transaction(uninstall)
