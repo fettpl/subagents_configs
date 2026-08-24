@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -35,6 +36,30 @@ def system_executable(name: str) -> Path:
     ):
         raise unittest.SkipTest(f"system executable is unusable: {candidate}")
     return resolved
+
+
+def trusted_parent_tempdir():
+    """Create a fixture below the checkout when its full parent chain is trusted."""
+
+    root = Path(__file__).parents[1].resolve()
+    current = Path(root.anchor)
+    allowed_owners = {0}
+    if hasattr(os, "getuid"):
+        allowed_owners.add(os.getuid())
+    for component in root.parts[1:]:
+        current /= component
+        try:
+            item = os.lstat(current)
+        except OSError as exc:
+            raise unittest.SkipTest("trusted fixture root is unavailable") from exc
+        if (
+            stat.S_ISLNK(item.st_mode)
+            or not stat.S_ISDIR(item.st_mode)
+            or item.st_uid not in allowed_owners
+            or stat.S_IMODE(item.st_mode) & 0o022
+        ):
+            raise unittest.SkipTest("checkout parent chain is not trusted")
+    return tempfile.TemporaryDirectory(prefix=".validation-fixture-", dir=root)
 
 
 def git(repository: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:

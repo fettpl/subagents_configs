@@ -7,7 +7,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.validation_isolated_test_support import make_repository, system_executable
+from tests.validation_isolated_test_support import (
+    make_repository,
+    system_executable,
+    trusted_parent_tempdir,
+)
 
 
 def _system_launcher() -> Path:
@@ -133,7 +137,7 @@ class RunnerTests(unittest.TestCase):
     def test_runner_passes_raw_sys_executable_to_trust_validation(self):
         from scripts.validation_isolation import runner
 
-        with tempfile.TemporaryDirectory() as temporary:
+        with trusted_parent_tempdir() as temporary:
             root = Path(temporary).resolve()
             repository = make_repository(root)
             real = root / "trusted-python"
@@ -166,7 +170,7 @@ class RunnerTests(unittest.TestCase):
         from scripts.validation_isolation import backend as backend_module
         from scripts.validation_isolation import runner
 
-        with tempfile.TemporaryDirectory() as temporary:
+        with trusted_parent_tempdir() as temporary:
             root = Path(temporary).resolve()
             repository = make_repository(root)
             interpreter = root / "python"
@@ -218,7 +222,7 @@ class RunnerTests(unittest.TestCase):
         from scripts.validation_isolation import backend as backend_module
         from scripts.validation_isolation import runner
 
-        with tempfile.TemporaryDirectory() as temporary:
+        with trusted_parent_tempdir() as temporary:
             root = Path(temporary).resolve()
             repository = make_repository(root)
             interpreter = root / "python"

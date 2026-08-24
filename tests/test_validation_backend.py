@@ -8,7 +8,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.validation_isolated_test_support import make_repository, system_executable
+from tests.validation_isolated_test_support import (
+    make_repository,
+    system_executable,
+    trusted_parent_tempdir,
+)
 
 MACOS_SANDBOX = Path("/usr/bin/sandbox-exec")
 
@@ -575,7 +579,7 @@ class BackendPathValidationTests(unittest.TestCase):
     def test_backend_identity_change_is_rejected_before_launch(self):
         from scripts.validation_isolation.backend import BackendSpec, verify_backend
 
-        with tempfile.TemporaryDirectory() as temporary:
+        with trusted_parent_tempdir() as temporary:
             root = Path(temporary).resolve()
             interpreter = _executable(root / "python")
             launcher = _system_launcher()
@@ -608,7 +612,7 @@ class BackendPathValidationTests(unittest.TestCase):
     def test_probe_final_launch_check_rejects_replacement(self):
         from scripts.validation_isolation import backend
 
-        with tempfile.TemporaryDirectory() as temporary:
+        with trusted_parent_tempdir() as temporary:
             root = Path(temporary).resolve()
             interpreter = _executable(root / "python")
             launcher = _system_launcher()
@@ -669,7 +673,7 @@ class BackendPathValidationTests(unittest.TestCase):
     def test_probe_final_launch_rejects_private_root_replacement(self):
         from scripts.validation_isolation import backend
 
-        with tempfile.TemporaryDirectory() as temporary:
+        with trusted_parent_tempdir() as temporary:
             root = Path(temporary).resolve()
             interpreter = _executable(root / "python")
             launcher = _system_launcher()
