@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Protocol
 
 from . import filesystem
+from .errors import TransactionError
+from .locks import IdentityEvidence, capture_evidence, locked_target_homes
 from .models import Journal, JournalOperation, Target
 from .paths import assert_contained, assert_safe_home, assert_safe_managed_path
 from .planning import PlannedOperation, TargetPlan, TransactionPlan
@@ -22,10 +24,6 @@ from .targets import descriptor_for
 
 class FailureInjector(Protocol):
     def before_operation(self, operation_id: str) -> None: ...
-
-
-class TransactionError(RuntimeError):
-    """Base class for failures while applying or recovering a transaction."""
 
 
 class IncompleteRollbackError(TransactionError):
@@ -286,7 +284,21 @@ def _check_evidence(
     expected_mode: int | None,
     *,
     present: bool,
+    expected_identity: IdentityEvidence | None = None,
 ) -> bytes | None:
+    if expected_identity is not None:
+        current_identity = capture_evidence(path, "transaction target")
+        if current_identity != expected_identity:
+            raise TransactionError(f"transaction target identity changed: {path}")
+        if (
+            expected_hash != current_identity.sha256
+            or expected_mode != current_identity.mode
+        ):
+            raise TransactionError(f"transaction target evidence disagrees: {path}")
+        if not present:
+            return None
+        current = _read_regular(path)
+        return current[0] if current is not None else None
     current = _read_regular(path)
     if not present:
         if current is not None:
@@ -776,6 +788,11 @@ def _journal_operation(
     prepared.operation_ids[(target_plan.target, operation.identifier)] = operation_id
     _ensure_permanent_backup(target_plan, operation, path)
     backup = _transaction_backup(prepared, target_plan, operation, operation_id, path)
+    before_identity = operation.expected_before_evidence
+    if operation.expected_before_hash is not None and before_identity is None:
+        before_identity = capture_evidence(path, "transaction journal target")
+        if before_identity is None:
+            raise TransactionError("transaction journal target disappeared")
     return JournalOperation(
         operation_id,
         operation.identifier,
@@ -787,6 +804,8 @@ def _journal_operation(
         backup[0] if backup else None,
         backup[1] if backup else None,
         "planned",
+        before_identity,
+        operation.expected_after_evidence,
     )
 
 
@@ -839,7 +858,7 @@ def _journal_for_plan(plan: TransactionPlan, transaction_id: str) -> Journal:
         for index, operation in enumerate(ordered)
     )
     journal = Journal(
-        1,
+        2,
         transaction_id,
         target_plan.target,
         tuple(item.target for item in plan.targets),
@@ -933,7 +952,7 @@ def _prepare(plan: TransactionPlan) -> _Prepared:
             for index, operation in enumerate(ordered)
         )
         prepared.journals[target_plan.target] = Journal(
-            1,
+            2,
             prepared.transaction_id,
             target_plan.target,
             participants,
@@ -988,25 +1007,37 @@ def _update_operation(
     _write_journal(target_plan.home, journal)
 
 
-def _apply_operation(target_plan: TargetPlan, operation: PlannedOperation) -> None:
+def _apply_operation(
+    target_plan: TargetPlan, operation: PlannedOperation
+) -> IdentityEvidence | None:
     path = _canonical_path(target_plan, operation)
+    before_identity = operation.expected_before_evidence
+    if operation.expected_before_hash is not None and before_identity is None:
+        before_identity = capture_evidence(path, "transaction target")
     if operation.expected_after_hash is None:
-        filesystem.unlink_regular(path)
+        result = filesystem.compare_and_swap(
+            path, before_identity, None, None, "unlink"
+        )
     else:
         write_mode = (
             0o600
             if operation.action in {"restore", "remove-block"}
             else operation.expected_after_mode or 0o600
         )
-        filesystem.atomic_write(path, operation.content or b"", write_mode)
-        if operation.action in {"restore", "remove-block"}:
-            filesystem.set_regular_mode(path, operation.expected_after_mode or 0o600)
+        result = filesystem.compare_and_swap(
+            path,
+            before_identity,
+            operation.content or b"",
+            operation.expected_after_mode or write_mode,
+            "create" if operation.expected_before_hash is None else "replace",
+        )
     _check_evidence(
         path,
         operation.expected_after_hash,
         operation.expected_after_mode,
         present=operation.expected_after_hash is not None,
     )
+    return result
 
 
 def _backup_bytes(home: Path, journal_operation: JournalOperation) -> bytes:
@@ -1050,12 +1081,20 @@ def _reverse_operation(
         raise IncompleteRollbackError(
             f"ambiguous rollback state for {operation.identifier}"
         )
+    before_identity = journal_operation.expected_after_evidence
+    if before_identity is None and operation.expected_after_hash is not None:
+        before_identity = capture_evidence(path, "rollback target")
     if operation.expected_before_hash is None:
-        filesystem.unlink_regular(path)
+        filesystem.compare_and_swap(path, before_identity, None, None, "unlink")
     else:
         before = _backup_bytes(target_plan.home, journal_operation)
-        filesystem.atomic_write(path, before, 0o600)
-        filesystem.set_regular_mode(path, operation.expected_before_mode or 0o600)
+        filesystem.compare_and_swap(
+            path,
+            before_identity,
+            before,
+            operation.expected_before_mode or 0o600,
+            "replace",
+        )
     _check_evidence(
         path,
         operation.expected_before_hash,
@@ -1163,7 +1202,7 @@ def _rollback(prepared: _Prepared, primary: BaseException) -> None:
     ) from primary
 
 
-def apply_transaction(
+def _apply_transaction_unlocked(
     plan: TransactionPlan,
     failure_injector: FailureInjector | None = None,
 ) -> None:
@@ -1187,7 +1226,21 @@ def apply_transaction(
                 )
                 if failure_injector is not None:
                     failure_injector.before_operation(journal_operation.operation_id)
-                _apply_operation(target_plan, operation)
+                after_identity = _apply_operation(target_plan, operation)
+                if after_identity is not None or operation.expected_after_hash is None:
+                    journal = prepared.journals[target_plan.target]
+                    updated = tuple(
+                        replace(
+                            item,
+                            expected_after_evidence=after_identity,
+                        )
+                        if position == index
+                        else item
+                        for position, item in enumerate(journal.operations)
+                    )
+                    prepared.journals[target_plan.target] = replace(
+                        journal, operations=updated
+                    )
                 _update_operation(prepared, target_plan.target, index, "applied")
         for target_plan in prepared.plan.targets:
             journal = replace(
@@ -1206,6 +1259,19 @@ def apply_transaction(
             raise TransactionError(
                 f"transaction committed but journal cleanup failed: {primary}"
             ) from primary
+
+
+def apply_transaction(
+    plan: TransactionPlan,
+    failure_injector: FailureInjector | None = None,
+) -> None:
+    """Apply one plan while holding every participant's persistent lock."""
+
+    _validate_plan(plan)
+    homes = {target_plan.target: target_plan.home for target_plan in plan.targets}
+    targets = tuple(target_plan.target for target_plan in plan.targets)
+    with locked_target_homes(homes, targets):
+        _apply_transaction_unlocked(plan, failure_injector)
 
 
 def _verify_manifest_entries(home: Path, descriptor, manifest) -> None:
@@ -1568,6 +1634,8 @@ def _planned_from_journal(descriptor, operation: JournalOperation) -> PlannedOpe
         operation.identifier
         if operation.action in {"write-block", "remove-block"}
         else None,
+        operation.expected_before_evidence,
+        operation.expected_after_evidence,
     )
 
 

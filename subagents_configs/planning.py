@@ -61,6 +61,8 @@ class PlannedOperation:
     ownership: Ownership | None
     backup_required: bool
     managed_block_id: str | None
+    expected_before_evidence: object | None = None
+    expected_after_evidence: object | None = None
 
 
 @dataclass(frozen=True)
@@ -883,7 +885,7 @@ def _target_install(
             entries[stale.relative_path] = stale
 
     resulting_entries = tuple(entries[key] for key in sorted(entries))
-    resulting = Manifest(1, target, resulting_entries)
+    resulting = Manifest(2, target, resulting_entries)
     manifest_operation = _plan_manifest_operation(
         target, home, prior_manifest, resulting
     )
@@ -1084,7 +1086,7 @@ def _target_uninstall(
         conflicts.append(reason)
         entries.append(ManifestEntry(**{**prior.__dict__, "unresolved_reason": reason}))
     resulting = Manifest(
-        1, target, tuple(sorted(entries, key=lambda item: item.relative_path))
+        2, target, tuple(sorted(entries, key=lambda item: item.relative_path))
     )
     manifest_operation = _plan_manifest_operation(
         target, home, manifest, resulting if entries else None

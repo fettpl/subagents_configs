@@ -4,3 +4,7 @@ class CliError(ValueError):
 
 class ValidationBlockedError(ValueError, RuntimeError):
     """Raised when source or validation-runtime checks block an operation."""
+
+
+class TransactionError(RuntimeError):
+    """Base class for failures while applying or recovering a transaction."""

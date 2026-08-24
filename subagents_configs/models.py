@@ -86,6 +86,8 @@ class JournalOperation:
         "rolled-back",
         "ambiguous",
     ]
+    expected_before_evidence: object | None = None
+    expected_after_evidence: object | None = None
 
 
 @dataclass(frozen=True)
