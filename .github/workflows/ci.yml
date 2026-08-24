@@ -31,12 +31,16 @@ jobs:
           ci_root="$(mktemp -d)"
           trap 'rm -rf "$ci_root"' EXIT
           mkdir -p "$ci_root/home" "$ci_root/codex" "$ci_root/opencode" "$ci_root/claude" "$ci_root/tmp"
+          mkdir -p "$ci_root/pycache"
           chmod 700 "$ci_root" "$ci_root/home" "$ci_root/codex" "$ci_root/opencode" "$ci_root/claude" "$ci_root/tmp"
+          chmod 700 "$ci_root/pycache"
           export HOME="$ci_root/home"
           export CODEX_HOME="$ci_root/codex"
           export OPENCODE_HOME="$ci_root/opencode"
           export CLAUDE_CONFIG_DIR="$ci_root/claude"
           export TMPDIR="$ci_root/tmp"
+          export PYTHONDONTWRITEBYTECODE=1
+          export PYTHONPYCACHEPREFIX="$ci_root/pycache"
 
           bwrap=""
           for candidate in /usr/bin/bwrap /bin/bwrap; do
@@ -71,4 +75,8 @@ jobs:
           "$shellcheck" install.sh uninstall.sh install-codex.sh uninstall-codex.sh install-opencode.sh uninstall-opencode.sh install-claude-code.sh uninstall-claude-code.sh
           python -m compileall -q subagents_configs scripts tests
           git diff --check
-          git status --short --branch
+          if test -n "$(git status --short)"; then
+            echo "CI left checkout changes:"
+            git status --short
+            exit 1
+          fi

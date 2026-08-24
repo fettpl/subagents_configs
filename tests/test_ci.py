@@ -135,6 +135,34 @@ class CiContractTests(unittest.TestCase):
             if "uses:" in line:
                 self.assertRegex(line, r"uses:\s+[^@\s]+@[0-9a-f]{40}")
 
+    def test_python_bytecode_writes_are_confined_to_ci_root(self):
+        self.assertRegex(
+            self.text,
+            r'mkdir -p "\$ci_root/[^"\n]*pycache[^"\n]*"',
+        )
+        self.assertRegex(
+            self.text,
+            r'chmod 700[^\n]*"\$ci_root/[^"\n]*pycache[^"\n]*"',
+        )
+        self.assertRegex(
+            self.text,
+            r'export PYTHONDONTWRITEBYTECODE="?1"?',
+        )
+        self.assertRegex(
+            self.text,
+            r'export PYTHONPYCACHEPREFIX="\$ci_root/[^"\n]*"',
+        )
+
+    def test_checkout_cleanliness_is_enforced_fail_closed(self):
+        self.assertRegex(
+            self.text,
+            r'if\s+test\s+-n\s+"\$\(git status --short\)";\s+then',
+        )
+        self.assertRegex(
+            self.text,
+            r"git status --short[\s\S]*?exit 1",
+        )
+
     def test_negative_ci_mutations_trigger_contract_guards(self):
         mutations = (
             self.text.replace("contents: read", "contents: write", 1),
