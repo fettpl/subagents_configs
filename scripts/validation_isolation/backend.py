@@ -531,7 +531,7 @@ def render_macos_profile(
     python = _profile_path(python_executable)
     read_roots = {_validate_system_directory(Path("/usr"), "macOS runtime /usr")}
     for system_root in (Path("/bin"), Path("/sbin")):
-        if system_root.exists():
+        if system_root.exists() and system_root.resolve(strict=True) == system_root:
             read_roots.add(
                 _validate_system_directory(system_root, "macOS runtime prefix")
             )
@@ -570,6 +570,8 @@ def build_linux_mount_plan(python_executable: Path) -> tuple[Path, ...]:
     mounts: list[Path] = []
     for candidate in _TRUSTED_SYSTEM_PREFIXES:
         if not candidate.exists():
+            continue
+        if candidate.resolve(strict=True) != candidate:
             continue
         mount = _validate_system_directory(candidate, "Linux runtime mount")
         if any(

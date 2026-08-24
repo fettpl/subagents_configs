@@ -55,7 +55,15 @@ def _bounded(value: object) -> str:
 
 def _trusted_executable_dirs(python_executable: Path) -> tuple[Path, ...]:
     del python_executable
-    return (Path("/usr/bin"), Path("/bin"))
+    directories = []
+    for candidate in (Path("/usr/bin"), Path("/bin")):
+        try:
+            canonical = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if canonical == candidate:
+            directories.append(candidate)
+    return tuple(directories)
 
 
 def run_isolated(

@@ -42,6 +42,7 @@ class FilesystemTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
             path = Path(temporary) / "state"
             path.mkdir(mode=0o755)
+            path.chmod(0o755)
             with self.assertRaises(ValueError):
                 ensure_private_directory(path)
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)

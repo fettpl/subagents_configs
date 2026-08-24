@@ -5,10 +5,11 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from tests.helpers import private_tempdir
 
 ROOT = Path(__file__).parents[1]
 WRAPPERS = (
@@ -85,7 +86,7 @@ class WrapperTests(unittest.TestCase):
     def test_valid_interpreter_override_runs_and_unsafe_overrides_do_not_run_target(
         self,
     ):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
+        with private_tempdir() as directory:
             sandbox = Path(directory)
             capture = sandbox / "interpreter-args.json"
             interpreter = sandbox / "python-override"
@@ -148,7 +149,7 @@ class WrapperTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
 
     def test_fixed_path_is_set_before_dirname_and_fake_python_is_ignored(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
+        with private_tempdir() as directory:
             fake_dir = Path(directory)
             (fake_dir / "dirname").write_text(
                 "#!/bin/sh\nprintf '%%s\\n' dirname-ran > %s\nexit 91\n"
@@ -174,7 +175,7 @@ class WrapperTests(unittest.TestCase):
             self.assertFalse((fake_dir / "python-marker").exists())
 
     def test_compatibility_file_symlink_fails_closed_without_adjacent_script(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
+        with private_tempdir() as directory:
             sandbox = Path(directory)
             marker = sandbox / "marker"
             (sandbox / "install.sh").write_text(
@@ -190,7 +191,7 @@ class WrapperTests(unittest.TestCase):
             self.assertFalse(marker.exists())
 
     def test_directory_symlink_resolves_to_physical_repository(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
+        with private_tempdir() as directory:
             alias_dir = Path(directory) / "repo-link"
             alias_dir.symlink_to(ROOT, target_is_directory=True)
             result = subprocess.run(  # noqa: S603
@@ -203,7 +204,7 @@ class WrapperTests(unittest.TestCase):
             self.assertIn("Usage: install.sh", result.stdout)
 
     def test_every_wrapper_real_subprocess_preserves_complex_argv(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
+        with private_tempdir() as directory:
             sandbox = Path(directory)
             for path in ROOT.glob("*.sh"):
                 shutil.copy2(path, sandbox / path.name)

@@ -21,7 +21,7 @@ from subagents_configs.orchestrator import (
 )
 from subagents_configs.planning import TargetPlan, TransactionPlan
 from subagents_configs.transaction import IncompleteRollbackError, TransactionError
-from tests.helpers import planning_repository
+from tests.helpers import planning_repository, private_tempdir
 
 
 class FailingWriter:
@@ -35,7 +35,7 @@ class FailingWriter:
 class CliIntegrationTests(unittest.TestCase):
     def test_all_seven_target_combinations_and_all_are_plannable(self):
         targets = (Target.CODEX, Target.OPENCODE, Target.CLAUDE_CODE)
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
+        with private_tempdir() as directory:
             root = Path(directory)
             repo = planning_repository(root)
             for size in (1, 2, 3):
@@ -85,7 +85,7 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertEqual(err.getvalue(), "")
 
     def test_install_opt_ins_are_visible_and_uninstall_rejects_them(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
+        with private_tempdir() as directory:
             root = Path(directory)
             repo = planning_repository(root)
             home = root / "codex"
@@ -164,7 +164,7 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertTrue(err.getvalue().startswith("error: invalid command line:"))
 
     def test_malformed_source_is_blocked_validation(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
+        with private_tempdir() as directory:
             root = Path(directory)
             repo = planning_repository(root)
             (repo / "agents/code-explorer.toml").write_text(
@@ -470,7 +470,7 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(status, EXIT_PREFLIGHT_ERROR)
 
     def test_yaml_parser_diagnostic_does_not_echo_source_secret(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
+        with private_tempdir() as directory:
             root = Path(directory)
             repo = planning_repository(root)
             (repo / "opencode/agents/code-explorer.md").write_text(

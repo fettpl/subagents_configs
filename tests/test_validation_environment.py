@@ -114,6 +114,7 @@ class ChildEnvironmentTests(unittest.TestCase):
             root = Path(temporary)
             existing_home = root / "home"
             existing_home.mkdir(mode=0o755)
+            existing_home.chmod(0o755)
             executable = root / "bin"
             executable.mkdir(mode=0o700)
 
