@@ -6,6 +6,7 @@ import hashlib
 import os
 import stat
 import tomllib
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +63,25 @@ def validate_yaml_agent(path: Path, content: bytes) -> Mapping[str, object]:
     if not isinstance(parsed, Mapping):
         raise ValueError(f"invalid YAML agent {path}: frontmatter must be a mapping")
     return dict(parsed)
+
+
+def validate_validation_helper(value: str) -> str:
+    """Validate a helper path before embedding it in agent source contexts."""
+    if type(value) is not str or not value or not Path(value).is_absolute():
+        raise ValueError("validation helper path must be absolute")
+    if "{{VALIDATION_HELPER}}" in value:
+        raise ValueError("validation helper path must not contain the placeholder")
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf"}
+        or character in {"\u2028", "\u2029", '"', "\\", "`", "{", "}"}
+        for character in value
+    ):
+        raise ValueError("validation helper path contains unsafe rendering characters")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("validation helper path is not valid UTF-8") from exc
+    return value
 
 
 def _text_value(parsed: Mapping[str, object], key: str) -> str:
@@ -140,6 +160,8 @@ def validate_agent_semantics(
     role: str,
     parsed: Mapping[str, object],
     body: str,
+    *,
+    validation_helper: str = "{{VALIDATION_HELPER}}",
 ) -> None:
     """Reject unknown roles and authority increases in native definitions."""
     expected_roles = {
@@ -198,19 +220,19 @@ def validate_agent_semantics(
                 "skill": "deny",
                 "external_directory": {
                     "*": "deny",
-                    "{{VALIDATION_HELPER}}": "allow",
+                    validation_helper: "allow",
                 },
                 "bash": {
                     "*": "deny",
-                    "python3 {{VALIDATION_HELPER}} -- *": "allow",
+                    f"python3 {validation_helper} -- *": "allow",
                 },
             }
             permission = parsed.get("permission")
             if permission != expected or not isinstance(permission, Mapping):
                 raise ValueError("unsafe validator permissions")
             for key, expected_order in (
-                ("external_directory", ("*", "{{VALIDATION_HELPER}}")),
-                ("bash", ("*", "python3 {{VALIDATION_HELPER}} -- *")),
+                ("external_directory", ("*", validation_helper)),
+                ("bash", ("*", f"python3 {validation_helper} -- *")),
             ):
                 rules = permission.get(key)
                 if not isinstance(rules, Mapping) or tuple(rules) != expected_order:
@@ -233,11 +255,13 @@ def validate_agent_semantics(
         raise ValueError(f"unsafe permission declaration in {role}")
 
     if role == "code-validator":
+        if validation_helper != "{{VALIDATION_HELPER}}":
+            validation_helper = validate_validation_helper(validation_helper)
         _require_body_concepts(
             role,
             body,
             (
-                "{{VALIDATION_HELPER}}",
+                validation_helper,
                 "only through",
                 "refuses direct validation",
                 "fails closed",
@@ -267,6 +291,35 @@ def validate_agent_semantics(
             body,
             ("both a commit and a push", "separate explicit", "never force-push"),
         )
+
+
+def validate_rendered_agent(
+    target: Target,
+    role: str,
+    path: Path,
+    content: bytes,
+    validation_helper: str,
+) -> Mapping[str, object]:
+    """Parse and semantically validate an agent after helper substitution."""
+    helper = validate_validation_helper(validation_helper)
+    try:
+        body = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"malformed UTF-8 rendered agent: {path}") from exc
+    if target is Target.CODEX:
+        parsed = validate_toml_agent(path, content)
+    elif target in {Target.OPENCODE, Target.CLAUDE_CODE}:
+        parsed = validate_yaml_agent(path, content)
+    else:
+        raise ValueError(f"unsupported rendered agent target: {target}")
+    validate_agent_semantics(
+        target,
+        role,
+        parsed,
+        body,
+        validation_helper=helper,
+    )
+    return parsed
 
 
 def _validate_source_spec(spec: SourceSpec) -> None:

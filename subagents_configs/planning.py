@@ -14,7 +14,12 @@ from typing import Literal
 from . import filesystem
 from .blocks import _markers, _scan, insert_or_replace_block, remove_exact_block
 from .errors import ValidationBlockedError
-from .formats import ValidatedSource, validate_source_inventory
+from .formats import (
+    ValidatedSource,
+    validate_rendered_agent,
+    validate_source_inventory,
+    validate_validation_helper,
+)
 from .models import (
     ManagedBlock,
     Manifest,
@@ -217,7 +222,7 @@ def _reject_legacy_state(home: Path, target: Target) -> None:
         )
 
 
-def _source_bytes(source: ValidatedSource, home: Path) -> bytes:
+def _source_bytes(target: Target, source: ValidatedSource, home: Path) -> bytes:
     if source.spec.kind != "agent":
         return source.content
     if source.spec.identifier != "code-validator":
@@ -229,9 +234,19 @@ def _source_bytes(source: ValidatedSource, home: Path) -> bytes:
     helper = normalized_absolute(
         home / ".subagents_configs/validation/run-validation-isolated.py"
     )
-    rendered = source.content.replace(b"{{VALIDATION_HELPER}}", str(helper).encode())
+    helper_text = validate_validation_helper(str(helper))
+    rendered = source.content.replace(
+        b"{{VALIDATION_HELPER}}", helper_text.encode("utf-8")
+    )
     if b"{{VALIDATION_HELPER}}" in rendered:
         raise ValueError("validation placeholder remained unresolved")
+    validate_rendered_agent(
+        target,
+        source.spec.identifier,
+        Path(source.spec.destination or source.spec.source),
+        rendered,
+        helper_text,
+    )
     return rendered
 
 
@@ -306,7 +321,7 @@ def _plan_regular_source(
         reason = f"unsafe managed destination {relative}"
         conflicts.append(reason)
         return None, ManifestEntry(**{**prior.__dict__, "unresolved_reason": reason})
-    proposed = _source_bytes(source, home)
+    proposed = _source_bytes(target, source, home)
     existing: tuple[bytes, int] | None
     try:
         existing = _read_regular(destination, source.spec.identifier)
@@ -1121,6 +1136,9 @@ def _validate_request(request: Request, operation: str) -> None:
         raise ValueError("selected target homes must be distinct after normalization")
     if any("{{VALIDATION_HELPER}}" in str(home) for home in normalized_homes):
         raise ValueError("target home must not contain the validation placeholder")
+    for home in normalized_homes:
+        helper = home / ".subagents_configs/validation/run-validation-isolated.py"
+        validate_validation_helper(str(helper))
     if operation == "uninstall" and (
         request.enable_global_routing
         or request.enable_codex_multi_agent

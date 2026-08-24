@@ -792,6 +792,40 @@ class PlanningTests(unittest.TestCase):
         )
         self.assertNotIn(b"{{VALIDATION_HELPER}}", validator.content or b"")
 
+    def test_preflight_rejects_codex_home_with_toml_terminating_quotes(
+        self,
+    ):
+        from subagents_configs.planning import preflight_install
+        from tests.helpers import tree_snapshot
+
+        home = self.root / 'codex-"""-home'
+        before = tree_snapshot(self.root)
+        with self.assertRaises(ValueError):
+            preflight_install(
+                self.repository,
+                planning_request("install", {Target.CODEX: home}),
+            )
+        self.assertEqual(tree_snapshot(self.root), before)
+
+    def test_preflight_rejects_client_homes_with_newline_or_control(
+        self,
+    ):
+        from subagents_configs.planning import preflight_install
+        from tests.helpers import tree_snapshot
+
+        for target, home in (
+            (Target.OPENCODE, self.root / "opencode-\n-home"),
+            (Target.CLAUDE_CODE, self.root / "claude-\x01-home"),
+        ):
+            before = tree_snapshot(self.root)
+            with self.subTest(target=target):
+                with self.assertRaises(ValueError):
+                    preflight_install(
+                        self.repository,
+                        planning_request("install", {target: home}),
+                    )
+            self.assertEqual(tree_snapshot(self.root), before)
+
     def test_operations_are_normalized_and_rendering_has_no_content_bytes(self):
         from subagents_configs.planning import preflight_install, render_plan
 

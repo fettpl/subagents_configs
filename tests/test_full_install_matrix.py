@@ -157,6 +157,40 @@ class FullInstallMatrixTests(unittest.TestCase):
         }
         return self._expected_commitment_files_from_payloads(payloads)
 
+    def test_rendered_agent_files_remain_parseable_with_home_path_spaces(self):
+        from subagents_configs.formats import validate_toml_agent, validate_yaml_agent
+
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            selected = TARGETS
+            homes = {
+                target: root / "homes" / f"{target.value} with spaces-zażółć"
+                for target in selected
+            }
+            plan = preflight_install(
+                self.repository,
+                planning_request("install", homes, targets=selected),
+            )
+            for target_plan in plan.targets:
+                for operation in target_plan.operations:
+                    if operation.identifier not in {
+                        "code-explorer",
+                        "code-reviewer",
+                        "code-validator",
+                        "quick-implementer",
+                        "implementer",
+                    }:
+                        continue
+                    self.assertIsNotNone(operation.content)
+                    if target_plan.target is Target.CODEX:
+                        validate_toml_agent(
+                            Path(operation.relative_path), operation.content or b""
+                        )
+                    else:
+                        validate_yaml_agent(
+                            Path(operation.relative_path), operation.content or b""
+                        )
+
     def test_commitment_oracle_does_not_call_production_digest_helper(self):
         journal = Journal(
             1,
