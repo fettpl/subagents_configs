@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from subagents_configs import orchestrator
+from subagents_configs.locks import locked_target_homes
 from subagents_configs.models import Journal, JournalOperation, Target
 from subagents_configs.planning import (
     preflight_install,
@@ -1147,7 +1148,8 @@ class FullInstallMatrixTests(unittest.TestCase):
                     homes = self._homes(root, (Target.CODEX,))
                     marker = homes[Target.CODEX] / "user.txt"
                     marker.write_bytes(b"keep\n")
-                    before = tree_snapshot(homes[Target.CODEX])
+                    with locked_target_homes(homes, (Target.CODEX,)):
+                        before = tree_snapshot(homes[Target.CODEX])
                     status, _output, error = self._run(
                         "install",
                         self._argv((Target.CODEX,), homes),
@@ -1165,7 +1167,8 @@ class FullInstallMatrixTests(unittest.TestCase):
             state.mkdir(mode=0o700)
             (state / "journal.json").write_bytes(b"{}")
             (state / "journal.json").chmod(0o600)
-            before = tree_snapshot(homes[Target.CODEX])
+            with locked_target_homes(homes, (Target.CODEX,)):
+                before = tree_snapshot(homes[Target.CODEX])
             status, _output, error = self._run(
                 "install", self._argv((Target.CODEX,), homes), root
             )
@@ -1200,10 +1203,11 @@ class FullInstallMatrixTests(unittest.TestCase):
                         for home in homes.values():
                             (home / "user.txt").write_bytes(b"keep\n")
                             (home / "user.txt").chmod(0o640)
-                        before = {
-                            target: tree_snapshot(home)
-                            for target, home in homes.items()
-                        }
+                        with locked_target_homes(homes, selected):
+                            before = {
+                                target: tree_snapshot(home)
+                                for target, home in homes.items()
+                            }
                         status, output, error = self._run(
                             "install",
                             self._argv(selected, homes),
@@ -1230,9 +1234,11 @@ class FullInstallMatrixTests(unittest.TestCase):
                     journal = state / "journal.json"
                     journal.write_bytes(b"{}")
                     journal.chmod(0o600)
-                    before = {
-                        target: tree_snapshot(home) for target, home in homes.items()
-                    }
+                    with locked_target_homes(homes, selected):
+                        before = {
+                            target: tree_snapshot(home)
+                            for target, home in homes.items()
+                        }
                     status, output, error = self._run(
                         "install", self._argv(selected, homes), root
                     )
@@ -1261,7 +1267,11 @@ class FullInstallMatrixTests(unittest.TestCase):
                         legacy = home / legacy_name
                         legacy.write_bytes(b"legacy state\n")
                         legacy.chmod(0o600)
-                        before[target] = tree_snapshot(home)
+                    with locked_target_homes(homes, selected):
+                        before = {
+                            target: tree_snapshot(home)
+                            for target, home in homes.items()
+                        }
                     status, output, error = self._run(
                         "install", self._argv(selected, homes), root
                     )

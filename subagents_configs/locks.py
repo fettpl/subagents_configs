@@ -7,12 +7,31 @@ import os
 import stat
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
 from .models import Target
 from .paths import assert_safe_home, normalized_absolute
 from .targets import DESCRIPTOR_ORDER
+
+_LOCK_DEPTH: ContextVar[int] = ContextVar("subagents_configs_lock_depth", default=0)
+_LOCK_HOMES: ContextVar[frozenset[Path]] = ContextVar(
+    "subagents_configs_lock_homes", default=frozenset()
+)
+
+
+def lock_held() -> bool:
+    """Return whether this execution context already owns target locks."""
+
+    return _LOCK_DEPTH.get() > 0
+
+
+def homes_locked(homes: Mapping[Target, Path]) -> bool:
+    """Return whether every requested home is held by this context."""
+
+    requested = frozenset(normalized_absolute(path) for path in homes.values())
+    return requested <= _LOCK_HOMES.get()
 
 
 @dataclass(frozen=True)
@@ -95,7 +114,15 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
                 os.close(descriptor)
                 raise
             descriptors.append(descriptor)
-        yield
+        token = _LOCK_DEPTH.set(_LOCK_DEPTH.get() + 1)
+        homes_token = _LOCK_HOMES.set(
+            _LOCK_HOMES.get() | frozenset(normalized.values())
+        )
+        try:
+            yield
+        finally:
+            _LOCK_HOMES.reset(homes_token)
+            _LOCK_DEPTH.reset(token)
     finally:
         for descriptor in reversed(descriptors):
             try:
@@ -126,5 +153,7 @@ __all__ = [
     "IdentityEvidence",
     "capture_evidence",
     "compare_and_swap",
+    "homes_locked",
+    "lock_held",
     "locked_target_homes",
 ]
