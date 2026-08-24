@@ -86,8 +86,18 @@ def _reject_opencode_permission_escalation(
         return
     if not isinstance(permission, Mapping):
         raise ValueError(f"unsafe permission declaration in {role}")
-    protected = {"edit", "bash", "external_directory", "webfetch", "task"}
+    protected = {
+        "edit",
+        "bash",
+        "external_directory",
+        "webfetch",
+        "websearch",
+        "task",
+        "skill",
+    }
     for key, value in permission.items():
+        if role == "code-validator" and key in {"bash", "external_directory"}:
+            continue
         if key in protected and value != "deny":
             raise ValueError(f"unsafe permission declaration in {role}: {key}")
 
@@ -171,12 +181,40 @@ def validate_agent_semantics(
                 "bash": "deny",
                 "external_directory": "deny",
                 "webfetch": "deny",
+                "websearch": "deny",
                 "task": "deny",
+                "skill": "deny",
             }
             if parsed.get("permission") != expected:
                 raise ValueError(f"OpenCode {role} has unsafe read permissions")
-        if role == "code-validator" and parsed.get("model") != "openai/gpt-5.6-luna":
-            raise ValueError("OpenCode code-validator must use openai/gpt-5.6-luna")
+        if role == "code-validator":
+            if parsed.get("model") != "openai/gpt-5.6-luna":
+                raise ValueError("OpenCode code-validator must use openai/gpt-5.6-luna")
+            expected = {
+                "edit": "deny",
+                "webfetch": "deny",
+                "websearch": "deny",
+                "task": "deny",
+                "skill": "deny",
+                "external_directory": {
+                    "*": "deny",
+                    "{{VALIDATION_HELPER}}": "allow",
+                },
+                "bash": {
+                    "*": "deny",
+                    "python3 {{VALIDATION_HELPER}} -- *": "allow",
+                },
+            }
+            permission = parsed.get("permission")
+            if permission != expected or not isinstance(permission, Mapping):
+                raise ValueError("unsafe validator permissions")
+            for key, expected_order in (
+                ("external_directory", ("*", "{{VALIDATION_HELPER}}")),
+                ("bash", ("*", "python3 {{VALIDATION_HELPER}} -- *")),
+            ):
+                rules = permission.get(key)
+                if not isinstance(rules, Mapping) or tuple(rules) != expected_order:
+                    raise ValueError("unsafe validator permissions")
     elif target is Target.CLAUDE_CODE:
         _reject_claude_tool_escalation(parsed, role)
         if role in {"code-explorer", "code-reviewer"}:

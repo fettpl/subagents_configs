@@ -63,6 +63,17 @@ and plan permission.
 | `claude-code` | `implementer` | `inherit` | `absent` | `Read, Grep, Glob, Edit, Bash` | `absent` |
 | `claude-code` | `commit-pusher` | `inherit` | `absent` | `Read, Grep, Glob, Bash` | `absent` |
 
+OpenCode permissions are explicit in the parsed agent frontmatter. The
+`code-explorer` and `code-reviewer` roles deny `edit`, `bash`,
+`external_directory`, `webfetch`, `websearch`, `task`, and `skill`. The
+`code-validator` role denies editing, web access, delegation, and skill
+loading; its `bash` rules deny `*` and allow only
+`python3 {{VALIDATION_HELPER}} -- *`, while its `external_directory` rules
+deny `*` and allow only the rendered validation-helper path. Rule order is
+part of this boundary: the catch-all denial precedes the narrow helper
+exception. Parent or session policy may further restrict these roles, but
+must never broaden the permissions declared here.
+
 ## What is installed
 
 For a normal install, the selected home receives five agent files (all roles

@@ -3,6 +3,18 @@ name: code-validator
 description: Read-only focused verification runner using the isolated validation helper.
 mode: subagent
 model: openai/gpt-5.6-luna
+permission:
+  edit: deny
+  webfetch: deny
+  websearch: deny
+  task: deny
+  skill: deny
+  external_directory:
+    "*": deny
+    "{{VALIDATION_HELPER}}": allow
+  bash:
+    "*": deny
+    "python3 {{VALIDATION_HELPER}} -- *": allow
 ---
 # Code Validator (Read-Only Verification Runner)
 

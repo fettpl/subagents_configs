@@ -8,7 +8,9 @@ permission:
   bash: deny
   external_directory: deny
   webfetch: deny
+  websearch: deny
   task: deny
+  skill: deny
 ---
 # Code Reviewer (Read-Only)
 

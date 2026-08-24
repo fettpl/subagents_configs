@@ -105,9 +105,38 @@ class CatalogTests(unittest.TestCase):
                     "bash": "deny",
                     "external_directory": "deny",
                     "webfetch": "deny",
+                    "websearch": "deny",
                     "task": "deny",
+                    "skill": "deny",
                 },
             )
+
+    def test_opencode_validator_allows_only_isolated_helper_bash(self):
+        parsed, _ = _yaml_frontmatter(
+            ROOT / "opencode" / "agents" / "code-validator.md"
+        )
+        self.assertEqual(
+            parsed["permission"],
+            {
+                "edit": "deny",
+                "webfetch": "deny",
+                "websearch": "deny",
+                "task": "deny",
+                "skill": "deny",
+                "external_directory": {
+                    "*": "deny",
+                    "{{VALIDATION_HELPER}}": "allow",
+                },
+                "bash": {
+                    "*": "deny",
+                    "python3 {{VALIDATION_HELPER}} -- *": "allow",
+                },
+            },
+        )
+        self.assertEqual(
+            list(parsed["permission"]["bash"]),
+            ["*", "python3 {{VALIDATION_HELPER}} -- *"],
+        )
 
     def test_claude_read_roles_allow_only_read_grep_glob_in_plan_mode(self):
         for role in ("code-explorer", "code-reviewer"):
@@ -250,7 +279,8 @@ class CatalogTests(unittest.TestCase):
         formats = importlib.import_module("subagents_configs.formats")
         permission = (
             "permission:\n  edit: deny\n  bash: deny\n  "
-            "external_directory: deny\n  webfetch: deny\n  task: deny\n"
+            "external_directory: deny\n  webfetch: deny\n  websearch: deny\n  "
+            "task: deny\n  skill: deny\n"
         )
         first = f"---\nname: code-explorer\nmode: subagent\n{permission}---\nbody\n"
         second = f"---\nname: code-explorer\nmode: subagent\n{permission}---\nbody\n"
@@ -271,6 +301,72 @@ class CatalogTests(unittest.TestCase):
             Target.OPENCODE, (("quick-implementer", content),)
         )
         with self.assertRaisesRegex(ValueError, "unsafe permission"):
+            formats.validate_source_inventory(repo, Target.OPENCODE, specs)
+
+    def test_opencode_validator_requires_permission_block(self):
+        formats = importlib.import_module("subagents_configs.formats")
+        content = (
+            "---\nname: code-validator\nmodel: openai/gpt-5.6-luna\n---\n"
+            "Run only through {{VALIDATION_HELPER}}. Refuses direct validation "
+            "and fails closed without a verified backend.\n"
+        )
+        repo, specs = self._temporary_agent_specs(
+            Target.OPENCODE, (("code-validator", content),)
+        )
+        with self.assertRaisesRegex(ValueError, "unsafe validator permissions"):
+            formats.validate_source_inventory(repo, Target.OPENCODE, specs)
+
+    def test_opencode_validator_requires_websearch_deny(self):
+        formats = importlib.import_module("subagents_configs.formats")
+        permission = (
+            "permission:\n"
+            "  edit: deny\n"
+            "  webfetch: deny\n"
+            "  task: deny\n"
+            "  skill: deny\n"
+            "  external_directory:\n"
+            "    '*': deny\n"
+            "    '{{VALIDATION_HELPER}}': allow\n"
+            "  bash:\n"
+            "    '*': deny\n"
+            "    'python3 {{VALIDATION_HELPER}} -- *': allow\n"
+        )
+        content = (
+            "---\nname: code-validator\nmodel: openai/gpt-5.6-luna\n"
+            f"{permission}---\n"
+            "Run only through {{VALIDATION_HELPER}}. Refuses direct validation "
+            "and fails closed without a verified backend.\n"
+        )
+        repo, specs = self._temporary_agent_specs(
+            Target.OPENCODE, (("code-validator", content),)
+        )
+        with self.assertRaisesRegex(ValueError, "unsafe validator permissions"):
+            formats.validate_source_inventory(repo, Target.OPENCODE, specs)
+
+    def test_opencode_validator_rejects_broad_bash_allow(self):
+        formats = importlib.import_module("subagents_configs.formats")
+        permission = (
+            "permission:\n"
+            "  edit: deny\n"
+            "  webfetch: deny\n"
+            "  websearch: deny\n"
+            "  task: deny\n"
+            "  skill: deny\n"
+            "  external_directory:\n"
+            "    '*': deny\n"
+            "    '{{VALIDATION_HELPER}}': allow\n"
+            "  bash: allow\n"
+        )
+        content = (
+            "---\nname: code-validator\nmodel: openai/gpt-5.6-luna\n"
+            f"{permission}---\n"
+            "Run only through {{VALIDATION_HELPER}}. Refuses direct validation "
+            "and fails closed without a verified backend.\n"
+        )
+        repo, specs = self._temporary_agent_specs(
+            Target.OPENCODE, (("code-validator", content),)
+        )
+        with self.assertRaisesRegex(ValueError, "unsafe validator permissions"):
             formats.validate_source_inventory(repo, Target.OPENCODE, specs)
 
     def test_claude_rejects_network_and_write_tool_escalation(self):
