@@ -333,9 +333,9 @@ def _recovery_fingerprint(
     return tuple(records)
 
 
-def collect_stable_dry_run_evidence(
+def _collect_stable_dry_run_evidence(
     request: Request, repo_root: Path | None = None
-) -> TransactionPlan:
+) -> tuple[TransactionPlan, tuple[object, ...]]:
     """Collect complete read-only planning evidence twice without acquiring locks."""
 
     root = Path(__file__).parents[1] if repo_root is None else repo_root
@@ -379,13 +379,24 @@ def collect_stable_dry_run_evidence(
     )
 
     second_state = _state_fingerprint(request)
+    recovery_fingerprint = _recovery_fingerprint(first_groups)
+    plan_fingerprint = _plan_fingerprint(first)
     if (
         first_state != second_state
-        or _recovery_fingerprint(first_groups) != _recovery_fingerprint(second_groups)
-        or _plan_fingerprint(first) != _plan_fingerprint(second)
+        or recovery_fingerprint != _recovery_fingerprint(second_groups)
+        or plan_fingerprint != _plan_fingerprint(second)
     ):
         raise ConcurrentDryRunChangeError("dry-run evidence changed")
-    return first
+    return first, (first_state, recovery_fingerprint, plan_fingerprint)
+
+
+def collect_stable_dry_run_evidence(
+    request: Request, repo_root: Path | None = None
+) -> TransactionPlan:
+    """Collect complete read-only planning evidence twice without acquiring locks."""
+
+    plan, _fingerprint = _collect_stable_dry_run_evidence(request, repo_root)
+    return plan
 
 
 def _recovery_summary(
@@ -710,7 +721,7 @@ def run(
 
     if request.dry_run_format == "json":
         try:
-            plan = collect_stable_dry_run_evidence(request, repo_root)
+            plan, fingerprint = _collect_stable_dry_run_evidence(request, repo_root)
         except ConcurrentDryRunChangeError:
             _emit_request(
                 stderr,
@@ -758,6 +769,42 @@ def run(
             return EXIT_PREFLIGHT_ERROR
         try:
             rendered = render_plan_json(plan).decode("utf-8")
+        except Exception:
+            _emit_request(
+                stderr,
+                request,
+                DiagnosticCode.OUTPUT_FAILED,
+                phase="output",
+                status="failed",
+            )
+            return EXIT_PREFLIGHT_ERROR
+        try:
+            _post_render_plan, post_fingerprint = _collect_stable_dry_run_evidence(
+                request, repo_root
+            )
+            if post_fingerprint != fingerprint:
+                raise ConcurrentDryRunChangeError(
+                    "dry-run evidence changed after render"
+                )
+        except ConcurrentDryRunChangeError:
+            _emit_request(
+                stderr,
+                request,
+                DiagnosticCode.PREFLIGHT_CONCURRENT_CHANGE,
+                phase="preflight",
+                status="rejected",
+            )
+            return EXIT_PREFLIGHT_ERROR
+        except Exception:
+            _emit_request(
+                stderr,
+                request,
+                DiagnosticCode.PREFLIGHT_CONCURRENT_CHANGE,
+                phase="preflight",
+                status="rejected",
+            )
+            return EXIT_PREFLIGHT_ERROR
+        try:
             if not _write_output(stdout, rendered):
                 raise OSError("structured output unavailable")
             has_conflicts = any(target.conflicts for target in plan.targets)
