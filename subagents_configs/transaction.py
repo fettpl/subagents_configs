@@ -13,18 +13,22 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from . import filesystem
+from .blocks import inspect_managed_block
 from .errors import TransactionError
 from .locks import (
     IdentityEvidence,
-    capture_evidence,
     homes_locked,
     locked_target_homes,
+)
+from .locks import (
+    capture_evidence as _capture_evidence,
 )
 from .models import Journal, JournalOperation, Target
 from .paths import assert_contained, assert_safe_home, assert_safe_managed_path
 from .planning import PlannedOperation, TargetPlan, TransactionPlan
-from .state import encode_journal, load_journal
-from .targets import descriptor_for
+from .state import encode_journal
+from .state import load_journal as _load_journal
+from .targets import descriptor_for, registry_target_order
 
 
 class FailureInjector(Protocol):
@@ -96,7 +100,7 @@ def _journal_path(home: Path) -> Path:
 
 
 def _canonical_participant_order(participants: tuple[Target, ...]) -> None:
-    order = {Target.CODEX: 0, Target.OPENCODE: 1, Target.CLAUDE_CODE: 2}
+    order = {target: index for index, target in enumerate(registry_target_order())}
     if not participants or len(set(participants)) != len(participants):
         raise ValueError("journal participants must be unique")
     if tuple(sorted(participants, key=order.__getitem__)) != participants:
@@ -248,6 +252,13 @@ def _validate_transaction_commitment(
         for target in participants:
             if _read_commitment_marker(homes[target], nonce) != digest:
                 raise ValueError("transaction commitment marker does not match")
+
+
+def validate_transaction_commitment(
+    journals: tuple[Journal, ...], homes: Mapping[Target, Path] | None = None
+) -> None:
+    """Validate a participant commitment without exposing internal helpers."""
+    _validate_transaction_commitment(journals, homes)
 
 
 def _transaction_backup_path(nonce: str, target: Target, operation_id: str) -> str:
@@ -530,9 +541,7 @@ def _validate_manifest_linkage(target_plan: TargetPlan) -> None:
             and entry.managed_block_id is not None
             and operation.content is not None
         ):
-            from .planning import _block_from_file
-
-            block = _block_from_file(operation.content, entry.managed_block_id)
+            block = inspect_managed_block(operation.content, entry.managed_block_id)
             if block is None or block.sha256 != entry.installed_block_hash:
                 raise ValueError("manifest block hash does not match operation")
         relative = _identifier_relative(descriptor, entry.identifier)
@@ -603,9 +612,7 @@ def _validate_manifest_linkage(target_plan: TargetPlan) -> None:
                     or current[1] != entry.installed_mode
                 ):
                     raise ValueError("unchanged manifest block target does not match")
-                from .planning import _block_from_file
-
-                block = _block_from_file(current[0], entry.managed_block_id)
+                block = inspect_managed_block(current[0], entry.managed_block_id)
                 if block is None or block.sha256 != entry.installed_block_hash:
                     if operation is None:
                         raise ValueError(
@@ -667,10 +674,7 @@ def _validate_plan(plan: TransactionPlan) -> None:
     seen_targets: set[Target] = set()
     seen_homes: set[Path] = set()
     target_order = {
-        target: index
-        for index, target in enumerate(
-            (Target.CODEX, Target.OPENCODE, Target.CLAUDE_CODE)
-        )
+        target: index for index, target in enumerate(registry_target_order())
     }
     previous_order = -1
     for target_plan in plan.targets:
@@ -1599,6 +1603,7 @@ def _apply_transaction_unlocked(
 
 def apply_transaction(
     plan: TransactionPlan,
+    *,
     failure_injector: FailureInjector | None = None,
 ) -> None:
     """Apply one plan while holding every participant's persistent lock."""
@@ -1635,9 +1640,7 @@ def _verify_manifest_entries(home: Path, descriptor, manifest) -> None:
         ):
             raise IncompleteRollbackError("manifest entry target drifted")
         if entry.managed_block_id is not None:
-            from .planning import _block_from_file
-
-            block = _block_from_file(current[0], entry.managed_block_id)
+            block = inspect_managed_block(current[0], entry.managed_block_id)
             if block is None or block.sha256 != entry.installed_block_hash:
                 raise IncompleteRollbackError("manifest managed block drifted")
 
@@ -1821,239 +1824,30 @@ def _recover_single(home: Path, descriptor) -> None:
 
 
 def _recover_participants(homes: Mapping[Target, Path]) -> None:
-    """Recover one logical transaction after exact participant resolution."""
+    """Compatibility forwarder to the recovery module implementation."""
+    from .recovery import recover_participants_impl
 
-    if not isinstance(homes, Mapping) or not homes:
-        raise ValueError("participant homes must be a non-empty mapping")
-    journals: dict[Target, Journal] = {}
-    journal_evidence: dict[Target, IdentityEvidence] = {}
-    backup_evidence_by_target: dict[Target, dict[Path, IdentityEvidence]] = {}
-    descriptors = {target: descriptor_for(target) for target in homes}
-    for target, home in homes.items():
-        if not isinstance(target, Target) or not isinstance(home, Path):
-            raise ValueError("participant mapping has invalid key or home")
-        loaded_identity = capture_evidence(_journal_path(home), "participant journal")
-        journal = load_journal(home, descriptors[target])
-        if journal is None:
-            raise ValueError(f"missing participant journal for {target.value}")
-        validated_identity = capture_evidence(
-            _journal_path(home), "participant journal"
-        )
-        if loaded_identity is None or validated_identity != loaded_identity:
-            raise IncompleteRollbackError(
-                "participant journal changed during validation"
-            )
-        journals[target] = journal
-        journal_evidence[target] = loaded_identity
-        _, backup_evidence_by_target[target] = _validated_journal_evidence(
-            home, journal, journal_identity=loaded_identity
-        )
-    first = next(iter(journals.values()))
-    participants = first.participants
-    _canonical_participant_order(participants)
-    if set(homes) != set(participants) or tuple(homes) != participants:
-        raise ValueError("participant mapping does not exactly match journal set")
-    for target in participants:
-        journal = journals.get(target)
-        if journal is None:
-            raise ValueError("participant journal set is incomplete")
-        if (
-            journal.transaction_id != first.transaction_id
-            or journal.operation != first.operation
-            or journal.participants != participants
-            or journal.target is not target
-        ):
-            raise IncompleteRollbackError("participant journals disagree")
-    ordered_journals = tuple(journals[target] for target in participants)
-    try:
-        _validate_transaction_commitment(ordered_journals, homes)
-    except ValueError as exc:
-        raise IncompleteRollbackError(
-            "participant journal commitment is invalid"
-        ) from exc
-    if all(journal.rollback_status == "complete" for journal in journals.values()):
-        statuses = {
-            operation.status
-            for journal in journals.values()
-            for operation in journal.operations
-        }
-        if statuses == {"rolled-back"}:
-            for target in participants:
-                _verify_rollback_complete_journal(
-                    homes[target],
-                    descriptors[target],
-                    journals[target],
-                    ordered_journals,
-                )
-        elif statuses == {"applied"}:
-            for target in participants:
-                _verify_complete_journal(
-                    homes[target],
-                    descriptors[target],
-                    journals[target],
-                    ordered_journals,
-                )
-        else:
-            raise IncompleteRollbackError(
-                "participant journals have mixed final states"
-            )
-        for target in participants:
-            _sync_and_remove_journal(
-                homes[target],
-                journals[target],
-                journal_evidence=journal_evidence[target],
-                backup_evidence=backup_evidence_by_target[target],
-            )
-        return
-    if any(journal.rollback_status == "complete" for journal in journals.values()):
-        raise ValueError("participant journals have mixed completion status")
-    target_plans = {
-        target: TargetPlan(
-            target,
-            homes[target],
-            tuple(
-                _planned_from_journal(descriptors[target], operation)
-                for operation in journals[target].operations
-            ),
-            None,
-            (),
-        )
-        for target in participants
-    }
-    # Prove every current state before changing any journal. This is the
-    # coordinator's zero-write boundary for missing or ambiguous participants.
-    for target in participants:
-        journal = journals[target]
-        for operation in journal.operations:
-            path = _path_for_journal_operation(
-                homes[target], descriptors[target], operation
-            )
-            if operation.status in {"applying", "applied"}:
-                current = _read_regular(path)
-                current_hash = _digest(current[0]) if current else None
-                current_mode = current[1] if current else None
-                before = (
-                    current_hash == operation.expected_before_hash
-                    and current_mode == operation.expected_before_mode
-                )
-                after = (
-                    current_hash == operation.expected_after_hash
-                    and current_mode == operation.expected_after_mode
-                )
-                current_identity = capture_evidence(path, "participant recovery target")
-                before = (
-                    before and current_identity == operation.expected_before_evidence
-                )
-                after = after and current_identity == operation.expected_after_evidence
-                if not before and not after:
-                    raise IncompleteRollbackError(
-                        f"ambiguous participant state for {operation.identifier}"
-                    )
-                if after and operation.expected_before_hash is not None:
-                    _backup_bytes(homes[target], operation)
-            elif operation.status == "planned":
-                _check_evidence(
-                    path,
-                    operation.expected_before_hash,
-                    operation.expected_before_mode,
-                    present=operation.expected_before_hash is not None,
-                    expected_identity=operation.expected_before_evidence,
-                )
-            else:
-                raise IncompleteRollbackError(
-                    "participant journal has ambiguous status"
-                )
-    try:
-        for target in participants:
-            journal = replace(journals[target], rollback_status="in-progress")
-            journals[target] = journal
-            journal_evidence[target] = _write_journal(homes[target], journal)
-        for target in reversed(participants):
-            journal = journals[target]
-            for index in reversed(range(len(journal.operations))):
-                operation = journal.operations[index]
-                if operation.status not in {"applying", "applied"}:
-                    continue
-                restored_identity = _reverse_operation(target_plans[target], operation)
-                journal = replace(
-                    journal,
-                    operations=tuple(
-                        replace(item, status="rolled-back")
-                        if position == index
-                        else item
-                        for position, item in enumerate(journal.operations)
-                    ),
-                )
-                journal = replace(
-                    journal,
-                    operations=tuple(
-                        replace(item, expected_before_evidence=restored_identity)
-                        if position == index
-                        else item
-                        for position, item in enumerate(journal.operations)
-                    ),
-                )
-                journals[target] = journal
-                journal_evidence[target] = _write_journal(homes[target], journal)
-        for target in participants:
-            journal = replace(
-                journals[target],
-                operations=tuple(
-                    replace(item, status="rolled-back")
-                    for item in journals[target].operations
-                ),
-                rollback_status="complete",
-            )
-            journals[target] = journal
-            journal_evidence[target] = _write_journal(homes[target], journal)
-        for target in participants:
-            _sync_and_remove_journal(
-                homes[target],
-                journals[target],
-                journal_evidence=journal_evidence[target],
-                backup_evidence=backup_evidence_by_target[target],
-            )
-    except BaseException as primary:
-        if not isinstance(primary, Exception):
-            primary.add_note("participant rollback incomplete")
-            raise primary
-        raise IncompleteRollbackError("participant rollback incomplete") from primary
+    recover_participants_impl(homes)
 
 
 def _path_for_journal_operation(
     home: Path, descriptor, operation: JournalOperation
 ) -> Path:
-    target_plan = TargetPlan(descriptor.target, home, (), None, ())
-    planned = _planned_from_journal(descriptor, operation)
-    return _canonical_path(target_plan, planned)
+    """Compatibility forwarder for the recovery path seam."""
+    from .recovery import path_for_journal_operation
+
+    return path_for_journal_operation(home, descriptor, operation)
 
 
 def _planned_from_journal(descriptor, operation: JournalOperation) -> PlannedOperation:
-    relative = _identifier_relative(descriptor, operation.identifier)
-    if relative is None:
-        raise ValueError(f"journal identifier is not managed: {operation.identifier}")
-    return PlannedOperation(
-        descriptor.target,
-        operation.identifier,
-        operation.action,
-        relative,
-        operation.expected_before_hash,
-        operation.expected_after_hash,
-        operation.expected_before_mode,
-        operation.expected_after_mode,
-        None,
-        None,
-        operation.backup_path is not None,
-        operation.identifier
-        if operation.action in {"write-block", "remove-block"}
-        else None,
-        operation.expected_before_evidence,
-        operation.expected_after_evidence,
-    )
+    """Compatibility forwarder for recovery journal decoding."""
+    from .recovery import planned_from_journal
+
+    return planned_from_journal(descriptor, operation)
 
 
 def recover_incomplete_journal(home: Path, descriptor) -> None:
-    if descriptor.target not in {Target.CODEX, Target.OPENCODE, Target.CLAUDE_CODE}:
+    if descriptor.target not in set(registry_target_order()):
         raise ValueError("unsupported target descriptor")
     assert_safe_home(home)
     journal = load_journal(home, descriptor)
@@ -2067,6 +1861,76 @@ def recover_incomplete_journal(home: Path, descriptor) -> None:
     _recover_participants({descriptor.target: home})
 
 
-# Private seams used by transaction tests and by the future multi-home
-# recovery coordinator. They intentionally do not expand the public API.
-encode_journal = encode_journal
+def recover_participants(homes: Mapping[Target, Path]) -> None:
+    """Public participant recovery adapter used by the recovery module."""
+    _recover_participants(homes)
+
+
+# Recovery helpers are public implementation seams so the recovery module can
+# own participant orchestration without importing transaction-private names.
+def digest(content: bytes) -> str:
+    return _digest(content)
+
+
+def journal_path(home: Path) -> Path:
+    return _journal_path(home)
+
+
+def canonical_participant_order(participants: tuple[Target, ...]) -> None:
+    return _canonical_participant_order(participants)
+
+
+def identifier_relative(descriptor, identifier: str) -> str | None:
+    return _identifier_relative(descriptor, identifier)
+
+
+def canonical_path(target_plan: TargetPlan, operation: PlannedOperation) -> Path:
+    return _canonical_path(target_plan, operation)
+
+
+def read_regular(path: Path):
+    return _read_regular(path)
+
+
+def check_evidence(path: Path, expected_hash, expected_mode, **kwargs):
+    return _check_evidence(path, expected_hash, expected_mode, **kwargs)
+
+
+def write_journal(home: Path, journal: Journal):
+    return _write_journal(home, journal)
+
+
+def backup_bytes(home: Path, journal_operation: JournalOperation) -> bytes:
+    return _backup_bytes(home, journal_operation)
+
+
+def reverse_operation(target_plan: TargetPlan, operation: JournalOperation):
+    return _reverse_operation(target_plan, operation)
+
+
+def sync_and_remove_journal(home: Path, journal: Journal, **kwargs):
+    return _sync_and_remove_journal(home, journal, **kwargs)
+
+
+def validated_journal_evidence(home: Path, journal: Journal, **kwargs):
+    return _validated_journal_evidence(home, journal, **kwargs)
+
+
+def verify_complete_journal(
+    home: Path, descriptor, journal: Journal, all_journals=None
+):
+    return _verify_complete_journal(home, descriptor, journal, all_journals)
+
+
+def verify_rollback_complete_journal(
+    home: Path, descriptor, journal: Journal, all_journals
+):
+    return _verify_rollback_complete_journal(home, descriptor, journal, all_journals)
+
+
+def capture_evidence(path: Path, label: str):
+    return _capture_evidence(path, label)
+
+
+def load_journal(home: Path, descriptor):
+    return _load_journal(home, descriptor)

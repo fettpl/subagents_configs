@@ -5,7 +5,7 @@ from typing import Literal
 
 from .errors import CliError
 from .models import Request, Target
-from .targets import DESCRIPTOR_ORDER, descriptor_for
+from .targets import descriptor_for, targets_for_request
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -80,7 +80,7 @@ def parse_request(
         raise CliError("one or more --target options or --all is required")
 
     if args.all:
-        targets = list(DESCRIPTOR_ORDER)
+        targets = list(targets_for_request((), True))
     else:
         parsed_targets: list[Target] = []
         for raw_target in raw_targets:
@@ -91,8 +91,7 @@ def parse_request(
             if target in parsed_targets:
                 raise CliError(f"duplicate target: {raw_target}")
             parsed_targets.append(target)
-        selected = set(parsed_targets)
-        targets = [target for target in DESCRIPTOR_ORDER if target in selected]
+        targets = list(targets_for_request(tuple(parsed_targets), False))
 
     if operation == "uninstall" and (
         args.enable_global_routing

@@ -15,11 +15,116 @@ from pathlib import Path
 from . import filesystem
 from .models import SourceSpec, Target
 from .paths import normalized_absolute, strict_relative_path
-from .targets import DESCRIPTORS, selected_sources
+from .targets import (
+    CAPABILITIES,
+    descriptor_for,
+    parser_for,
+    selected_sources,
+    semantic_validator_for,
+)
 
 _COMMAND_GATE_SHA256 = (
     "834025bb3af05ef4f6fc3977be9ff81c2c136ea6c9fc213f37aefe83de7ba270"
 )
+
+# One normalized role contract is the sole semantic source for native overlays.
+# Values are policy metadata, never prompt bodies or private source contents.
+_ROLES = (
+    "code-explorer",
+    "code-reviewer",
+    "code-validator",
+    "quick-implementer",
+    "implementer",
+    "commit-pusher",
+)
+ROLE_POLICY = {
+    "codex": {
+        role: {
+            "optional": role == "commit-pusher",
+            "read_only": role in {"code-explorer", "code-reviewer", "code-validator"},
+            "overlay": {
+                "model": "gpt-5.6-sol" if role == "code-reviewer" else "gpt-5.6-luna",
+                "model_reasoning_effort": "medium" if role == "implementer" else "low",
+                **(
+                    {"sandbox_mode": "read-only"}
+                    if role in {"code-explorer", "code-reviewer"}
+                    else {}
+                ),
+            },
+        }
+        for role in _ROLES
+    },
+    "opencode": {
+        role: {
+            "optional": role == "commit-pusher",
+            "read_only": role in {"code-explorer", "code-reviewer", "code-validator"},
+            "overlay": {
+                "model": "openai/gpt-5.6-luna",
+                "mode": "subagent",
+                **(
+                    {
+                        "permission": {
+                            "edit": "deny",
+                            "bash": "deny",
+                            "external_directory": "deny",
+                            "webfetch": "deny",
+                            "websearch": "deny",
+                            "task": "deny",
+                            "skill": "deny",
+                        }
+                    }
+                    if role in {"code-explorer", "code-reviewer"}
+                    else {}
+                ),
+                **(
+                    {
+                        "permission": {
+                            "edit": "deny",
+                            "webfetch": "deny",
+                            "websearch": "deny",
+                            "task": "deny",
+                            "skill": "deny",
+                            "external_directory": {
+                                "*": "deny",
+                                "{{VALIDATION_HELPER}}": "allow",
+                            },
+                            "bash": {
+                                "*": "deny",
+                                "python3 {{VALIDATION_HELPER}} -- *": "allow",
+                            },
+                        }
+                    }
+                    if role == "code-validator"
+                    else {}
+                ),
+            },
+        }
+        for role in _ROLES
+    },
+    "claude-code": {
+        role: {
+            "optional": role == "commit-pusher",
+            "read_only": role in {"code-explorer", "code-reviewer", "code-validator"},
+            "overlay": {
+                "model": "inherit",
+                "tools": {
+                    "code-explorer": "Read, Grep, Glob",
+                    "code-reviewer": "Read, Grep, Glob",
+                    "code-validator": "Read, Grep, Glob, Bash",
+                    "quick-implementer": "Read, Grep, Glob, Edit, Bash",
+                    "implementer": "Read, Grep, Glob, Edit, Bash",
+                    "commit-pusher": "Read, Grep, Glob, Bash",
+                }[role],
+                **(
+                    {"permissionMode": "plan"}
+                    if role in {"code-explorer", "code-reviewer"}
+                    else {}
+                ),
+            },
+        }
+        for role in _ROLES
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -313,14 +418,7 @@ def validate_agent_semantics(
     hook_path: str = "{{CLAUDE_HOOK}}",
 ) -> None:
     """Reject unknown roles and authority increases in native definitions."""
-    expected_roles = {
-        "code-explorer",
-        "code-reviewer",
-        "code-validator",
-        "quick-implementer",
-        "implementer",
-        "commit-pusher",
-    }
+    expected_roles = set(ROLE_POLICY.get(target.value, {}))
     if role not in expected_roles:
         raise ValueError(f"unknown role: {role}")
     if _text_value(parsed, "name") != role:
@@ -340,30 +438,10 @@ def validate_agent_semantics(
         allowed_fields = set(parsed)
     if set(parsed) - allowed_fields:
         raise ValueError(f"unknown {target.value} agent frontmatter field")
+    policy = ROLE_POLICY[target.value][role]["overlay"]
 
     if target is Target.CODEX:
-        expected_model = {
-            "code-explorer": "gpt-5.6-luna",
-            "code-reviewer": "gpt-5.6-sol",
-            "code-validator": "gpt-5.6-luna",
-            "quick-implementer": "gpt-5.6-luna",
-            "implementer": "gpt-5.6-luna",
-            "commit-pusher": "gpt-5.6-luna",
-        }[role]
-        expected_effort = "medium" if role == "implementer" else "low"
-        if "model" in parsed and parsed.get("model") != expected_model:
-            raise ValueError(f"Codex {role} has an unexpected model")
-        if (
-            "model_reasoning_effort" in parsed
-            and parsed.get("model_reasoning_effort") != expected_effort
-        ):
-            raise ValueError(f"Codex {role} has an unexpected reasoning effort")
-        if (
-            role in {"code-explorer", "code-reviewer"}
-            and parsed.get("sandbox_mode") != "read-only"
-        ):
-            raise ValueError(f"Codex {role} must use sandbox_mode=read-only")
-        if role not in {"code-explorer", "code-reviewer"} and "sandbox_mode" in parsed:
+        if "sandbox_mode" in parsed and "sandbox_mode" not in policy:
             raise ValueError(f"Codex {role} has an unexpected sandbox mode")
         for key in ("sandbox_mode", "network_access"):
             if parsed.get(key) in {
@@ -375,89 +453,52 @@ def validate_agent_semantics(
                 raise ValueError(f"unsafe Codex permission in {role}: {key}")
     elif target is Target.OPENCODE:
         _reject_opencode_permission_escalation(parsed, role)
-        if "model" in parsed and parsed.get("model") != "openai/gpt-5.6-luna":
-            raise ValueError(f"OpenCode {role} has an unexpected model")
-        if "mode" in parsed and parsed.get("mode") != "subagent":
-            raise ValueError(f"OpenCode {role} must use mode=subagent")
-        if role in {"code-explorer", "code-reviewer"}:
-            if parsed.get("mode") != "subagent":
-                raise ValueError(f"OpenCode {role} must use mode=subagent")
-            expected = {
-                "edit": "deny",
-                "bash": "deny",
-                "external_directory": "deny",
-                "webfetch": "deny",
-                "websearch": "deny",
-                "task": "deny",
-                "skill": "deny",
-            }
-            if parsed.get("permission") != expected:
-                raise ValueError(f"OpenCode {role} has unsafe read permissions")
-            if tuple(parsed["permission"]) != tuple(expected):
-                raise ValueError(f"OpenCode {role} has unsafe permission order")
-        if role == "code-validator":
-            if parsed.get("model") != "openai/gpt-5.6-luna":
-                raise ValueError("OpenCode code-validator must use openai/gpt-5.6-luna")
-            expected = {
-                "edit": "deny",
-                "webfetch": "deny",
-                "websearch": "deny",
-                "task": "deny",
-                "skill": "deny",
-                "external_directory": {
-                    "*": "deny",
-                    validation_helper: "allow",
-                },
-                "bash": {
-                    "*": "deny",
-                    f"python3 {validation_helper} -- *": "allow",
-                },
-            }
-            permission = parsed.get("permission")
-            if permission != expected or not isinstance(permission, Mapping):
-                raise ValueError("unsafe validator permissions")
-            if tuple(permission) != tuple(expected):
-                raise ValueError("unsafe validator permission order")
-            for key, expected_order in (
-                ("external_directory", ("*", validation_helper)),
-                ("bash", ("*", f"python3 {validation_helper} -- *")),
-            ):
-                rules = permission.get(key)
-                if not isinstance(rules, Mapping) or tuple(rules) != expected_order:
-                    raise ValueError("unsafe validator permissions")
-        elif (
-            role not in {"code-explorer", "code-reviewer"}
-            and parsed.get("permission") is not None
-        ):
+        if "permission" in parsed and "permission" not in policy:
             raise ValueError(f"OpenCode {role} has unexpected permissions")
     elif target is Target.CLAUDE_CODE:
         _reject_claude_tool_escalation(parsed, role)
-        expected_model = "inherit"
-        if "model" in parsed and parsed.get("model") != expected_model:
-            raise ValueError(f"Claude {role} has an unexpected model")
-        expected_tools = {
-            "code-explorer": "Read, Grep, Glob",
-            "code-reviewer": "Read, Grep, Glob",
-            "code-validator": "Read, Grep, Glob, Bash",
-            "quick-implementer": "Read, Grep, Glob, Edit, Bash",
-            "implementer": "Read, Grep, Glob, Edit, Bash",
-            "commit-pusher": "Read, Grep, Glob, Bash",
-        }
-        if "tools" in parsed and parsed.get("tools") != expected_tools[role]:
-            raise ValueError(f"Claude {role} has an unexpected tool set")
-        if role in {"code-explorer", "code-reviewer"}:
-            if (
-                parsed.get("tools") != "Read, Grep, Glob"
-                or parsed.get("permissionMode") != "plan"
-            ):
-                raise ValueError(f"Claude {role} must be plan-mode read-only")
-        if (
-            role not in {"code-explorer", "code-reviewer"}
-            and "permissionMode" in parsed
-        ):
+        if "permissionMode" in parsed and "permissionMode" not in policy:
             raise ValueError(f"Claude {role} has an unexpected permission mode")
         if role != "code-validator" and "hooks" in parsed:
             raise ValueError(f"Claude {role} has an unexpected hook")
+
+    if validation_helper != "{{VALIDATION_HELPER}}":
+        validation_helper = validate_validation_helper(validation_helper)
+
+    def render_policy(value: object) -> object:
+        if isinstance(value, str):
+            return value.replace("{{VALIDATION_HELPER}}", validation_helper)
+        if isinstance(value, Mapping):
+            return {
+                render_policy(key) if isinstance(key, str) else key: render_policy(item)
+                for key, item in value.items()
+            }
+        return value
+
+    if target is Target.OPENCODE and "permission" in policy:
+        expected_permission = render_policy(policy["permission"])
+        if parsed.get("permission") != expected_permission:
+            if role == "code-validator":
+                raise ValueError("unsafe validator permissions")
+            raise ValueError(f"OpenCode {role} has unsafe read permissions")
+
+    for key, expected in policy.items():
+        if key not in parsed or parsed[key] != render_policy(expected):
+            raise ValueError(
+                f"{target.value} {role} disagrees with canonical role policy"
+            )
+    if target is Target.OPENCODE and "permission" in policy:
+        expected_permission = render_policy(policy["permission"])
+        permission = parsed["permission"]
+        if tuple(permission) != tuple(expected_permission):
+            raise ValueError(f"OpenCode {role} has unsafe permission order")
+        for key, expected_rules in expected_permission.items():
+            if isinstance(expected_rules, Mapping):
+                rules = permission.get(key)
+                if not isinstance(rules, Mapping) or tuple(rules) != tuple(
+                    expected_rules
+                ):
+                    raise ValueError("unsafe validator permissions")
 
     unsafe_values = {"workspace-write", "acceptEdits", "bypassPermissions"}
     if any(
@@ -522,6 +563,28 @@ def validate_agent_semantics(
         )
 
 
+def _validate_agent_with_registry(
+    target: Target,
+    role: str,
+    parsed: Mapping[str, object],
+    body: str,
+    *,
+    validation_helper: str = "{{VALIDATION_HELPER}}",
+    hook_path: str = "{{CLAUDE_HOOK}}",
+) -> None:
+    validator = semantic_validator_for(target)
+    if validator != "agent":
+        raise ValueError(f"unsupported semantic validator: {validator}")
+    validate_agent_semantics(
+        target,
+        role,
+        parsed,
+        body,
+        validation_helper=validation_helper,
+        hook_path=hook_path,
+    )
+
+
 def validate_rendered_agent(
     target: Target,
     role: str,
@@ -536,13 +599,14 @@ def validate_rendered_agent(
         body = content.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError(f"malformed UTF-8 rendered agent: {path}") from exc
-    if target is Target.CODEX:
+    parser = parser_for(target)
+    if parser == "toml":
         parsed = validate_toml_agent(path, content)
-    elif target in {Target.OPENCODE, Target.CLAUDE_CODE}:
+    elif parser == "yaml-frontmatter":
         parsed = validate_yaml_agent(path, content)
     else:
-        raise ValueError(f"unsupported rendered agent target: {target}")
-    validate_agent_semantics(
+        raise ValueError(f"unsupported rendered agent parser: {parser}")
+    _validate_agent_with_registry(
         target,
         role,
         parsed,
@@ -625,6 +689,7 @@ def validate_source_inventory(
     destinations: set[str] = set()
     parsed_roles: set[str] = set()
     parsed_by_role: dict[str, Mapping[str, object]] = {}
+    pending_agents: list[tuple[SourceSpec, Mapping[str, object], str]] = []
     result: list[ValidatedSource] = []
     for spec in specs:
         if spec.identifier in seen:
@@ -664,19 +729,24 @@ def validate_source_inventory(
         except UnicodeDecodeError as exc:
             raise ValueError(f"malformed UTF-8 source: {spec.source}") from exc
         if spec.kind == "agent":
-            if spec.source_format == "toml":
+            parser = parser_for(target)
+            if spec.source_format != parser:
+                raise ValueError(
+                    f"agent source format disagrees with registry: {spec.source}"
+                )
+            if parser == "toml":
                 parsed = validate_toml_agent(Path(spec.source), content)
-            elif spec.source_format == "yaml-frontmatter":
+            elif parser == "yaml-frontmatter":
                 parsed = validate_yaml_agent(Path(spec.source), content)
             else:
-                raise ValueError(f"unsupported agent format: {spec.source_format}")
+                raise ValueError(f"unsupported agent parser: {parser}")
             parsed_role = parsed.get("name")
             if isinstance(parsed_role, str) and parsed_role in parsed_roles:
                 raise ValueError(f"duplicate parsed role: {parsed_role}")
             if isinstance(parsed_role, str):
                 parsed_roles.add(parsed_role)
                 parsed_by_role[parsed_role] = parsed
-            validate_agent_semantics(target, spec.identifier, parsed, body)
+            pending_agents.append((spec, parsed, body))
         elif spec.kind in {"routing-source", "project-template"}:
             if spec.source_format != "markdown":
                 raise ValueError(f"invalid policy format: {spec.source}")
@@ -702,6 +772,8 @@ def validate_source_inventory(
                 parsed=parsed,
             )
         )
+    for spec, parsed, body in pending_agents:
+        _validate_agent_with_registry(target, spec.identifier, parsed, body)
     if parsed_roles and sum(spec.kind == "agent" for spec in specs) >= 5:
         required_roles = {
             "code-explorer",
@@ -732,26 +804,17 @@ def validate_source_inventory(
             raise ValueError("required optional role is missing")
         if required_roles <= supplied_roles:
             for role, parsed in parsed_by_role.items():
-                if target is Target.CODEX:
-                    if "model" not in parsed or "model_reasoning_effort" not in parsed:
-                        raise ValueError("incomplete Codex role semantics")
-                    if role in {"code-explorer", "code-reviewer"}:
-                        if "sandbox_mode" not in parsed:
-                            raise ValueError("incomplete Codex role semantics")
-                    elif "sandbox_mode" in parsed:
-                        raise ValueError("unexpected Codex role semantics")
-                elif target is Target.OPENCODE:
-                    if not {"model", "mode"} <= set(parsed):
-                        raise ValueError("incomplete OpenCode role semantics")
-                elif target is Target.CLAUDE_CODE:
-                    if not {"model", "tools"} <= set(parsed):
-                        raise ValueError("incomplete Claude role semantics")
+                required_overlay = set(ROLE_POLICY[target.value][role]["overlay"])
+                if not required_overlay <= set(parsed):
+                    raise ValueError("incomplete role semantics")
     return tuple(result)
 
 
 def validate_all_catalogs(repo_root: Path) -> None:
     """Validate native agents and policy sources for every active target."""
-    for target, descriptor in DESCRIPTORS.items():
+    for capability in CAPABILITIES:
+        target = capability.target
+        descriptor = descriptor_for(target)
         specs = tuple(
             spec
             for spec in selected_sources(descriptor, include_commit_pusher=True)

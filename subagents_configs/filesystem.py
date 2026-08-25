@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .errors import TransactionError
 from .locks import IdentityEvidence
+from .models import DesiredFile
 from .paths import normalized_absolute
 
 _UNSUPPORTED_DIRECTORY_SYNC = {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}
@@ -309,6 +310,26 @@ def compare_and_swap(
             return _evidence_from_descriptor(descriptor, f"{action} target")
         finally:
             os.close(descriptor)
+
+
+def safe_mutate(
+    path: Path,
+    expected: IdentityEvidence | None,
+    desired: DesiredFile | None,
+) -> IdentityEvidence | None:
+    """Public typed mutation seam preserving descriptor-relative CAS checks."""
+    if not isinstance(path, Path):
+        raise TypeError("mutation path must be a Path")
+    if expected is not None and not isinstance(expected, IdentityEvidence):
+        raise TypeError("expected mutation evidence has the wrong type")
+    if desired is not None and not isinstance(desired, DesiredFile):
+        raise TypeError("desired mutation file has the wrong type")
+    if desired is None:
+        if expected is None:
+            raise ValueError("safe mutation cannot remove an absent target")
+        return compare_and_swap(path, expected, None, None, "unlink")
+    action = "create" if expected is None else "replace"
+    return compare_and_swap(path, expected, desired.content, desired.mode, action)
 
 
 def ensure_directory(

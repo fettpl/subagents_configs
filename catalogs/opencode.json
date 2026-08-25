@@ -1,0 +1,231 @@
+{
+  "agent_directory": "opencode/agents",
+  "catalog_sha256": "463792343bdd0242fa73959ffa68dde27b49b81dae4af26b671c1683b7d9b93c",
+  "external_lifecycle": null,
+  "global_instruction": {
+    "block_id": "routing-opencode",
+    "filename": "AGENTS.md",
+    "source": "rules/OPENCODE_SUBAGENT_ROUTING.md"
+  },
+  "include_in_all": true,
+  "lifecycle_capabilities": [
+    "block",
+    "file",
+    "manifest",
+    "runtime"
+  ],
+  "optional_blocks": [
+    {
+      "block_id": "routing-opencode",
+      "relative_path": "AGENTS.md",
+      "source": "rules/OPENCODE_SUBAGENT_ROUTING.md"
+    }
+  ],
+  "order": 1,
+  "parser": "yaml-frontmatter",
+  "policy_sha256": "1867c492ab1d34c1de4e4a7a5d66e694eb4b0ae6d80807087e9f4209e9d847c4",
+  "roles": [
+    {
+      "contract": {
+        "optional": false,
+        "read_only": true
+      },
+      "destination": "agents/code-explorer.md",
+      "identifier": "code-explorer",
+      "optional": false,
+      "overlay": {
+        "mode": "subagent",
+        "model": "openai/gpt-5.6-luna",
+        "permission": {
+          "bash": "deny",
+          "edit": "deny",
+          "external_directory": "deny",
+          "skill": "deny",
+          "task": "deny",
+          "webfetch": "deny",
+          "websearch": "deny"
+        }
+      },
+      "policy_sha256": "8fc1e787bc1c5a61da04755e0645acd4ede5f3b7c06c7a6aed3781ae3abc1c35",
+      "source": "opencode/agents/code-explorer.md"
+    },
+    {
+      "contract": {
+        "optional": false,
+        "read_only": true
+      },
+      "destination": "agents/code-reviewer.md",
+      "identifier": "code-reviewer",
+      "optional": false,
+      "overlay": {
+        "mode": "subagent",
+        "model": "openai/gpt-5.6-luna",
+        "permission": {
+          "bash": "deny",
+          "edit": "deny",
+          "external_directory": "deny",
+          "skill": "deny",
+          "task": "deny",
+          "webfetch": "deny",
+          "websearch": "deny"
+        }
+      },
+      "policy_sha256": "8fc1e787bc1c5a61da04755e0645acd4ede5f3b7c06c7a6aed3781ae3abc1c35",
+      "source": "opencode/agents/code-reviewer.md"
+    },
+    {
+      "contract": {
+        "optional": false,
+        "read_only": true
+      },
+      "destination": "agents/code-validator.md",
+      "identifier": "code-validator",
+      "optional": false,
+      "overlay": {
+        "mode": "subagent",
+        "model": "openai/gpt-5.6-luna",
+        "permission": {
+          "bash": {
+            "*": "deny",
+            "python3 {{VALIDATION_HELPER}} -- *": "allow"
+          },
+          "edit": "deny",
+          "external_directory": {
+            "*": "deny",
+            "{{VALIDATION_HELPER}}": "allow"
+          },
+          "skill": "deny",
+          "task": "deny",
+          "webfetch": "deny",
+          "websearch": "deny"
+        }
+      },
+      "policy_sha256": "b9c1b887900ea311ca1f78d883c8f12f6486154507834c7b16f6a3ee44e18fed",
+      "source": "opencode/agents/code-validator.md"
+    },
+    {
+      "contract": {
+        "optional": true,
+        "read_only": false
+      },
+      "destination": "agents/commit-pusher.md",
+      "identifier": "commit-pusher",
+      "optional": true,
+      "overlay": {
+        "mode": "subagent",
+        "model": "openai/gpt-5.6-luna"
+      },
+      "policy_sha256": "a15108815449128c73b03025d113f3bb57ef0a7069117e2ed9fcbe6881f406ab",
+      "source": "opencode/agents/commit-pusher.md"
+    },
+    {
+      "contract": {
+        "optional": false,
+        "read_only": false
+      },
+      "destination": "agents/implementer.md",
+      "identifier": "implementer",
+      "optional": false,
+      "overlay": {
+        "mode": "subagent",
+        "model": "openai/gpt-5.6-luna"
+      },
+      "policy_sha256": "a15108815449128c73b03025d113f3bb57ef0a7069117e2ed9fcbe6881f406ab",
+      "source": "opencode/agents/implementer.md"
+    },
+    {
+      "contract": {
+        "optional": false,
+        "read_only": false
+      },
+      "destination": "agents/quick-implementer.md",
+      "identifier": "quick-implementer",
+      "optional": false,
+      "overlay": {
+        "mode": "subagent",
+        "model": "openai/gpt-5.6-luna"
+      },
+      "policy_sha256": "a15108815449128c73b03025d113f3bb57ef0a7069117e2ed9fcbe6881f406ab",
+      "source": "opencode/agents/quick-implementer.md"
+    }
+  ],
+  "schema_version": 1,
+  "semantic_validator": "agent",
+  "source_format": "yaml-frontmatter",
+  "source_sha256": "3945d6c907aaf8da9d9f21f6e1fba74e54ec3705025798cc9ea54e3671fab7da",
+  "sources": [
+    {
+      "destination": "agents/code-explorer.md",
+      "identifier": "code-explorer",
+      "kind": "agent",
+      "optional_role": null,
+      "sha256": "8a5c4f5da5a1d6b34fa40dd5b853b497d66ffa48a54abd0af1c75303ee71af0f",
+      "source": "opencode/agents/code-explorer.md",
+      "source_format": "yaml-frontmatter"
+    },
+    {
+      "destination": "agents/code-reviewer.md",
+      "identifier": "code-reviewer",
+      "kind": "agent",
+      "optional_role": null,
+      "sha256": "14bd27653a083ea1ba87c6ed77d0b863da3b2e5b3e56e86792bf36f2124418d0",
+      "source": "opencode/agents/code-reviewer.md",
+      "source_format": "yaml-frontmatter"
+    },
+    {
+      "destination": "agents/code-validator.md",
+      "identifier": "code-validator",
+      "kind": "agent",
+      "optional_role": null,
+      "sha256": "6d027f1ea51e6721c9a21d81909cd1bee9f8222373176e0bce88bfa1f8b58339",
+      "source": "opencode/agents/code-validator.md",
+      "source_format": "yaml-frontmatter"
+    },
+    {
+      "destination": "agents/commit-pusher.md",
+      "identifier": "commit-pusher",
+      "kind": "agent",
+      "optional_role": "commit-pusher",
+      "sha256": "75c13634bb33837e149a6d487a8bc53dfd25b16d529ccfffeb3d029784d5c2cd",
+      "source": "opencode/agents/commit-pusher.md",
+      "source_format": "yaml-frontmatter"
+    },
+    {
+      "destination": "agents/implementer.md",
+      "identifier": "implementer",
+      "kind": "agent",
+      "optional_role": null,
+      "sha256": "42668ea9af905785368aa194977e6af1f1f504ec8e0d9227651822b6e68cb697",
+      "source": "opencode/agents/implementer.md",
+      "source_format": "yaml-frontmatter"
+    },
+    {
+      "destination": "agents/quick-implementer.md",
+      "identifier": "quick-implementer",
+      "kind": "agent",
+      "optional_role": null,
+      "sha256": "afc56ab543a399150b879b9356d5511e60414c0303474021a466be7196e0e955",
+      "source": "opencode/agents/quick-implementer.md",
+      "source_format": "yaml-frontmatter"
+    },
+    {
+      "destination": null,
+      "identifier": "project-template",
+      "kind": "project-template",
+      "optional_role": null,
+      "sha256": "6f057715b5abb919d9f518bbaf4caf43e3e0c182a6e619e089224f0f56244f8d",
+      "source": "templates/opencode/AGENTS.md.template",
+      "source_format": "markdown"
+    },
+    {
+      "destination": null,
+      "identifier": "routing",
+      "kind": "routing-source",
+      "optional_role": null,
+      "sha256": "c77478e0be5bb7aebfc0d80bd2ccd598f69ec281731b6edfd16b69db00d90cdd",
+      "source": "rules/OPENCODE_SUBAGENT_ROUTING.md",
+      "source_format": "markdown"
+    }
+  ],
+  "target": "opencode"
+}

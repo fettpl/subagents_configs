@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Literal
 
 from . import filesystem
-from .blocks import _markers, _scan, insert_or_replace_block, remove_exact_block
+from .blocks import (
+    insert_or_replace_block,
+    inspect_managed_block,
+    remove_exact_block,
+    validate_managed_content,
+)
 from .errors import ValidationBlockedError
 from .formats import (
     ValidatedSource,
@@ -36,7 +41,7 @@ from .paths import (
     normalized_absolute,
 )
 from .state import encode_manifest, load_journal, load_manifest
-from .targets import DESCRIPTOR_ORDER, descriptor_for, selected_sources
+from .targets import descriptor_for, selected_sources, targets_for_request
 
 
 @dataclass(frozen=True)
@@ -183,27 +188,14 @@ def _entry_for_block(
 
 
 def _block_from_file(content: bytes, block_id: str) -> ManagedBlock | None:
-    begin, end = _markers(block_id)
-    matches = [item for item in _scan(content) if item[0] == block_id]
-    if not matches:
-        return None
-    _marker_id, start, stop = matches[0]
-    rendered = content[start:stop]
-    prefix = begin + b"\n"
-    suffix = end + b"\n"
-    if not rendered.startswith(prefix) or not rendered.endswith(suffix):
-        raise ValueError("malformed managed block")
-    body = rendered[len(prefix) : -len(suffix)]
-    return ManagedBlock(block_id, begin, end, body, _digest(rendered))
+    return inspect_managed_block(content, block_id)
 
 
 def _selected_sources(
     repo_root: Path, request: Request
 ) -> dict[Target, tuple[ValidatedSource, ...]]:
     inventories: dict[Target, tuple[ValidatedSource, ...]] = {}
-    for target in DESCRIPTOR_ORDER:
-        if target not in request.targets:
-            continue
+    for target in targets_for_request(request.targets, False):
         descriptor = descriptor_for(target)
         specs = selected_sources(descriptor, request.include_commit_pusher)
         try:
@@ -828,7 +820,7 @@ def _target_install(
     except FileNotFoundError:
         pass
     else:
-        _scan(instruction_bytes)
+        validate_managed_content(instruction_bytes)
 
     if request.enable_global_routing:
         routing_identifier = f"routing-{target.value}"
@@ -1154,9 +1146,7 @@ def _validate_request(request: Request, operation: str) -> None:
         raise ValueError("targets must use supported Target values")
     if len(set(request.targets)) != len(request.targets):
         raise ValueError("duplicate targets are not supported")
-    unknown = set(request.targets) - set(DESCRIPTOR_ORDER)
-    if unknown:
-        raise ValueError("unsupported target selection")
+    targets_for_request(request.targets, False)
     if not isinstance(request.homes, Mapping):
         raise ValueError("homes must map every selected target")
     if set(request.homes) != set(request.targets) or any(
@@ -1183,14 +1173,24 @@ def _validate_request(request: Request, operation: str) -> None:
         raise ValueError("Codex multi-agent configuration requires Codex")
 
 
+def validate_lifecycle(request: Request, descriptor) -> None:
+    """Validate a lifecycle request against one canonical target descriptor."""
+    if not hasattr(descriptor, "target"):
+        raise TypeError("lifecycle validation requires a target descriptor")
+    if not isinstance(request, Request):
+        raise ValueError("request must be a Request")
+    if descriptor.target not in request.targets:
+        raise ValueError("descriptor target is not selected by request")
+    _validate_request(request, request.operation)
+
+
 def preflight_install(repo_root: Path, request: Request) -> TransactionPlan:
     _validate_request(request, "install")
     root = normalized_absolute(repo_root)
     inventories = _selected_sources(root, request)
     target_plans = tuple(
         _target_install(root, request, target, inventories[target])
-        for target in DESCRIPTOR_ORDER
-        if target in request.targets
+        for target in targets_for_request(request.targets, False)
     )
     return TransactionPlan("install", target_plans)
 
@@ -1201,8 +1201,7 @@ def preflight_uninstall(repo_root: Path, request: Request) -> TransactionPlan:
     inventories = _selected_sources(root, request)
     target_plans = tuple(
         _target_uninstall(root, request, target, inventories[target])
-        for target in DESCRIPTOR_ORDER
-        if target in request.targets
+        for target in targets_for_request(request.targets, False)
     )
     return TransactionPlan("uninstall", target_plans)
 
