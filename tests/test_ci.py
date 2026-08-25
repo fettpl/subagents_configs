@@ -75,6 +75,29 @@ class CiContractTests(unittest.TestCase):
         sanitized_lower = sanitized.lower()
         if provisioning_count != 1:
             violations.append("unsafe Ubuntu bubblewrap provisioning")
+        setup_positions = [
+            index
+            for index, line in enumerate(text.splitlines())
+            if line.startswith("      - uses: actions/setup-python@")
+        ]
+        bootstrap_positions = [
+            index
+            for index, line in enumerate(text.splitlines())
+            if line == "      - name: Bootstrap developer environment"
+        ]
+        if (
+            len(setup_positions) != 1
+            or len(bootstrap_positions) != 1
+            or setup_positions[0] > bootstrap_positions[0]
+        ):
+            violations.append("unsafe setup/bootstrap ordering")
+        if text.count("scripts/bootstrap-developer.sh") != 1:
+            violations.append("bootstrap mechanism count")
+        if re.search(
+            r"(?m)^\s*(?:run:\s*)?(?:python3?|\.venv/bin/python)\s+-m\s+pip\s+install\b",
+            text,
+        ):
+            violations.append("direct workflow dependency install")
         if "contents: write" in lower:
             violations.append("write permission")
         if "persist-credentials: true" in lower:
@@ -444,6 +467,17 @@ class CiContractTests(unittest.TestCase):
         self.assertIn('_diagnostic(label, "dirty"', validator)
 
     def test_negative_ci_mutations_trigger_contract_guards(self):
+        setup_marker = next(
+            line
+            for line in self.text.splitlines()
+            if line.startswith("      - uses: actions/setup-python@")
+        )
+        bootstrap_marker = "      - name: Bootstrap developer environment"
+        swapped_setup_bootstrap = (
+            self.text.replace(setup_marker, "__SETUP_MARKER__", 1)
+            .replace(bootstrap_marker, setup_marker, 1)
+            .replace("__SETUP_MARKER__", bootstrap_marker, 1)
+        )
         mutations = (
             self.text.replace("contents: read", "contents: write", 1),
             self.text.replace(
@@ -460,6 +494,10 @@ class CiContractTests(unittest.TestCase):
                 "python -m pip install bwrap",
                 1,
             ),
+            swapped_setup_bootstrap,
+            f"{self.text}\n"
+            "      - name: duplicate dependency install\n"
+            "        run: python -m pip install requirements-dev.lock\n",
             f"{self.text}\nrun: sudo true\n",
             f"{self.text}\nrun: apt-get install shellcheck\n",
             f"{self.text}\nrun: brew install shellcheck\n",
