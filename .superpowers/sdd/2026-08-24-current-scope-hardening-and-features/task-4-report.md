@@ -184,3 +184,42 @@ Commit: pending `fix: harden Claude validator hook contract`
   passed.
 - Compileall over `claude-code subagents_configs scripts tests`: passed.
 - `git diff --check`: passed.
+
+## Fix round 4/5 — reject explicit null effort
+
+Status: complete
+Commit: pending `fix: reject null Claude hook effort`
+
+### TDD record
+
+- RED: the regression supplied a valid PreToolUse event with explicit
+  `"effort": null`; the `top.get`-based parser treated it like an absent
+  optional field and did not raise `ValueError`.
+- GREEN: effort validation now checks key presence, so absent effort remains
+  allowed while explicit null is rejected as an invalid object.
+
+### Review mapping and self-review
+
+- Updated only the parser condition and its regression assertion; no event
+  fields, supported effort levels, command grammar, lifecycle behavior, or
+  diagnostics were broadened.
+- Recomputed the pinned hook digest after the source-byte change so catalog
+  validation continues to reject any unapproved hook mutation.
+- Confirmed the regression uses the real parser and a complete valid event,
+  rather than a mock or implementation-only assertion.
+
+### Verification
+
+- Focused: 55 tests passed.
+- Full discovery: 407 tests passed, 1 explicit unsupported-host validation
+  smoke skip.
+- `scripts/validate-catalogs.py`: passed.
+- Ruff check and format check over `claude-code subagents_configs scripts tests`:
+  passed.
+- Compileall over `claude-code subagents_configs scripts tests`: passed.
+- `git diff --check`: passed.
+
+### Concerns
+
+- None for this review item; absent effort remains backward-compatible and
+  explicit null is fail-closed.

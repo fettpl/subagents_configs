@@ -203,7 +203,7 @@ def parse_pretooluse_event(raw: bytes) -> PreToolUseEvent:
     if "permission_mode" in top and top["permission_mode"] not in _PERMISSION_MODES:
         raise ValueError("invalid event")
     effort = top.get("effort")
-    if effort is not None:
+    if "effort" in top:
         if (
             type(effort) is not dict
             or set(effort) != _EFFORT_KEYS

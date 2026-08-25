@@ -131,6 +131,12 @@ class ClaudeCommandGateTests(unittest.TestCase):
                     self.hook.parse_pretooluse_event(
                         json.dumps(malformed_effort).encode()
                     )
+        explicit_null = json.loads(
+            self._event("python3 /abs/helper -- unittest").decode()
+        )
+        explicit_null["effort"] = None
+        with self.assertRaises(ValueError):
+            self.hook.parse_pretooluse_event(json.dumps(explicit_null).encode())
         malformed_input = json.loads(
             self._event("python3 /abs/helper -- unittest").decode()
         )
