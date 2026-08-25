@@ -40,6 +40,28 @@ def _row(**overrides):
 
 
 class CompatibilityLoaderTests(unittest.TestCase):
+    def test_loader_requires_exact_v1_object_envelope_and_list_rows(self):
+        valid = {"schema_version": 1, "rows": [_row()]}
+        cases = (
+            [_row()],
+            {"schema_version": True, "rows": [_row()]},
+            {"schema_version": 1.0, "rows": [_row()]},
+            {"schema_version": 1, "rows": tuple([_row()])},
+            {"schema_version": 1, "rows": [_row()], "extra": False},
+        )
+        for raw in cases:
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "matrix.json"
+                path.write_text(json.dumps(raw), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    load_compatibility_matrix(path)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "matrix.json"
+            path.write_text(json.dumps(valid), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_compatibility_matrix(path)
+
     def test_checked_in_matrix_has_three_runtime_rows_and_unsupported_pi(self):
         rows = load_compatibility_matrix(
             Path(__file__).parents[1] / "catalogs/client-compatibility.json"
@@ -143,6 +165,43 @@ class CompatibilityAdapterTests(unittest.TestCase):
             self.assertTrue(result.supported, result.reasons)
             self.assertEqual(result.reasons, ())
 
+    def test_runtime_registry_declares_explicit_authoritative_features(self):
+        expected = {
+            Target.CODEX: frozenset(
+                {
+                    "agents",
+                    "managed-blocks",
+                    "validation-runtime",
+                    "codex-multi-agent-v2",
+                }
+            ),
+            Target.OPENCODE: frozenset(
+                {"agents", "managed-blocks", "validation-runtime"}
+            ),
+            Target.CLAUDE_CODE: frozenset(
+                {"agents", "managed-blocks", "validation-runtime", "command-gate"}
+            ),
+        }
+        self.assertEqual(
+            {
+                capability.target: capability.compatibility_features
+                for capability in CAPABILITIES
+            },
+            expected,
+        )
+
+    def test_capability_feature_registry_drift_fails_closed(self):
+        row = next(row for row in self.rows if row.target == "codex")
+        for declared in (frozenset(), frozenset({"agents"}), ["agents"]):
+            with self.subTest(declared=declared):
+                capability = replace(
+                    capability_for(Target.CODEX), compatibility_features=declared
+                )
+                with self.assertRaises(ValueError):
+                    validate_client_compatibility(
+                        capability, row, requested_features=frozenset()
+                    )
+
     def test_fixed_reasons_fail_closed_for_contract_fields(self):
         capability = capability_for(Target.CODEX)
         row = next(row for row in self.rows if row.target == "codex")
@@ -191,6 +250,18 @@ class CompatibilityAdapterTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             CompatibilityResult(False, ("arbitrary",))
 
+    def test_direct_constructor_rejects_duplicate_or_control_tuple_members(self):
+        row = next(row for row in self.rows if row.target == "codex")
+        for field, value in (
+            ("tested_python", ("3.11", "3.11")),
+            ("tested_python", ("3.11\n",)),
+            ("tested_os_backends", ("bwrap", "bwrap")),
+            ("tested_os_backends", ("bwrap\x00",)),
+        ):
+            with self.subTest(field=field, value=value):
+                with self.assertRaises((TypeError, ValueError)):
+                    ClientCompatibility(**{**row.__dict__, field: value})
+
     def test_adapter_is_read_only_and_does_not_read_environment_or_write(self):
         row = next(row for row in self.rows if row.target == "codex")
         capability = capability_for(Target.CODEX)
@@ -229,6 +300,109 @@ class ClientVersionCliTests(unittest.TestCase):
         ):
             with self.subTest(argv=argv), self.assertRaises(CliError):
                 parse_request("install", argv, environment(Path(tempfile.gettempdir())))
+
+    def test_client_version_rejection_precedes_home_environment_reads(self):
+        class ExplodingEnvironment(dict):
+            def get(self, key, default=None):
+                raise AssertionError(
+                    f"environment read before version validation: {key}"
+                )
+
+            def __getitem__(self, key):
+                raise AssertionError(
+                    f"environment read before version validation: {key}"
+                )
+
+        environ = ExplodingEnvironment()
+        for version in ("codex=1", "opencode=1.0.0"):
+            with self.subTest(version=version), self.assertRaises(CliError):
+                parse_request(
+                    "install",
+                    ["--target", "codex", "--client-version", version],
+                    environ,
+                )
+
+    def test_incompatible_non_dry_install_and_uninstall_do_not_read_pending_recovery(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "home"
+            state = home / ".subagents_configs"
+            state.mkdir(parents=True)
+            (state / "journal.json").write_text("pending", encoding="utf-8")
+            before = {
+                path: path.read_bytes() for path in root.rglob("*") if path.is_file()
+            }
+            for operation in ("install", "uninstall"):
+                out, err = io.StringIO(), io.StringIO()
+                with patch("subagents_configs.orchestrator._journal_groups") as groups:
+                    status = run(
+                        operation,
+                        [
+                            "--target",
+                            "codex",
+                            "--home",
+                            f"codex={home}",
+                            "--client-version",
+                            "codex=0.1.0",
+                        ],
+                        repo_root=Path(__file__).parents[1],
+                        environ={"HOME": str(root)},
+                        stdout=out,
+                        stderr=err,
+                    )
+                self.assertEqual(status, EXIT_PREFLIGHT_ERROR)
+                self.assertIn("client_version_too_old", err.getvalue())
+                groups.assert_not_called()
+                self.assertEqual(
+                    before,
+                    {
+                        path: path.read_bytes()
+                        for path in root.rglob("*")
+                        if path.is_file()
+                    },
+                )
+
+    def test_optional_feature_mismatch_fails_before_source_or_home_planning(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "home"
+            matrix = load_compatibility_matrix(
+                Path(__file__).parents[1] / "catalogs/client-compatibility.json"
+            )
+            changed = tuple(
+                replace(row, features=row.features - {"routing-codex"})
+                if row.target == "codex"
+                else row
+                for row in matrix
+            )
+            out, err = io.StringIO(), io.StringIO()
+            with (
+                patch(
+                    "subagents_configs.compatibility.load_compatibility_matrix",
+                    return_value=changed,
+                ),
+                patch("subagents_configs.planning._selected_sources") as sources,
+            ):
+                status = run(
+                    "install",
+                    [
+                        "--target",
+                        "codex",
+                        "--home",
+                        f"codex={home}",
+                        "--enable-global-routing",
+                    ],
+                    repo_root=Path(__file__).parents[1],
+                    environ={"HOME": str(root)},
+                    stdout=out,
+                    stderr=err,
+                )
+            self.assertEqual(status, EXIT_PREFLIGHT_ERROR)
+            self.assertIn("feature_unsupported", err.getvalue())
+            self.assertEqual(tuple(root.rglob("*")), ())
+            sources.assert_not_called()
 
     def test_incompatible_dry_run_returns_fixed_reasons_without_writes(self):
         with tempfile.TemporaryDirectory() as raw:

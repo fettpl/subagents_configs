@@ -108,25 +108,6 @@ def parse_request(
     if args.enable_codex_multi_agent and Target.CODEX not in targets:
         raise CliError("--enable-codex-multi-agent requires the codex target")
 
-    homes: dict[Target, Path] = {}
-    for raw_home in args.home or []:
-        target_name, separator, raw_path = raw_home.partition("=")
-        if not separator or not target_name or not raw_path:
-            raise CliError("--home requires TARGET=PATH")
-        try:
-            target = Target(target_name)
-        except ValueError as exc:
-            raise CliError(f"unknown target in --home: {target_name}") from exc
-        if target not in targets:
-            raise CliError(f"home supplied for unselected target: {target_name}")
-        if target in homes:
-            raise CliError(f"duplicate home: {target_name}")
-        homes[target] = _expand_user(raw_path, environ)
-
-    for target in targets:
-        if target not in homes:
-            homes[target] = _default_home(descriptor_for(target), environ)
-
     client_versions: dict[str, str] = {}
     for raw_version in args.client_version or []:
         target_name, separator, version = raw_version.partition("=")
@@ -148,6 +129,25 @@ def parse_request(
             client_versions[target.value] = validate_client_version(version)
         except ValueError as exc:
             raise CliError(f"invalid client version for {target_name}") from exc
+
+    homes: dict[Target, Path] = {}
+    for raw_home in args.home or []:
+        target_name, separator, raw_path = raw_home.partition("=")
+        if not separator or not target_name or not raw_path:
+            raise CliError("--home requires TARGET=PATH")
+        try:
+            target = Target(target_name)
+        except ValueError as exc:
+            raise CliError(f"unknown target in --home: {target_name}") from exc
+        if target not in targets:
+            raise CliError(f"home supplied for unselected target: {target_name}")
+        if target in homes:
+            raise CliError(f"duplicate home: {target_name}")
+        homes[target] = _expand_user(raw_path, environ)
+
+    for target in targets:
+        if target not in homes:
+            homes[target] = _default_home(descriptor_for(target), environ)
 
     return Request(
         operation=operation,

@@ -32,6 +32,14 @@ _CLAUDE_HOOK_SOURCE = "claude-code/hooks/code-validator-pretooluse.py"
 _CLAUDE_HOOK_DESTINATION = (
     ".subagents_configs/claude-hooks/code-validator-pretooluse.py"
 )
+_COMPATIBILITY_BASE_FEATURES = frozenset(
+    {"agents", "managed-blocks", "validation-runtime"}
+)
+COMPATIBILITY_FEATURES: dict[Target, frozenset[str]] = {
+    Target.CODEX: _COMPATIBILITY_BASE_FEATURES | {"codex-multi-agent-v2"},
+    Target.OPENCODE: _COMPATIBILITY_BASE_FEATURES,
+    Target.CLAUDE_CODE: _COMPATIBILITY_BASE_FEATURES | {"command-gate"},
+}
 
 
 def _agent_sources(directory: str, suffix: str, source_format: str) -> list[SourceSpec]:
@@ -118,6 +126,7 @@ CAPABILITIES: tuple[TargetCapability, ...] = (
         config_filename="config.toml",
         project_template=PurePosixPath("templates/AGENTS.md.template"),
         agent_suffix=".toml",
+        compatibility_features=COMPATIBILITY_FEATURES[Target.CODEX],
     ),
     TargetCapability(
         target=Target.OPENCODE,
@@ -147,6 +156,7 @@ CAPABILITIES: tuple[TargetCapability, ...] = (
         config_filename=None,
         project_template=PurePosixPath("templates/opencode/AGENTS.md.template"),
         agent_suffix=".md",
+        compatibility_features=COMPATIBILITY_FEATURES[Target.OPENCODE],
     ),
     TargetCapability(
         target=Target.CLAUDE_CODE,
@@ -187,6 +197,7 @@ CAPABILITIES: tuple[TargetCapability, ...] = (
         config_filename=None,
         project_template=PurePosixPath("templates/claude-code/CLAUDE.md.template"),
         agent_suffix=".md",
+        compatibility_features=COMPATIBILITY_FEATURES[Target.CLAUDE_CODE],
     ),
 )
 

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Literal
 
 from .models import Request, Target, TargetCapability
-from .targets import capability_for, registry_target_order
+from .targets import COMPATIBILITY_FEATURES, capability_for, registry_target_order
 
 _FUTURE_TARGET = "p" + "i"
 CompatibilityTarget = Literal["codex", "opencode", "claude-code", "p" + "i"]
@@ -95,19 +95,19 @@ def _unique_strings(
 def _target_features(
     target: str, capability: TargetCapability | None = None
 ) -> frozenset[str]:
-    declared = getattr(capability, "compatibility_features", None)
-    if declared is None:
-        declared = getattr(capability, "features", None)
-    if declared:
-        if not isinstance(declared, (set, frozenset, tuple, list)):
-            raise ValueError("target feature declaration has the wrong type")
-        return frozenset(str(item) for item in declared)
-    base = {"agents", "managed-blocks", "validation-runtime"}
-    if target == "codex":
-        base.add("codex-multi-agent-v2")
-    if target == "claude-code":
-        base.add("command-gate")
-    return frozenset(base)
+    """Validate and return the capability's explicit feature declaration."""
+
+    if not isinstance(capability, TargetCapability):
+        raise ValueError("target feature declaration is missing")
+    declared = capability.compatibility_features
+    if type(declared) is not frozenset or any(
+        type(feature) is not str or not feature for feature in declared
+    ):
+        raise ValueError("target feature declaration has the wrong type")
+    expected = COMPATIBILITY_FEATURES.get(capability.target)
+    if expected is None or declared != expected:
+        raise ValueError("target feature declaration is incomplete")
+    return declared
 
 
 @dataclass(frozen=True)
@@ -150,26 +150,22 @@ class ClientCompatibility:
             < _version_tuple(self.minimum_client_version)
         ):
             raise ValueError("tested client version is below the minimum")
-        if (
-            type(self.tested_python) is not tuple
-            or not self.tested_python
-            or any(
-                type(version) is not str or not version
-                for version in self.tested_python
-            )
-        ):
+        if type(self.tested_python) is not tuple or not self.tested_python:
             raise ValueError("tested_python must be a non-empty tuple")
+        for version in self.tested_python:
+            _string(version, "tested_python")
+        if len(set(self.tested_python)) != len(self.tested_python):
+            raise ValueError("tested_python contains duplicates")
         if type(self.supported_platforms) is not tuple:
             raise TypeError("supported_platforms must be a tuple")
         if len(set(self.supported_platforms)) != len(self.supported_platforms):
             raise ValueError("supported_platforms contains duplicates")
         if any(platform not in _PLATFORMS for platform in self.supported_platforms):
             raise ValueError("unsupported compatibility platform")
-        if type(self.tested_os_backends) is not tuple or any(
-            type(backend) is not str or not backend
-            for backend in self.tested_os_backends
-        ):
+        if type(self.tested_os_backends) is not tuple:
             raise TypeError("tested_os_backends must be a tuple")
+        for backend in self.tested_os_backends:
+            _string(backend, "tested_os_backends")
         if len(set(self.tested_os_backends)) != len(self.tested_os_backends):
             raise ValueError("tested_os_backends contains duplicates")
         if self.package_source is not None:
@@ -297,10 +293,15 @@ def load_compatibility_matrix(path: Path) -> tuple[ClientCompatibility, ...]:
         )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError("compatibility matrix is unreadable") from exc
-    if isinstance(raw, Mapping):
-        if set(raw) != {"schema_version", "rows"} or raw["schema_version"] != 1:
-            raise ValueError("compatibility matrix has an invalid envelope")
-        raw = raw["rows"]
+    if type(raw) is not dict:
+        raise ValueError("compatibility matrix must use the object envelope")
+    if (
+        set(raw) != {"schema_version", "rows"}
+        or type(raw["schema_version"]) is not int
+        or raw["schema_version"] != 1
+    ):
+        raise ValueError("compatibility matrix has an invalid envelope")
+    raw = raw["rows"]
     if type(raw) is not list or not raw:
         raise ValueError("compatibility matrix must contain rows")
     rows = tuple(_decode_row(item) for item in raw)
