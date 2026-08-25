@@ -6,6 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from subagents_configs import transaction
+from subagents_configs.diagnostics import (
+    Diagnostic,
+    DiagnosticCode,
+    SafeContext,
+    render_diagnostic,
+)
 from subagents_configs.models import Target
 from subagents_configs.orchestrator import EXIT_INCOMPLETE_ROLLBACK, run
 from subagents_configs.planning import preflight_install
@@ -108,7 +114,21 @@ class TransactionPreparationTests(unittest.TestCase):
                 failure_injector=_FailAtFirstOperation(),
             )
         self.assertEqual(status, EXIT_INCOMPLETE_ROLLBACK)
-        self.assertEqual(err.getvalue(), "error: apply failed; rollback incomplete\n")
+        self.assertEqual(
+            err.getvalue(),
+            render_diagnostic(
+                Diagnostic(
+                    DiagnosticCode.APPLY_AMBIGUOUS,
+                    SafeContext(
+                        ("codex",),
+                        (str(home),),
+                        "install",
+                        "apply",
+                        "ambiguous",
+                    ),
+                )
+            ),
+        )
         self.assertNotIn("cleanup-only failure", err.getvalue())
 
     def _prepared(self, home, *, preexisting=False):

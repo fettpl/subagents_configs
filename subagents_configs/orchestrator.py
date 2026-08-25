@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal, TextIO
 
 from .cli import parse_request
+from .diagnostics import DiagnosticCode, emit_diagnostic
 from .errors import CliError, ValidationBlockedError
 from .locks import locked_target_homes
 from .models import Journal, Request, Target
@@ -94,16 +95,48 @@ def _write_output(stream: TextIO, text: str) -> bool:
     return True
 
 
-def _print_error(
+def _emit(
     stderr: TextIO,
-    prefix: str,
-    error: BaseException | None,
-    environ: Mapping[str, str] | None = None,
+    code: DiagnosticCode,
+    *,
+    operation: str,
+    phase: str,
+    status: str,
+    targets: Sequence[Target] = (),
+    homes: Sequence[Path] = (),
 ) -> bool:
-    """Emit only a fixed diagnostic; exception text is never user output."""
+    """Emit a typed diagnostic using only normalized, safe context."""
 
-    del error, environ
-    return _write_output(stderr, f"error: {prefix}\n")
+    target_names = tuple(target.value for target in targets)
+    home_names = tuple(str(home) for home in homes)
+    return emit_diagnostic(
+        stderr,
+        code,
+        target_names,
+        home_names,
+        operation,
+        phase,
+        status,
+    )
+
+
+def _emit_request(
+    stderr: TextIO,
+    request: Request,
+    code: DiagnosticCode,
+    *,
+    phase: str,
+    status: str,
+) -> bool:
+    return _emit(
+        stderr,
+        code,
+        operation=request.operation,
+        phase=phase,
+        status=status,
+        targets=request.targets,
+        homes=tuple(request.homes[target] for target in request.targets),
+    )
 
 
 def _journal_groups(
@@ -199,111 +232,211 @@ def _run_mutating_locked(
     homes = {
         target: normalized_absolute(request.homes[target]) for target in request.targets
     }
+    primary_status: int | None = None
+
+    def _finish(status: int) -> int:
+        nonlocal primary_status
+        primary_status = status
+        return status
+
     try:
         with locked_target_homes(homes, request.targets):
             try:
                 groups = _journal_groups(request)
             except (ValueError, OSError):
-                _print_error(stderr, "recovery validation blocked", None)
-                return EXIT_BLOCKED_VALIDATION
+                _emit_request(
+                    stderr,
+                    request,
+                    DiagnosticCode.VALIDATION_BLOCKED,
+                    phase="recovery",
+                    status="blocked",
+                )
+                return _finish(EXIT_BLOCKED_VALIDATION)
             except Exception:
-                _print_error(stderr, "recovery validation blocked", None)
-                return EXIT_BLOCKED_VALIDATION
+                _emit_request(
+                    stderr,
+                    request,
+                    DiagnosticCode.VALIDATION_BLOCKED,
+                    phase="recovery",
+                    status="blocked",
+                )
+                return _finish(EXIT_BLOCKED_VALIDATION)
             try:
                 _recover_groups(groups)
             except IncompleteRollbackError:
-                _print_error(
+                _emit_request(
                     stderr,
-                    "recovery is incomplete; manual recovery is required",
-                    None,
+                    request,
+                    DiagnosticCode.RECOVERY_INCOMPLETE,
+                    phase="recovery",
+                    status="incomplete",
                 )
-                return EXIT_INCOMPLETE_ROLLBACK
+                return _finish(EXIT_INCOMPLETE_ROLLBACK)
             except (ValueError, OSError, TransactionError, RuntimeError):
-                _print_error(
-                    stderr, "recovery failed: recovery operation blocked", None
+                _emit_request(
+                    stderr,
+                    request,
+                    DiagnosticCode.VALIDATION_BLOCKED,
+                    phase="recovery",
+                    status="blocked",
                 )
-                return EXIT_BLOCKED_VALIDATION
+                return _finish(EXIT_BLOCKED_VALIDATION)
             except Exception:
-                _print_error(
-                    stderr, "recovery failed; rollback status is unknown", None
+                _emit_request(
+                    stderr,
+                    request,
+                    DiagnosticCode.APPLY_AMBIGUOUS,
+                    phase="recovery",
+                    status="ambiguous",
                 )
-                return EXIT_INCOMPLETE_ROLLBACK
+                return _finish(EXIT_INCOMPLETE_ROLLBACK)
             try:
                 plan = _plan(request, repo_root)
             except ValidationBlockedError:
-                _print_error(
-                    stderr, "validation blocked: source validation failed", None
+                _emit_request(
+                    stderr,
+                    request,
+                    DiagnosticCode.VALIDATION_BLOCKED,
+                    phase="validation",
+                    status="blocked",
                 )
-                return EXIT_BLOCKED_VALIDATION
+                return _finish(EXIT_BLOCKED_VALIDATION)
             except ValueError:
-                _print_error(stderr, "preflight rejected", None)
-                return EXIT_PREFLIGHT_ERROR
-            except RuntimeError:
-                _print_error(
-                    stderr, "validation blocked: source validation failed", None
+                _emit_request(
+                    stderr,
+                    request,
+                    DiagnosticCode.PREFLIGHT_REJECTED,
+                    phase="preflight",
+                    status="rejected",
                 )
-                return EXIT_BLOCKED_VALIDATION
+                return _finish(EXIT_PREFLIGHT_ERROR)
+            except RuntimeError:
+                _emit_request(
+                    stderr,
+                    request,
+                    DiagnosticCode.VALIDATION_BLOCKED,
+                    phase="validation",
+                    status="blocked",
+                )
+                return _finish(EXIT_BLOCKED_VALIDATION)
             except OSError:
-                _print_error(stderr, "preflight rejected", None)
-                return EXIT_PREFLIGHT_ERROR
+                _emit_request(
+                    stderr,
+                    request,
+                    DiagnosticCode.PREFLIGHT_REJECTED,
+                    phase="preflight",
+                    status="rejected",
+                )
+                return _finish(EXIT_PREFLIGHT_ERROR)
             except Exception:
-                _print_error(stderr, "preflight rejected: unexpected failure", None)
-                return EXIT_PREFLIGHT_ERROR
+                _emit_request(
+                    stderr,
+                    request,
+                    DiagnosticCode.PREFLIGHT_REJECTED,
+                    phase="preflight",
+                    status="rejected",
+                )
+                return _finish(EXIT_PREFLIGHT_ERROR)
             try:
                 rendered = render_plan(plan)
                 if not _write_output(stdout, rendered):
                     raise OSError("preflight output unavailable")
                 has_conflicts = any(target.conflicts for target in plan.targets)
             except Exception:
-                _print_error(stderr, "preflight output failed", None)
-                return EXIT_PREFLIGHT_ERROR
+                _emit_request(
+                    stderr,
+                    request,
+                    DiagnosticCode.OUTPUT_FAILED,
+                    phase="output",
+                    status="failed",
+                )
+                return _finish(EXIT_PREFLIGHT_ERROR)
             if request.operation == "install" and has_conflicts:
-                try:
-                    conflicted = ", ".join(
-                        target.target.value
-                        for target in plan.targets
-                        if target.conflicts
-                    )
-                    _write_output(
-                        stderr, f"error: managed conflict: targets={conflicted}\n"
-                    )
-                except Exception:
-                    _write_output(stderr, "error: managed conflict\n")
-                return EXIT_MANAGED_CONFLICT
+                _emit_request(
+                    stderr,
+                    request,
+                    DiagnosticCode.MANAGED_CONFLICT,
+                    phase="preflight",
+                    status="conflict",
+                )
+                return _finish(EXIT_MANAGED_CONFLICT)
             try:
                 apply_transaction(plan, failure_injector=failure_injector)
             except IncompleteRollbackError:
-                _print_error(stderr, "apply failed; rollback incomplete", None)
-                return EXIT_INCOMPLETE_ROLLBACK
+                _emit_request(
+                    stderr,
+                    request,
+                    DiagnosticCode.APPLY_AMBIGUOUS,
+                    phase="apply",
+                    status="ambiguous",
+                )
+                return _finish(EXIT_INCOMPLETE_ROLLBACK)
             except (TransactionError, OSError, ValueError):
-                _print_error(stderr, "apply failed; rollback completed", None)
-                return EXIT_APPLY_ERROR
+                _emit_request(
+                    stderr,
+                    request,
+                    DiagnosticCode.APPLY_ROLLED_BACK,
+                    phase="apply",
+                    status="rolled-back",
+                )
+                return _finish(EXIT_APPLY_ERROR)
             except Exception:
-                _print_error(stderr, "apply failed; rollback completed", None)
-                return EXIT_APPLY_ERROR
+                _emit_request(
+                    stderr,
+                    request,
+                    DiagnosticCode.APPLY_ROLLED_BACK,
+                    phase="apply",
+                    status="rolled-back",
+                )
+                return _finish(EXIT_APPLY_ERROR)
             try:
                 has_conflicts = any(target.conflicts for target in plan.targets)
                 if request.operation == "uninstall" and has_conflicts:
                     for target in plan.targets:
                         for conflict in target.conflicts:
-                            if not _write_output(
+                            del conflict
+                            if not emit_diagnostic(
                                 stdout,
-                                (
-                                    f"unresolved: target={target.target.value} "
-                                    f"{conflict}\n"
-                                ),
+                                DiagnosticCode.UNRESOLVED_UNINSTALL,
+                                (target.target.value,),
+                                (str(target.home),),
+                                request.operation,
+                                "output",
+                                "unresolved",
                             ):
                                 raise OSError("unresolved output unavailable")
-                    return EXIT_UNRESOLVED_UNINSTALL
+                    return _finish(EXIT_UNRESOLVED_UNINSTALL)
             except Exception:
-                _print_error(stderr, "unresolved output failed", None)
-                return EXIT_PREFLIGHT_ERROR
-            return EXIT_SUCCESS
+                _emit_request(
+                    stderr,
+                    request,
+                    DiagnosticCode.OUTPUT_FAILED,
+                    phase="output",
+                    status="failed",
+                )
+                return _finish(EXIT_PREFLIGHT_ERROR)
+            return _finish(EXIT_SUCCESS)
     except (ValueError, OSError):
-        _print_error(stderr, "recovery validation blocked", None)
+        if primary_status is not None:
+            return primary_status
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.VALIDATION_BLOCKED,
+            phase="recovery",
+            status="blocked",
+        )
         return EXIT_BLOCKED_VALIDATION
     except Exception:
-        _print_error(stderr, "recovery validation blocked", None)
+        if primary_status is not None:
+            return primary_status
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.VALIDATION_BLOCKED,
+            phase="recovery",
+            status="blocked",
+        )
         return EXIT_BLOCKED_VALIDATION
 
 
@@ -320,20 +453,44 @@ def run(
     """Parse, recover, preflight, render, and optionally apply one operation."""
 
     if operation not in HELP_TEXT:
-        _print_error(stderr, "unsupported operation", None)
+        _emit(
+            stderr,
+            DiagnosticCode.CLI_INVALID,
+            operation=operation,
+            phase="cli",
+            status="invalid",
+        )
         return EXIT_CLI_ERROR
     if len(argv) == 1 and argv[0] == "--help":
         if not _write_output(stdout, HELP_TEXT[operation]):
-            _print_error(stderr, "help output failed", None)
+            _emit(
+                stderr,
+                DiagnosticCode.OUTPUT_FAILED,
+                operation=operation,
+                phase="output",
+                status="failed",
+            )
             return EXIT_PREFLIGHT_ERROR
         return EXIT_SUCCESS
     try:
         request = parse_request(operation, argv, environ)
     except CliError:
-        _print_error(stderr, "invalid command line: invalid arguments", None)
+        _emit(
+            stderr,
+            DiagnosticCode.CLI_INVALID,
+            operation=operation,
+            phase="cli",
+            status="invalid",
+        )
         return EXIT_CLI_ERROR
     except Exception:
-        _print_error(stderr, "invalid command line: unexpected failure", None)
+        _emit(
+            stderr,
+            DiagnosticCode.CLI_INVALID,
+            operation=operation,
+            phase="cli",
+            status="invalid",
+        )
         return EXIT_CLI_ERROR
 
     if not request.dry_run:
@@ -348,94 +505,167 @@ def run(
     try:
         groups = _journal_groups(request)
     except (ValueError, OSError):
-        _print_error(stderr, "recovery validation blocked", None)
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.VALIDATION_BLOCKED,
+            phase="recovery",
+            status="blocked",
+        )
         return EXIT_BLOCKED_VALIDATION
     except Exception:
-        _print_error(
+        _emit_request(
             stderr,
-            "recovery validation blocked: unexpected failure",
-            None,
+            request,
+            DiagnosticCode.VALIDATION_BLOCKED,
+            phase="recovery",
+            status="blocked",
         )
         return EXIT_BLOCKED_VALIDATION
 
     if groups and request.dry_run:
         try:
             for homes, journals in groups:
-                participants = ", ".join(target.value for target in homes)
-                for target, home in homes.items():
-                    line = (
-                        f"recovery required: target={target.value} home={home} "
-                        f"action={_recovery_action(journals)} "
-                        f"transaction={journals[0].transaction_id} "
-                        f"participants={participants}\n"
-                    )
-                    if not _write_output(stdout, line):
+                del journals
+                for target in homes:
+                    if not emit_diagnostic(
+                        stdout,
+                        DiagnosticCode.RECOVERY_REQUIRED,
+                        (target.value,),
+                        (str(homes[target]),),
+                        request.operation,
+                        "recovery",
+                        "required",
+                    ):
                         raise OSError("recovery output unavailable")
         except Exception:
-            _print_error(stderr, "recovery output failed", None)
+            _emit_request(
+                stderr,
+                request,
+                DiagnosticCode.OUTPUT_FAILED,
+                phase="output",
+                status="failed",
+            )
             return EXIT_PREFLIGHT_ERROR
         return EXIT_SUCCESS
 
     try:
         _recover_groups(groups)
     except IncompleteRollbackError:
-        _print_error(
+        _emit_request(
             stderr,
-            "recovery is incomplete; manual recovery is required",
-            None,
+            request,
+            DiagnosticCode.RECOVERY_INCOMPLETE,
+            phase="recovery",
+            status="incomplete",
         )
         return EXIT_INCOMPLETE_ROLLBACK
     except (ValueError, OSError, TransactionError, RuntimeError):
-        _print_error(stderr, "recovery failed: recovery operation blocked", None)
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.VALIDATION_BLOCKED,
+            phase="recovery",
+            status="blocked",
+        )
         return EXIT_BLOCKED_VALIDATION
     except Exception:
-        _print_error(
+        _emit_request(
             stderr,
-            "recovery failed; rollback status is unknown",
-            RuntimeError("unexpected failure"),
+            request,
+            DiagnosticCode.APPLY_AMBIGUOUS,
+            phase="recovery",
+            status="ambiguous",
         )
         return EXIT_INCOMPLETE_ROLLBACK
 
     try:
         plan = _plan(request, repo_root)
     except ValidationBlockedError:
-        _print_error(stderr, "validation blocked: source validation failed", None)
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.VALIDATION_BLOCKED,
+            phase="validation",
+            status="blocked",
+        )
         return EXIT_BLOCKED_VALIDATION
     except ValueError:
-        _print_error(stderr, "preflight rejected", None)
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.PREFLIGHT_REJECTED,
+            phase="preflight",
+            status="rejected",
+        )
         return EXIT_PREFLIGHT_ERROR
     except RuntimeError:
-        _print_error(stderr, "validation blocked: source validation failed", None)
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.VALIDATION_BLOCKED,
+            phase="validation",
+            status="blocked",
+        )
         return EXIT_BLOCKED_VALIDATION
     except OSError:
-        _print_error(stderr, "preflight rejected", None)
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.PREFLIGHT_REJECTED,
+            phase="preflight",
+            status="rejected",
+        )
         return EXIT_PREFLIGHT_ERROR
     except Exception:
-        _print_error(stderr, "preflight rejected: unexpected failure", None)
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.PREFLIGHT_REJECTED,
+            phase="preflight",
+            status="rejected",
+        )
         return EXIT_PREFLIGHT_ERROR
 
     try:
         rendered = render_plan(plan)
     except Exception:
-        _print_error(stderr, "preflight output failed", None)
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.OUTPUT_FAILED,
+            phase="output",
+            status="failed",
+        )
         return EXIT_PREFLIGHT_ERROR
     if not _write_output(stdout, rendered):
-        _print_error(stderr, "preflight output failed", None)
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.OUTPUT_FAILED,
+            phase="output",
+            status="failed",
+        )
         return EXIT_PREFLIGHT_ERROR
     try:
         has_conflicts = any(target.conflicts for target in plan.targets)
     except Exception:
-        _print_error(stderr, "preflight output failed", None)
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.OUTPUT_FAILED,
+            phase="output",
+            status="failed",
+        )
         return EXIT_PREFLIGHT_ERROR
     if request.operation == "install" and has_conflicts:
-        try:
-            conflicted = ", ".join(
-                target.target.value for target in plan.targets if target.conflicts
-            )
-            conflict_line = f"error: managed conflict: targets={conflicted}\n"
-        except Exception:
-            conflict_line = "error: managed conflict\n"
-        _write_output(stderr, conflict_line)
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.MANAGED_CONFLICT,
+            phase="preflight",
+            status="conflict",
+        )
         return EXIT_MANAGED_CONFLICT
     if request.dry_run:
         return EXIT_SUCCESS
@@ -443,28 +673,66 @@ def run(
     try:
         apply_transaction(plan, failure_injector=failure_injector)
     except IncompleteRollbackError:
-        _print_error(stderr, "apply failed; rollback incomplete", None)
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.APPLY_AMBIGUOUS,
+            phase="apply",
+            status="ambiguous",
+        )
         return EXIT_INCOMPLETE_ROLLBACK
     except (TransactionError, OSError, ValueError):
-        _print_error(stderr, "apply failed; rollback completed", None)
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.APPLY_ROLLED_BACK,
+            phase="apply",
+            status="rolled-back",
+        )
         return EXIT_APPLY_ERROR
     except Exception:
-        _print_error(stderr, "apply failed; rollback completed", None)
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.APPLY_ROLLED_BACK,
+            phase="apply",
+            status="rolled-back",
+        )
         return EXIT_APPLY_ERROR
 
     try:
         has_conflicts = any(target.conflicts for target in plan.targets)
     except Exception:
-        _print_error(stderr, "unresolved output failed", None)
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.OUTPUT_FAILED,
+            phase="output",
+            status="failed",
+        )
         return EXIT_PREFLIGHT_ERROR
     if request.operation == "uninstall" and has_conflicts:
         try:
             for target in plan.targets:
                 for conflict in target.conflicts:
-                    line = f"unresolved: target={target.target.value} {conflict}\n"
-                    if not _write_output(stdout, line):
+                    del conflict
+                    if not emit_diagnostic(
+                        stdout,
+                        DiagnosticCode.UNRESOLVED_UNINSTALL,
+                        (target.target.value,),
+                        (str(target.home),),
+                        request.operation,
+                        "output",
+                        "unresolved",
+                    ):
                         raise OSError("unresolved output unavailable")
         except Exception:
-            _print_error(stderr, "unresolved output failed", None)
+            _emit_request(
+                stderr,
+                request,
+                DiagnosticCode.OUTPUT_FAILED,
+                phase="output",
+                status="failed",
+            )
         return EXIT_UNRESOLVED_UNINSTALL
     return EXIT_SUCCESS

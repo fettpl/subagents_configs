@@ -1,3 +1,10 @@
+"""Exception types used internally by the trusted orchestration seams.
+
+Exception messages are implementation data only.  The command-line boundary
+maps exception classes to typed diagnostics and never renders their text.
+"""
+
+
 class CliError(ValueError):
     """Raised when command-line arguments cannot form a valid request."""
 

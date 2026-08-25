@@ -30,9 +30,12 @@ class DocumentationContractTests(unittest.TestCase):
             "fail closed",
         ):
             self.assertIn(topic, lower)
+        self.assertIn(
+            "https://github.com/fettpl/subagents_configs/security/advisories/new",
+            text,
+        )
         self.assertRegex(
-            lower,
-            r"no private (?:vulnerability|security).{0,100}(?:channel|configured)",
+            lower, r"no[- ]secrets.*no[- ]transcripts|no[- ]transcripts.*no[- ]secrets"
         )
         self.assertRegex(lower, r"do not|don't.{0,100}(?:secret|sensitive|exploit)")
         self.assertNotIn("mailto:", lower)
@@ -64,6 +67,12 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("push", lower)
         self.assertIn("publish", lower)
         self.assertIn("branch protection", lower)
+        self.assertIn("public redistribution", lower)
+        self.assertIn("owner", lower)
+        self.assertIn("spdx", lower)
+        self.assertIn("exact license text", lower)
+        self.assertNotIn("license selected", lower)
+        self.assertFalse((ROOT / "LICENSE").exists())
 
 
 if __name__ == "__main__":

@@ -9,11 +9,13 @@ to hosting settings.
 - Keep protected `main` and require CI to pass; required CI is a release gate.
 - Require at least one independent review of the complete diff, including
   security and documentation changes.
-- Decide and record the license before distributing artifacts. Until a license
-  is selected and added, the repository's README remains an honest unresolved
-  license notice.
-- Configure a private security channel and publish its handling policy
-  manually. The current repository does not have one.
+- Block public redistribution until the owner separately approves the exact license text and SPDX identifier. This task does not select a license or add
+  `LICENSE`; adding `LICENSE` is a dedicated, separately reviewed
+  documentation commit after that approval.
+- Configure and verify the private security advisory channel and publish its
+  handling policy manually.
+- The security channel is the private GitHub Security Advisory URL recorded in
+  `SECURITY.md`; do not move vulnerability reports to public issues.
 - Decide the version and write release notes that identify supported clients,
   limitations, migration concerns, and verification evidence.
 
