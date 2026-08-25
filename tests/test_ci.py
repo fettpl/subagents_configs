@@ -49,6 +49,13 @@ class CiContractTests(unittest.TestCase):
             violations.append("package manager")
         if re.search(r"pip[^\n]*(?:bwrap|shellcheck)", sanitized_lower):
             violations.append("tool installation")
+        for required_mode_check in (
+            'test "$((8#$tool_mode & 8#022))" -eq 0',
+            'test "$((8#$sandbox_mode & 8#022))" -eq 0',
+            'test "$((8#$shellcheck_mode & 8#022))" -eq 0',
+        ):
+            if required_mode_check not in text:
+                violations.append("missing fixed-tool mode check")
         for line in text.splitlines():
             if "uses:" in line and not re.search(r"uses:\s+[^@\s]+@[0-9a-f]{40}", line):
                 violations.append("unpinned action")
@@ -205,6 +212,32 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("test \"$(stat -c '%u' /usr/bin/shellcheck)\" = 0", self.text)
         self.assertIn("test \"$(stat -f '%u' /usr/bin/sandbox-exec)\" = 0", self.text)
 
+    def test_fixed_tools_reject_group_or_other_writable_modes(self):
+        self.assertEqual(
+            self.text.count('test "$((8#$tool_mode & 8#022))" -eq 0'),
+            1,
+        )
+        self.assertEqual(
+            self.text.count('test "$((8#$sandbox_mode & 8#022))" -eq 0'),
+            1,
+        )
+        self.assertEqual(
+            self.text.count('test "$((8#$shellcheck_mode & 8#022))" -eq 0'),
+            1,
+        )
+
+    def test_validation_smoke_uses_exact_system_interpreters_per_os(self):
+        self.assertIn("export VALIDATION_SYSTEM_PYTHON=/usr/bin/python3.12", self.text)
+        self.assertIn("export VALIDATION_SYSTEM_PYTHON=/usr/bin/python3\n", self.text)
+        self.assertIn(
+            'if test "${{ matrix.os }}" = "ubuntu-24.04"; then\n'
+            "            export VALIDATION_SYSTEM_PYTHON=/usr/bin/python3.12\n"
+            "          else\n"
+            "            export VALIDATION_SYSTEM_PYTHON=/usr/bin/python3\n"
+            "          fi",
+            self.text,
+        )
+
     def test_shellcheck_is_required_and_executed_only_in_ubuntu_jobs(self):
         ubuntu_gates = re.finditer(
             r"if test \"\$\{\{ matrix\.os \}\}\" = \"ubuntu-24\.04\"; then"
@@ -293,6 +326,7 @@ class CiContractTests(unittest.TestCase):
             self.text.replace(
                 "persist-credentials: false", "persist-credentials: true", 1
             ),
+            self.text.replace("8#$tool_mode & 8#022", "8#$tool_mode & 8#000", 1),
             self.text.replace(
                 "python -m pip install --requirement requirements-dev.txt",
                 "python -m pip install bwrap",

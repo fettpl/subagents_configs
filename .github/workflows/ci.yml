@@ -53,14 +53,22 @@ jobs:
           export PYTHONPYCACHEPREFIX="$ci_root/pycache"
           export RUFF_CACHE_DIR="$ci_root/ruff-cache"
           export VALIDATION_SMOKE_MODE=required
+          if test "${{ matrix.os }}" = "ubuntu-24.04"; then
+            export VALIDATION_SYSTEM_PYTHON=/usr/bin/python3.12
+          else
+            export VALIDATION_SYSTEM_PYTHON=/usr/bin/python3
+          fi
 
           bwrap=""
           sandbox_exec=""
           if test "${{ matrix.os }}" = "ubuntu-24.04"; then
             for candidate in /usr/bin/bwrap /bin/bwrap; do
               if test -f "$candidate" && test -x "$candidate" && test "$(realpath "$candidate")" = "$candidate" && test "$(stat -c '%u' "$candidate")" = 0; then
-                bwrap="$candidate"
-                break
+                tool_mode="$(stat -c '%a' "$candidate")"
+                if test "$((8#$tool_mode & 8#022))" -eq 0; then
+                  bwrap="$candidate"
+                  break
+                fi
               fi
             done
             if test -z "$bwrap"; then
@@ -70,7 +78,10 @@ jobs:
             echo "trusted fixed bwrap: $bwrap"
           else
             if test -f /usr/bin/sandbox-exec && test -x /usr/bin/sandbox-exec && test "$(realpath /usr/bin/sandbox-exec)" = /usr/bin/sandbox-exec && test "$(stat -f '%u' /usr/bin/sandbox-exec)" = 0; then
-              sandbox_exec=/usr/bin/sandbox-exec
+              sandbox_mode="$(stat -f '%Lp' /usr/bin/sandbox-exec)"
+              if test "$((8#$sandbox_mode & 8#022))" -eq 0; then
+                sandbox_exec=/usr/bin/sandbox-exec
+              fi
             fi
             if test -z "$sandbox_exec"; then
               echo "no usable fixed sandbox-exec; refusing an unsandboxed fallback"
@@ -91,7 +102,10 @@ jobs:
           if test "${{ matrix.os }}" = "ubuntu-24.04"; then
             shellcheck=""
             if test -f /usr/bin/shellcheck && test -x /usr/bin/shellcheck && test "$(realpath /usr/bin/shellcheck)" = /usr/bin/shellcheck && test "$(stat -c '%u' /usr/bin/shellcheck)" = 0; then
-              shellcheck=/usr/bin/shellcheck
+              shellcheck_mode="$(stat -c '%a' /usr/bin/shellcheck)"
+              if test "$((8#$shellcheck_mode & 8#022))" -eq 0; then
+                shellcheck=/usr/bin/shellcheck
+              fi
             fi
             if test -z "$shellcheck"; then
               echo "ShellCheck is unavailable; refusing to claim shell validation"

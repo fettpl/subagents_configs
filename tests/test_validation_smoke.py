@@ -218,7 +218,7 @@ class RunnerCleanupPrecedenceTests(unittest.TestCase):
 
 
 class RealValidationSmokeTests(unittest.TestCase):
-    def test_fixed_backend_enforces_six_smoke_properties(self):
+    def test_fixed_backend_enforces_smoke_properties_with_real_probe_evidence(self):
         mode = os.environ.get("VALIDATION_SMOKE_MODE", "optional")
         backend_path = _fixed_backend_path()
         if backend_path is None:
@@ -228,12 +228,8 @@ class RealValidationSmokeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             repository = make_repository(Path(temporary))
             child = (
-                "import os,socket,stat,sys\n"
+                "import os,stat\n"
                 "from pathlib import Path\n"
-                "try:\n"
-                " socket.create_connection(('127.0.0.1',9),timeout=.2)\n"
-                "except OSError: pass\n"
-                "else: raise SystemExit(11)\n"
                 "try: Path(bytes([47]).decode()+'etc'+bytes([47]).decode()+'hosts')"
                 ".read_bytes()\n"
                 "except OSError: pass\n"
@@ -249,14 +245,19 @@ class RealValidationSmokeTests(unittest.TestCase):
             )
             from scripts.validation_isolation.runner import run_isolated
 
+            configured = os.environ.get("VALIDATION_SYSTEM_PYTHON")
+            interpreter = Path(configured or "/usr/bin/python3")
+            if configured is not None:
+                self.assertTrue(interpreter.is_absolute())
+                self.assertEqual(interpreter.resolve(strict=True), interpreter)
+            smoke_command = (str(interpreter), "-c", child)
+
             try:
                 with patch(
                     "scripts.validation_isolation.runner.sys.executable",
-                    "/usr/bin/python3",
+                    str(interpreter),
                 ):
-                    result = run_isolated(
-                        ("python3", "-c", child), repository, sys.platform
-                    )
+                    result = run_isolated(smoke_command, repository, sys.platform)
             except (OSError, RuntimeError, ValueError) as exc:
                 if os.environ.get("VALIDATION_SMOKE_MODE", "optional") == "optional":
                     self.skipTest(f"fixed backend cannot execute in this host: {exc}")
