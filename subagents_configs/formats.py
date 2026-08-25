@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 import stat
@@ -15,6 +16,10 @@ from . import filesystem
 from .models import SourceSpec, Target
 from .paths import normalized_absolute, strict_relative_path
 from .targets import DESCRIPTORS, selected_sources
+
+_COMMAND_GATE_SHA256 = (
+    "834025bb3af05ef4f6fc3977be9ff81c2c136ea6c9fc213f37aefe83de7ba270"
+)
 
 
 @dataclass(frozen=True)
@@ -56,13 +61,48 @@ def validate_yaml_agent(path: Path, content: bytes) -> Mapping[str, object]:
         raise ValueError(
             f"invalid YAML agent {path}: missing closing frontmatter"
         ) from exc
+
+    class _StrictLoader(yaml.SafeLoader):
+        pass
+
+    def _mapping(loader, node, deep=False):
+        mapping = {}
+        for key_node, value_node in node.value:
+            key = loader.construct_object(key_node, deep=deep)
+            if key in mapping:
+                raise yaml.constructor.ConstructorError(
+                    None, None, "duplicate YAML frontmatter key", key_node.start_mark
+                )
+            mapping[key] = loader.construct_object(value_node, deep=deep)
+        return mapping
+
+    _StrictLoader.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping
+    )
     try:
-        parsed = yaml.safe_load("\n".join(lines[1:closing]))
+        parsed = yaml.load(
+            "\n".join(lines[1:closing]),
+            Loader=_StrictLoader,  # noqa: S506
+        )
     except yaml.YAMLError as exc:
         raise ValueError(f"invalid YAML agent {path}: {exc}") from exc
     if not isinstance(parsed, Mapping):
         raise ValueError(f"invalid YAML agent {path}: frontmatter must be a mapping")
-    return dict(parsed)
+    parsed = dict(parsed)
+    allowed = {
+        "name",
+        "description",
+        "mode",
+        "model",
+        "permission",
+        "tools",
+        "permissionMode",
+        "hooks",
+    }
+    unknown = set(parsed) - allowed
+    if unknown:
+        raise ValueError(f"invalid YAML agent {path}: unknown frontmatter fields")
+    return parsed
 
 
 def validate_validation_helper(value: str) -> str:
@@ -77,6 +117,9 @@ def validate_validation_helper(value: str) -> str:
         for character in value
     ):
         raise ValueError("validation helper path contains unsafe rendering characters")
+    path = Path(value)
+    if path.name != "run-validation-isolated.py" or ".." in path.parts:
+        raise ValueError("validation helper path is not the pinned helper")
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -155,6 +198,111 @@ def _reject_claude_tool_escalation(parsed: Mapping[str, object], role: str) -> N
         raise ValueError(f"unsafe permission declaration in {role}")
 
 
+def _validate_command_gate_source(content: bytes, source: Path) -> None:
+    """Require the command gate's fail-closed AST contract, not syntax only."""
+    try:
+        tree = ast.parse(content.decode("utf-8"), str(source), "exec")
+    except (SyntaxError, UnicodeDecodeError) as exc:
+        raise ValueError(f"malformed command gate source: {source}") from exc
+    imports = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    imports.update(
+        alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    )
+    if imports & {
+        "subprocess",
+        "os",
+        "socket",
+        "urllib",
+        "requests",
+        "http",
+        "shutil",
+    }:
+        raise ValueError("command gate source imports an unsafe module")
+    forbidden_calls = {
+        "eval",
+        "exec",
+        "system",
+        "popen",
+        "run",
+        "Popen",
+        "check_call",
+        "check_output",
+        "create_subprocess_exec",
+        "create_subprocess_shell",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            name = node.func.id if isinstance(node.func, ast.Name) else None
+            if name in forbidden_calls:
+                raise ValueError("command gate source can execute commands")
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    required_functions = {
+        "parse_pretooluse_event",
+        "validate_validator_command",
+        "hook_main",
+        "_safe_relative_argument",
+        "_safe_helper",
+    }
+    if not required_functions <= set(functions):
+        raise ValueError("command gate source is missing required functions")
+    literals = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    required_literals = {
+        "PreToolUse",
+        "Bash",
+        "python3",
+        "--",
+        "validation command denied\n",
+        "bash",
+        "env",
+        "python",
+        "*",
+        "?",
+        "~",
+        ";",
+        "&",
+        "|",
+        "<",
+        ">",
+        "$",
+    }
+    if not required_literals <= literals:
+        raise ValueError("command gate source is missing fixed policy constants")
+    hook = functions["hook_main"]
+    hook_calls = {
+        node.func.id
+        for node in ast.walk(hook)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    returns = {
+        node.value.value
+        for node in ast.walk(hook)
+        if isinstance(node, ast.Return)
+        and isinstance(node.value, ast.Constant)
+        and type(node.value.value) is int
+    }
+    if not {"parse_pretooluse_event", "validate_validator_command"} <= hook_calls:
+        raise ValueError("command gate hook does not validate events")
+    if not {0, 2} <= returns:
+        raise ValueError("command gate hook lacks fixed allow/deny statuses")
+    if hashlib.sha256(content).hexdigest() != _COMMAND_GATE_SHA256:
+        raise ValueError("command gate source digest is not pinned")
+
+
 def validate_agent_semantics(
     target: Target,
     role: str,
@@ -162,6 +310,7 @@ def validate_agent_semantics(
     body: str,
     *,
     validation_helper: str = "{{VALIDATION_HELPER}}",
+    hook_path: str = "{{CLAUDE_HOOK}}",
 ) -> None:
     """Reject unknown roles and authority increases in native definitions."""
     expected_roles = {
@@ -176,15 +325,46 @@ def validate_agent_semantics(
         raise ValueError(f"unknown role: {role}")
     if _text_value(parsed, "name") != role:
         raise ValueError(f"agent name does not match source role: {role}")
+    if target is Target.OPENCODE:
+        allowed_fields = {"name", "description", "mode", "model", "permission"}
+    elif target is Target.CLAUDE_CODE:
+        allowed_fields = {
+            "name",
+            "description",
+            "tools",
+            "model",
+            "permissionMode",
+            "hooks",
+        }
+    else:
+        allowed_fields = set(parsed)
+    if set(parsed) - allowed_fields:
+        raise ValueError(f"unknown {target.value} agent frontmatter field")
 
     if target is Target.CODEX:
+        expected_model = {
+            "code-explorer": "gpt-5.6-luna",
+            "code-reviewer": "gpt-5.6-sol",
+            "code-validator": "gpt-5.6-luna",
+            "quick-implementer": "gpt-5.6-luna",
+            "implementer": "gpt-5.6-luna",
+            "commit-pusher": "gpt-5.6-luna",
+        }[role]
+        expected_effort = "medium" if role == "implementer" else "low"
+        if "model" in parsed and parsed.get("model") != expected_model:
+            raise ValueError(f"Codex {role} has an unexpected model")
+        if (
+            "model_reasoning_effort" in parsed
+            and parsed.get("model_reasoning_effort") != expected_effort
+        ):
+            raise ValueError(f"Codex {role} has an unexpected reasoning effort")
         if (
             role in {"code-explorer", "code-reviewer"}
             and parsed.get("sandbox_mode") != "read-only"
         ):
             raise ValueError(f"Codex {role} must use sandbox_mode=read-only")
-        if role == "code-validator" and parsed.get("model") != "gpt-5.6-luna":
-            raise ValueError("Codex code-validator must use gpt-5.6-luna")
+        if role not in {"code-explorer", "code-reviewer"} and "sandbox_mode" in parsed:
+            raise ValueError(f"Codex {role} has an unexpected sandbox mode")
         for key in ("sandbox_mode", "network_access"):
             if parsed.get(key) in {
                 "workspace-write",
@@ -195,6 +375,10 @@ def validate_agent_semantics(
                 raise ValueError(f"unsafe Codex permission in {role}: {key}")
     elif target is Target.OPENCODE:
         _reject_opencode_permission_escalation(parsed, role)
+        if "model" in parsed and parsed.get("model") != "openai/gpt-5.6-luna":
+            raise ValueError(f"OpenCode {role} has an unexpected model")
+        if "mode" in parsed and parsed.get("mode") != "subagent":
+            raise ValueError(f"OpenCode {role} must use mode=subagent")
         if role in {"code-explorer", "code-reviewer"}:
             if parsed.get("mode") != "subagent":
                 raise ValueError(f"OpenCode {role} must use mode=subagent")
@@ -209,6 +393,8 @@ def validate_agent_semantics(
             }
             if parsed.get("permission") != expected:
                 raise ValueError(f"OpenCode {role} has unsafe read permissions")
+            if tuple(parsed["permission"]) != tuple(expected):
+                raise ValueError(f"OpenCode {role} has unsafe permission order")
         if role == "code-validator":
             if parsed.get("model") != "openai/gpt-5.6-luna":
                 raise ValueError("OpenCode code-validator must use openai/gpt-5.6-luna")
@@ -230,6 +416,8 @@ def validate_agent_semantics(
             permission = parsed.get("permission")
             if permission != expected or not isinstance(permission, Mapping):
                 raise ValueError("unsafe validator permissions")
+            if tuple(permission) != tuple(expected):
+                raise ValueError("unsafe validator permission order")
             for key, expected_order in (
                 ("external_directory", ("*", validation_helper)),
                 ("bash", ("*", f"python3 {validation_helper} -- *")),
@@ -237,16 +425,39 @@ def validate_agent_semantics(
                 rules = permission.get(key)
                 if not isinstance(rules, Mapping) or tuple(rules) != expected_order:
                     raise ValueError("unsafe validator permissions")
+        elif (
+            role not in {"code-explorer", "code-reviewer"}
+            and parsed.get("permission") is not None
+        ):
+            raise ValueError(f"OpenCode {role} has unexpected permissions")
     elif target is Target.CLAUDE_CODE:
         _reject_claude_tool_escalation(parsed, role)
+        expected_model = "inherit"
+        if "model" in parsed and parsed.get("model") != expected_model:
+            raise ValueError(f"Claude {role} has an unexpected model")
+        expected_tools = {
+            "code-explorer": "Read, Grep, Glob",
+            "code-reviewer": "Read, Grep, Glob",
+            "code-validator": "Read, Grep, Glob, Bash",
+            "quick-implementer": "Read, Grep, Glob, Edit, Bash",
+            "implementer": "Read, Grep, Glob, Edit, Bash",
+            "commit-pusher": "Read, Grep, Glob, Bash",
+        }
+        if "tools" in parsed and parsed.get("tools") != expected_tools[role]:
+            raise ValueError(f"Claude {role} has an unexpected tool set")
         if role in {"code-explorer", "code-reviewer"}:
             if (
                 parsed.get("tools") != "Read, Grep, Glob"
                 or parsed.get("permissionMode") != "plan"
             ):
                 raise ValueError(f"Claude {role} must be plan-mode read-only")
-        if role == "code-validator" and parsed.get("model") != "inherit":
-            raise ValueError("Claude code-validator must use model=inherit")
+        if (
+            role not in {"code-explorer", "code-reviewer"}
+            and "permissionMode" in parsed
+        ):
+            raise ValueError(f"Claude {role} has an unexpected permission mode")
+        if role != "code-validator" and "hooks" in parsed:
+            raise ValueError(f"Claude {role} has an unexpected hook")
 
     unsafe_values = {"workspace-write", "acceptEdits", "bypassPermissions"}
     if any(
@@ -268,6 +479,24 @@ def validate_agent_semantics(
                 "verified backend",
             ),
         )
+        if target is Target.CLAUDE_CODE:
+            _require_body_concepts(
+                role,
+                body,
+                ("PreToolUse", "technical command gate", "never executes"),
+            )
+            expected_hooks = {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {"type": "command", "command": hook_path, "args": []},
+                        ],
+                    }
+                ]
+            }
+            if parsed.get("hooks") != expected_hooks:
+                raise ValueError("Claude validator hook contract is not exact")
     if role == "code-reviewer":
         _require_body_concepts(
             role,
@@ -299,6 +528,7 @@ def validate_rendered_agent(
     path: Path,
     content: bytes,
     validation_helper: str,
+    hook_path: str = "{{CLAUDE_HOOK}}",
 ) -> Mapping[str, object]:
     """Parse and semantically validate an agent after helper substitution."""
     helper = validate_validation_helper(validation_helper)
@@ -318,6 +548,7 @@ def validate_rendered_agent(
         parsed,
         body,
         validation_helper=helper,
+        hook_path=hook_path,
     )
     return parsed
 
@@ -386,11 +617,14 @@ def validate_source_inventory(
     repo_root: Path,
     target: Target,
     specs: Sequence[SourceSpec],
+    *,
+    require_commit_pusher: bool = False,
 ) -> tuple[ValidatedSource, ...]:
     """Validate every explicit source before returning any inventory item."""
     seen: set[str] = set()
     destinations: set[str] = set()
     parsed_roles: set[str] = set()
+    parsed_by_role: dict[str, Mapping[str, object]] = {}
     result: list[ValidatedSource] = []
     for spec in specs:
         if spec.identifier in seen:
@@ -410,15 +644,20 @@ def validate_source_inventory(
         if not content.strip():
             raise ValueError(f"empty source: {spec.source}")
         placeholder = b"{{VALIDATION_HELPER}}"
-        if placeholder in content and spec.identifier != "code-validator":
+        hook_placeholder = b"{{CLAUDE_HOOK}}"
+        if (
+            placeholder in content or hook_placeholder in content
+        ) and spec.identifier != "code-validator":
             raise ValueError(
-                f"validation placeholder is restricted to code-validator: {spec.source}"
+                f"agent placeholder is restricted to code-validator: {spec.source}"
             )
         if spec.kind == "agent" and spec.identifier == "code-validator":
             if placeholder not in content:
                 raise ValueError(
                     "code-validator source is missing validation placeholder"
                 )
+            if target is Target.CLAUDE_CODE and hook_placeholder not in content:
+                raise ValueError("Claude validator source is missing hook placeholder")
         parsed: Mapping[str, object] | None = None
         try:
             body = content.decode("utf-8")
@@ -436,19 +675,23 @@ def validate_source_inventory(
                 raise ValueError(f"duplicate parsed role: {parsed_role}")
             if isinstance(parsed_role, str):
                 parsed_roles.add(parsed_role)
+                parsed_by_role[parsed_role] = parsed
             validate_agent_semantics(target, spec.identifier, parsed, body)
         elif spec.kind in {"routing-source", "project-template"}:
             if spec.source_format != "markdown":
                 raise ValueError(f"invalid policy format: {spec.source}")
             if "@/absolute/path" in body:
                 raise ValueError(f"unsafe absolute import in policy: {spec.source}")
-        elif spec.kind == "validation-runtime":
+        elif spec.kind in {"validation-runtime", "command-gate"}:
             if spec.source_format != "python":
-                raise ValueError(f"invalid validation runtime format: {spec.source}")
-            try:
-                compile(body, str(spec.source), "exec")
-            except SyntaxError as exc:
-                raise ValueError(f"malformed Python source: {spec.source}") from exc
+                raise ValueError(f"invalid Python source format: {spec.source}")
+            if spec.kind == "command-gate":
+                _validate_command_gate_source(content, Path(spec.source))
+            else:
+                try:
+                    compile(body, str(spec.source), "exec")
+                except SyntaxError as exc:
+                    raise ValueError(f"malformed Python source: {spec.source}") from exc
         else:
             raise ValueError(f"unsupported source kind: {spec.kind}")
         result.append(
@@ -459,6 +702,50 @@ def validate_source_inventory(
                 parsed=parsed,
             )
         )
+    if parsed_roles and sum(spec.kind == "agent" for spec in specs) >= 5:
+        required_roles = {
+            "code-explorer",
+            "code-reviewer",
+            "code-validator",
+            "quick-implementer",
+            "implementer",
+        }
+        supplied_roles = parsed_roles
+        if not required_roles <= supplied_roles or not supplied_roles <= (
+            required_roles | {"commit-pusher"}
+        ):
+            raise ValueError("incomplete agent role inventory")
+        selected_optional = {
+            spec.optional_role for spec in specs if spec.optional_role is not None
+        }
+        if (
+            "commit-pusher" in supplied_roles
+            and "commit-pusher" not in selected_optional
+        ):
+            raise ValueError("optional role inventory is inconsistent")
+        if (
+            "commit-pusher" not in supplied_roles
+            and "commit-pusher" in selected_optional
+        ):
+            raise ValueError("optional role inventory is inconsistent")
+        if require_commit_pusher and "commit-pusher" not in supplied_roles:
+            raise ValueError("required optional role is missing")
+        if required_roles <= supplied_roles:
+            for role, parsed in parsed_by_role.items():
+                if target is Target.CODEX:
+                    if "model" not in parsed or "model_reasoning_effort" not in parsed:
+                        raise ValueError("incomplete Codex role semantics")
+                    if role in {"code-explorer", "code-reviewer"}:
+                        if "sandbox_mode" not in parsed:
+                            raise ValueError("incomplete Codex role semantics")
+                    elif "sandbox_mode" in parsed:
+                        raise ValueError("unexpected Codex role semantics")
+                elif target is Target.OPENCODE:
+                    if not {"model", "mode"} <= set(parsed):
+                        raise ValueError("incomplete OpenCode role semantics")
+                elif target is Target.CLAUDE_CODE:
+                    if not {"model", "tools"} <= set(parsed):
+                        raise ValueError("incomplete Claude role semantics")
     return tuple(result)
 
 
@@ -468,9 +755,17 @@ def validate_all_catalogs(repo_root: Path) -> None:
         specs = tuple(
             spec
             for spec in selected_sources(descriptor, include_commit_pusher=True)
-            if spec.kind in {"agent", "routing-source", "project-template"}
+            if spec.kind
+            in {
+                "agent",
+                "routing-source",
+                "project-template",
+                "command-gate",
+            }
         )
         try:
-            validate_source_inventory(repo_root, target, specs)
+            validate_source_inventory(
+                repo_root, target, specs, require_commit_pusher=True
+            )
         except (OSError, RuntimeError, ValueError) as exc:
             raise ValueError(f"{target.value}: {exc}") from exc

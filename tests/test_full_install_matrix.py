@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from subagents_configs import orchestrator
+from subagents_configs.locks import locked_target_homes
 from subagents_configs.models import Journal, JournalOperation, Target
 from subagents_configs.planning import (
     preflight_install,
@@ -122,9 +123,9 @@ class FullInstallMatrixTests(unittest.TestCase):
         journals = {}
         real_cleanup = transaction._sync_and_remove_journal
 
-        def capture(home, journal):
+        def capture(home, journal, *args, **kwargs):
             journals[journal.target] = journal
-            return real_cleanup(home, journal)
+            return real_cleanup(home, journal, *args, **kwargs)
 
         with patch.object(transaction, "_sync_and_remove_journal", side_effect=capture):
             result = self._run(operation, argv, root, repository=repository)
@@ -383,6 +384,16 @@ class FullInstallMatrixTests(unittest.TestCase):
                 self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
 
     def _assert_exact_inventory(self, home: Path, expected: set[str]) -> None:
+        expected = {*expected, ".subagents_configs.lock"}
+        expected_directories = {
+            ".subagents_configs",
+            ".subagents_configs/backups",
+            ".subagents_configs/validation",
+            ".subagents_configs/validation/validation_isolation",
+            "agents",
+        }
+        if (home / ".subagents_configs/claude-hooks").exists():
+            expected_directories.add(".subagents_configs/claude-hooks")
         entries = {
             path.relative_to(home).as_posix(): path.lstat() for path in home.rglob("*")
         }
@@ -408,14 +419,13 @@ class FullInstallMatrixTests(unittest.TestCase):
                 for relative, item in entries.items()
                 if stat.S_ISDIR(item.st_mode)
             },
-            {
-                ".subagents_configs",
-                ".subagents_configs/backups",
-                ".subagents_configs/validation",
-                ".subagents_configs/validation/validation_isolation",
-                "agents",
-            },
+            expected_directories,
         )
+        lock = home / ".subagents_configs.lock"
+        lock_item = lock.lstat()
+        self.assertTrue(stat.S_ISREG(lock_item.st_mode))
+        self.assertEqual(lock_item.st_nlink, 1)
+        self.assertEqual(stat.S_IMODE(lock_item.st_mode), 0o600)
 
     def _assert_exact_extra_files(
         self,
@@ -492,10 +502,21 @@ class FullInstallMatrixTests(unittest.TestCase):
                         )
                         if target is Target.CODEX:
                             self.assertFalse((home / "config.toml").exists())
+                        command_gate_paths = {
+                            source.destination.as_posix()
+                            for source in descriptor_for(target).sources
+                            if source.destination is not None
+                            and source.kind == "command-gate"
+                        }
                         for relative in managed:
                             item = home / relative
+                            expected_mode = (
+                                0o700 if relative in command_gate_paths else 0o600
+                            )
                             self.assertEqual(
-                                stat.S_IMODE(item.stat().st_mode), 0o600, relative
+                                stat.S_IMODE(item.stat().st_mode),
+                                expected_mode,
+                                relative,
                             )
                         self.assertEqual(
                             (home / "user-notes.txt").read_bytes(),
@@ -928,6 +949,11 @@ class FullInstallMatrixTests(unittest.TestCase):
                                     if operation["backup_path"] is not None
                                 }
                                 expected_after = dict(before[target])
+                                expected_after[".subagents_configs.lock"] = (
+                                    "file",
+                                    0o600,
+                                    b"",
+                                )
                                 for relative in transaction_backups:
                                     expected_after.pop(relative, None)
                                 expected_after.pop(
@@ -984,6 +1010,10 @@ class FullInstallMatrixTests(unittest.TestCase):
                                             "agents": ("directory", 0o700, None),
                                         }
                                     )
+                                    if target is Target.CLAUDE_CODE:
+                                        expected_after[
+                                            ".subagents_configs/claude-hooks"
+                                        ] = ("directory", 0o700, None)
                                 self.assertEqual(after, expected_after)
                                 actual_backups = {
                                     path
@@ -1106,6 +1136,7 @@ class FullInstallMatrixTests(unittest.TestCase):
                                 drifted.relative_to(home).as_posix(),
                             }
                         expected_files |= {"user-notes.txt", "user-link"}
+                        expected_files.add(".subagents_configs.lock")
                         actual_files = {
                             path.relative_to(home).as_posix()
                             for path in home.rglob("*")
@@ -1135,7 +1166,8 @@ class FullInstallMatrixTests(unittest.TestCase):
                     homes = self._homes(root, (Target.CODEX,))
                     marker = homes[Target.CODEX] / "user.txt"
                     marker.write_bytes(b"keep\n")
-                    before = tree_snapshot(homes[Target.CODEX])
+                    with locked_target_homes(homes, (Target.CODEX,)):
+                        before = tree_snapshot(homes[Target.CODEX])
                     status, _output, error = self._run(
                         "install",
                         self._argv((Target.CODEX,), homes),
@@ -1153,7 +1185,8 @@ class FullInstallMatrixTests(unittest.TestCase):
             state.mkdir(mode=0o700)
             (state / "journal.json").write_bytes(b"{}")
             (state / "journal.json").chmod(0o600)
-            before = tree_snapshot(homes[Target.CODEX])
+            with locked_target_homes(homes, (Target.CODEX,)):
+                before = tree_snapshot(homes[Target.CODEX])
             status, _output, error = self._run(
                 "install", self._argv((Target.CODEX,), homes), root
             )
@@ -1188,10 +1221,11 @@ class FullInstallMatrixTests(unittest.TestCase):
                         for home in homes.values():
                             (home / "user.txt").write_bytes(b"keep\n")
                             (home / "user.txt").chmod(0o640)
-                        before = {
-                            target: tree_snapshot(home)
-                            for target, home in homes.items()
-                        }
+                        with locked_target_homes(homes, selected):
+                            before = {
+                                target: tree_snapshot(home)
+                                for target, home in homes.items()
+                            }
                         status, output, error = self._run(
                             "install",
                             self._argv(selected, homes),
@@ -1218,9 +1252,11 @@ class FullInstallMatrixTests(unittest.TestCase):
                     journal = state / "journal.json"
                     journal.write_bytes(b"{}")
                     journal.chmod(0o600)
-                    before = {
-                        target: tree_snapshot(home) for target, home in homes.items()
-                    }
+                    with locked_target_homes(homes, selected):
+                        before = {
+                            target: tree_snapshot(home)
+                            for target, home in homes.items()
+                        }
                     status, output, error = self._run(
                         "install", self._argv(selected, homes), root
                     )
@@ -1249,7 +1285,11 @@ class FullInstallMatrixTests(unittest.TestCase):
                         legacy = home / legacy_name
                         legacy.write_bytes(b"legacy state\n")
                         legacy.chmod(0o600)
-                        before[target] = tree_snapshot(home)
+                    with locked_target_homes(homes, selected):
+                        before = {
+                            target: tree_snapshot(home)
+                            for target, home in homes.items()
+                        }
                     status, output, error = self._run(
                         "install", self._argv(selected, homes), root
                     )
@@ -1455,6 +1495,7 @@ class FullInstallMatrixTests(unittest.TestCase):
                     for target in selected:
                         expected_recovery[target].update(
                             {
+                                ".subagents_configs.lock": ("file", 0o600, b""),
                                 ".subagents_configs": ("directory", 0o700, None),
                                 ".subagents_configs/backups": (
                                     "directory",
@@ -1474,6 +1515,10 @@ class FullInstallMatrixTests(unittest.TestCase):
                                 "agents": ("directory", 0o700, None),
                             }
                         )
+                        if target is Target.CLAUDE_CODE:
+                            expected_recovery[target][
+                                ".subagents_configs/claude-hooks"
+                            ] = ("directory", 0o700, None)
                         expected_recovery[target].update(
                             {
                                 relative: ("file", mode, content)

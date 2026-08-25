@@ -8,6 +8,7 @@ from typing import Literal, TextIO
 
 from .cli import parse_request
 from .errors import CliError, ValidationBlockedError
+from .locks import locked_target_homes
 from .models import Journal, Request, Target
 from .paths import normalized_absolute
 from .planning import (
@@ -185,6 +186,127 @@ def _plan(request: Request, repo_root: Path) -> TransactionPlan:
     return preflight_uninstall(repo_root, request)
 
 
+def _run_mutating_locked(
+    request: Request,
+    *,
+    repo_root: Path,
+    stdout: TextIO,
+    stderr: TextIO,
+    failure_injector: FailureInjector | None,
+) -> int:
+    """Run recovery, planning, preparation, apply, and cleanup in one lock scope."""
+
+    homes = {
+        target: normalized_absolute(request.homes[target]) for target in request.targets
+    }
+    try:
+        with locked_target_homes(homes, request.targets):
+            try:
+                groups = _journal_groups(request)
+            except (ValueError, OSError):
+                _print_error(stderr, "recovery validation blocked", None)
+                return EXIT_BLOCKED_VALIDATION
+            except Exception:
+                _print_error(stderr, "recovery validation blocked", None)
+                return EXIT_BLOCKED_VALIDATION
+            try:
+                _recover_groups(groups)
+            except IncompleteRollbackError:
+                _print_error(
+                    stderr,
+                    "recovery is incomplete; manual recovery is required",
+                    None,
+                )
+                return EXIT_INCOMPLETE_ROLLBACK
+            except (ValueError, OSError, TransactionError, RuntimeError):
+                _print_error(
+                    stderr, "recovery failed: recovery operation blocked", None
+                )
+                return EXIT_BLOCKED_VALIDATION
+            except Exception:
+                _print_error(
+                    stderr, "recovery failed; rollback status is unknown", None
+                )
+                return EXIT_INCOMPLETE_ROLLBACK
+            try:
+                plan = _plan(request, repo_root)
+            except ValidationBlockedError:
+                _print_error(
+                    stderr, "validation blocked: source validation failed", None
+                )
+                return EXIT_BLOCKED_VALIDATION
+            except ValueError:
+                _print_error(stderr, "preflight rejected", None)
+                return EXIT_PREFLIGHT_ERROR
+            except RuntimeError:
+                _print_error(
+                    stderr, "validation blocked: source validation failed", None
+                )
+                return EXIT_BLOCKED_VALIDATION
+            except OSError:
+                _print_error(stderr, "preflight rejected", None)
+                return EXIT_PREFLIGHT_ERROR
+            except Exception:
+                _print_error(stderr, "preflight rejected: unexpected failure", None)
+                return EXIT_PREFLIGHT_ERROR
+            try:
+                rendered = render_plan(plan)
+                if not _write_output(stdout, rendered):
+                    raise OSError("preflight output unavailable")
+                has_conflicts = any(target.conflicts for target in plan.targets)
+            except Exception:
+                _print_error(stderr, "preflight output failed", None)
+                return EXIT_PREFLIGHT_ERROR
+            if request.operation == "install" and has_conflicts:
+                try:
+                    conflicted = ", ".join(
+                        target.target.value
+                        for target in plan.targets
+                        if target.conflicts
+                    )
+                    _write_output(
+                        stderr, f"error: managed conflict: targets={conflicted}\n"
+                    )
+                except Exception:
+                    _write_output(stderr, "error: managed conflict\n")
+                return EXIT_MANAGED_CONFLICT
+            try:
+                apply_transaction(plan, failure_injector=failure_injector)
+            except IncompleteRollbackError:
+                _print_error(stderr, "apply failed; rollback incomplete", None)
+                return EXIT_INCOMPLETE_ROLLBACK
+            except (TransactionError, OSError, ValueError):
+                _print_error(stderr, "apply failed; rollback completed", None)
+                return EXIT_APPLY_ERROR
+            except Exception:
+                _print_error(stderr, "apply failed; rollback completed", None)
+                return EXIT_APPLY_ERROR
+            try:
+                has_conflicts = any(target.conflicts for target in plan.targets)
+                if request.operation == "uninstall" and has_conflicts:
+                    for target in plan.targets:
+                        for conflict in target.conflicts:
+                            if not _write_output(
+                                stdout,
+                                (
+                                    f"unresolved: target={target.target.value} "
+                                    f"{conflict}\n"
+                                ),
+                            ):
+                                raise OSError("unresolved output unavailable")
+                    return EXIT_UNRESOLVED_UNINSTALL
+            except Exception:
+                _print_error(stderr, "unresolved output failed", None)
+                return EXIT_PREFLIGHT_ERROR
+            return EXIT_SUCCESS
+    except (ValueError, OSError):
+        _print_error(stderr, "recovery validation blocked", None)
+        return EXIT_BLOCKED_VALIDATION
+    except Exception:
+        _print_error(stderr, "recovery validation blocked", None)
+        return EXIT_BLOCKED_VALIDATION
+
+
 def run(
     operation: Literal["install", "uninstall"],
     argv: Sequence[str],
@@ -213,6 +335,15 @@ def run(
     except Exception:
         _print_error(stderr, "invalid command line: unexpected failure", None)
         return EXIT_CLI_ERROR
+
+    if not request.dry_run:
+        return _run_mutating_locked(
+            request,
+            repo_root=repo_root,
+            stdout=stdout,
+            stderr=stderr,
+            failure_injector=failure_injector,
+        )
 
     try:
         groups = _journal_groups(request)

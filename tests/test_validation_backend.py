@@ -15,6 +15,25 @@ from tests.validation_isolated_test_support import (
 )
 
 MACOS_SANDBOX = Path("/usr/bin/sandbox-exec")
+CLT_PYTHON = Path(
+    "/Library/Developer/CommandLineTools/Library/Frameworks/"
+    "Python3.framework/Versions/3.9/bin/python3.9"
+)
+
+
+def _fixed_system_path(path: Path) -> bool:
+    try:
+        return path.exists() and path.resolve(strict=True) == path
+    except (OSError, RuntimeError):
+        return False
+
+
+MACOS_RUNTIME_AVAILABLE = (
+    sys.platform == "darwin"
+    and _fixed_system_path(MACOS_SANDBOX)
+    and _fixed_system_path(Path("/usr/bin/python3"))
+)
+MACOS_CLT_AVAILABLE = MACOS_RUNTIME_AVAILABLE and _fixed_system_path(CLT_PYTHON)
 
 
 def _system_launcher() -> Path:
@@ -54,8 +73,8 @@ def _environment(temp: Path) -> dict[str, str]:
 
 class BackendSelectionTests(unittest.TestCase):
     @unittest.skipUnless(
-        MACOS_SANDBOX.exists() and MACOS_SANDBOX.resolve(strict=True) == MACOS_SANDBOX,
-        "macOS sandbox-exec is unavailable",
+        MACOS_RUNTIME_AVAILABLE,
+        "macOS runtime is unavailable",
     )
     def test_selects_only_fixed_macos_launcher(self):
         from scripts.validation_isolation.backend import select_backend
@@ -63,6 +82,15 @@ class BackendSelectionTests(unittest.TestCase):
         backend = select_backend("darwin", MACOS_SANDBOX, None, _system_python())
         self.assertEqual(backend.name, "macos")
         self.assertEqual(backend.launcher, MACOS_SANDBOX)
+
+    @unittest.skipUnless(
+        MACOS_CLT_AVAILABLE, "macOS CommandLineTools Python is unavailable"
+    )
+    def test_selects_exact_command_line_tools_python(self):
+        from scripts.validation_isolation.backend import select_backend
+
+        backend = select_backend("darwin", MACOS_SANDBOX, None, CLT_PYTHON)
+        self.assertEqual(backend.python_executable, CLT_PYTHON)
 
     def test_selects_only_fixed_linux_launcher(self):
         from scripts.validation_isolation.backend import select_backend
@@ -130,7 +158,7 @@ class BackendArgumentTests(unittest.TestCase):
                 ("socket", home / "run" / "socket"),
                 ("credential", home / ".ssh" / "id_rsa"),
             )
-            backend = BackendSpec("macos", _system_launcher(), _system_python())
+            backend = BackendSpec("linux", _system_launcher(), _system_python())
             for spelling in spellings:
                 for name, path in protected:
                     encoded = str(path).replace("/", spelling)
@@ -163,13 +191,22 @@ class BackendArgumentTests(unittest.TestCase):
                                 )
 
             validate_command_argv((str(_system_python()), "/dev/null"), worktree, home)
-            build_backend_argv(
-                backend,
-                (str(worktree / "guest.py"),),
-                worktree,
-                temp,
-                _environment(temp),
-            )
+            if CLT_PYTHON.exists():
+                self.assertEqual(
+                    validate_command_argv((str(CLT_PYTHON),), worktree, home),
+                    (str(CLT_PYTHON),),
+                )
+            with patch(
+                "scripts.validation_isolation.backend.render_macos_profile",
+                side_effect=AssertionError("macOS profile unexpectedly required"),
+            ):
+                build_backend_argv(
+                    backend,
+                    (str(worktree / "guest.py"),),
+                    worktree,
+                    temp,
+                    _environment(temp),
+                )
 
     def test_macos_profile_rejects_seatbelt_syntax_in_every_path(self):
         from scripts.validation_isolation.backend import render_macos_profile
@@ -199,13 +236,22 @@ class BackendArgumentTests(unittest.TestCase):
                     )
 
     def test_macos_profile_denies_network_and_limits_writes(self):
+        from scripts.validation_isolation import backend
         from scripts.validation_isolation.backend import render_macos_profile
 
-        profile = render_macos_profile(
-            Path("/private/tmp/snapshot"),
-            Path("/private/tmp/temp"),
-            _system_python(),
-        )
+        with (
+            patch.object(backend, "_validate_trusted_interpreter"),
+            patch.object(
+                backend,
+                "_validate_system_directory",
+                side_effect=lambda path, label: path,
+            ),
+        ):
+            profile = render_macos_profile(
+                Path("/private/tmp/snapshot"),
+                Path("/private/tmp/temp"),
+                _system_python(),
+            )
         self.assertIn("(deny network*)", profile)
         self.assertIn("/private/tmp/snapshot", profile)
         self.assertIn("/private/tmp/temp", profile)
@@ -219,7 +265,111 @@ class BackendArgumentTests(unittest.TestCase):
             ):
                 self.assertNotIn(f'(subpath "{optional_root}")', profile)
 
+    def test_macos_profile_allows_exact_command_line_tools_python_root(self):
+        from scripts.validation_isolation import backend
+        from scripts.validation_isolation.backend import render_macos_profile
+
+        with (
+            patch.object(backend, "_validate_trusted_interpreter"),
+            patch.object(
+                backend,
+                "_validate_system_directory",
+                side_effect=lambda path, label: path,
+            ),
+        ):
+            profile = render_macos_profile(
+                Path("/private/tmp/snapshot"),
+                Path("/private/tmp/temp"),
+                Path("/usr/bin/python3"),
+            )
+        self.assertIn(
+            '(allow file-read* (subpath "/Library/Developer/CommandLineTools/'
+            'Library/Frameworks/Python3.framework"))',
+            profile,
+        )
+
+    def test_macos_profile_allows_only_fixed_command_line_tools_runtime_literals(self):
+        from scripts.validation_isolation import backend
+        from scripts.validation_isolation.backend import render_macos_profile
+
+        urandom = Path("/dev/urandom")
+        original_lstat = backend.os.lstat
+        original_resolve = Path.resolve
+
+        def trusted_urandom(path):
+            if Path(path) == urandom:
+                return original_lstat("/dev/null")
+            return original_lstat(path)
+
+        def canonical_urandom(path, *, strict=False):
+            if path == urandom:
+                return urandom
+            return original_resolve(path, strict=strict)
+
+        with (
+            patch.object(backend, "_validate_trusted_interpreter"),
+            patch.object(
+                backend,
+                "_validate_system_directory",
+                side_effect=lambda path, label: path,
+            ),
+            patch.object(backend.os, "lstat", side_effect=trusted_urandom),
+            patch.object(Path, "resolve", canonical_urandom),
+        ):
+            profile = render_macos_profile(
+                Path("/private/tmp/snapshot"),
+                Path("/private/tmp/temp"),
+                CLT_PYTHON,
+            )
+        for literal in (
+            "/",
+            "/Library",
+            "/Library/Developer",
+            "/Library/Developer/CommandLineTools",
+            "/Library/Developer/CommandLineTools/Library",
+            "/Library/Developer/CommandLineTools/Library/Frameworks",
+            "/dev",
+            "/dev/urandom",
+        ):
+            self.assertIn(f'(allow file-read* (literal "{literal}"))', profile)
+        self.assertIn(
+            '(allow file-read* (subpath "/Library/Developer/CommandLineTools/'
+            'Library/Frameworks/Python3.framework"))',
+            profile,
+        )
+        self.assertNotIn('(allow file-read* (subpath "/Library"))', profile)
+        self.assertNotIn(
+            '(allow file-read* (subpath "/Library/Developer/CommandLineTools"))',
+            profile,
+        )
+        self.assertNotIn("/var/select/developer_dir", profile)
+
+    def test_macos_profile_does_not_grant_command_line_tools_root_to_other_interpreters(
+        self,
+    ):
+        from scripts.validation_isolation import backend
+        from scripts.validation_isolation.backend import render_macos_profile
+
+        with (
+            patch.object(backend, "_validate_trusted_interpreter"),
+            patch.object(
+                backend,
+                "_validate_system_directory",
+                side_effect=lambda path, label: path,
+            ),
+        ):
+            profile = render_macos_profile(
+                Path("/private/tmp/snapshot"),
+                Path("/private/tmp/temp"),
+                Path("/usr/bin/true"),
+            )
+        self.assertNotIn(
+            "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework",
+            profile,
+        )
+
     def test_macos_profile_rejects_custom_home_interpreter_and_broad_reads(self):
+        from scripts.validation_isolation import backend
         from scripts.validation_isolation.backend import render_macos_profile
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -228,11 +378,19 @@ class BackendArgumentTests(unittest.TestCase):
             custom = _executable(root / "home" / "python")
             with self.assertRaises(ValueError):
                 render_macos_profile(root / "snapshot", root / "temp", custom)
-        profile = render_macos_profile(
-            Path("/private/tmp/snapshot"),
-            Path("/private/tmp/temp"),
-            _system_python(),
-        )
+        with (
+            patch.object(backend, "_validate_trusted_interpreter"),
+            patch.object(
+                backend,
+                "_validate_system_directory",
+                side_effect=lambda path, label: path,
+            ),
+        ):
+            profile = render_macos_profile(
+                Path("/private/tmp/snapshot"),
+                Path("/private/tmp/temp"),
+                Path("/usr/bin/true"),
+            )
         for broad in ("/etc", "/Library", "/System", "/Users", "/home"):
             self.assertNotIn(f'(subpath "{broad}")', profile)
 
@@ -265,6 +423,112 @@ class BackendArgumentTests(unittest.TestCase):
         self.assertIn(str(temp), argv)
         self.assertIn("--ro-bind", argv)
         self.assertNotIn("/Users/pawel/Documents/GitHub/subagents_configs", argv)
+
+    def test_linux_argv_adds_fixed_usrmerge_aliases_from_safe_host_symlinks(self):
+        from scripts.validation_isolation import backend
+        from scripts.validation_isolation.backend import BackendSpec, build_backend_argv
+
+        aliases = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            snapshot = root / "snapshot"
+            temp = root / "temp"
+            snapshot.mkdir(mode=0o700)
+            temp.mkdir(mode=0o700)
+            for name in ("bin", "sbin", "lib", "lib64"):
+                alias = root / name
+                expected = Path("/usr") / name
+                alias.symlink_to(expected)
+                aliases.append((alias, expected))
+
+            original_lstat = backend.os.lstat
+
+            def root_owned_lstat(path):
+                item = original_lstat(path)
+                if any(Path(path) == alias for alias, _ in aliases):
+                    values = list(item)
+                    values[4] = 0
+                    return os.stat_result(values)
+                return item
+
+            original_resolve = Path.resolve
+
+            def resolve_alias(path, *, strict=False):
+                for alias, expected in aliases:
+                    if path == alias:
+                        return expected
+                return original_resolve(path, strict=strict)
+
+            with patch.object(
+                backend, "_USR_MERGE_ALIASES", tuple(aliases), create=True
+            ):
+                with patch.object(backend.os, "lstat", side_effect=root_owned_lstat):
+                    with patch.object(Path, "resolve", resolve_alias):
+                        with patch.object(
+                            backend,
+                            "_validate_system_directory",
+                            side_effect=lambda path, label: path,
+                        ):
+                            argv = build_backend_argv(
+                                BackendSpec(
+                                    "linux", Path("/usr/bin/bwrap"), _system_python()
+                                ),
+                                ("python3",),
+                                snapshot,
+                                temp,
+                                _environment(temp),
+                            )
+
+        for alias, expected in aliases:
+            self.assertIn(str(alias), argv)
+            alias_index = argv.index(str(alias))
+            self.assertEqual(argv[alias_index - 2], "--symlink")
+            self.assertEqual(argv[alias_index - 1], str(expected.relative_to("/")))
+
+    def test_linux_usrmerge_alias_rejects_changed_target(self):
+        from scripts.validation_isolation import backend
+        from scripts.validation_isolation.backend import BackendSpec, build_backend_argv
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            snapshot = root / "snapshot"
+            temp = root / "temp"
+            snapshot.mkdir(mode=0o700)
+            temp.mkdir(mode=0o700)
+            alias = root / "bin"
+            alias.symlink_to("/usr/sbin")
+            original_lstat = backend.os.lstat
+
+            def root_owned_lstat(path):
+                item = original_lstat(path)
+                if Path(path) == alias:
+                    values = list(item)
+                    values[4] = 0
+                    return os.stat_result(values)
+                return item
+
+            with patch.object(
+                backend,
+                "_USR_MERGE_ALIASES",
+                ((alias, Path("/usr/bin")),),
+                create=True,
+            ):
+                with patch.object(backend.os, "lstat", side_effect=root_owned_lstat):
+                    with patch.object(
+                        backend,
+                        "_validate_system_directory",
+                        side_effect=lambda path, label: path,
+                    ):
+                        with self.assertRaises(ValueError):
+                            build_backend_argv(
+                                BackendSpec(
+                                    "linux", Path("/usr/bin/bwrap"), _system_python()
+                                ),
+                                ("python3",),
+                                snapshot,
+                                temp,
+                                _environment(temp),
+                            )
 
     def test_linux_mount_plan_is_canonical_minimal_and_no_custom_prefix(self):
         from scripts.validation_isolation.backend import build_linux_mount_plan
@@ -413,6 +677,18 @@ class BackendArgumentTests(unittest.TestCase):
         from scripts.validation_isolation.backend import _probe_script
 
         script = _probe_script()
+        for assertion in (
+            "socket.create_connection(('127.0.0.1',int(port)),timeout=0.5)",
+            "open('/etc/hosts','rb').read(1)",
+            "open(snapshot_file,'rb').read(1)",
+            "os.readlink('/proc/self/ns/net') == parent_ns",
+            "os.fchmod(output.fileno(),0o600)",
+            "output.flush()",
+            "os.fsync(output.fileno())",
+        ):
+            self.assertIn(assertion, script)
+        for denial in ("raise SystemExit(17)", "raise SystemExit(19)"):
+            self.assertIn(denial, script)
         self.assertIn("output.flush()", script)
         self.assertIn("os.fsync(output.fileno())", script)
 

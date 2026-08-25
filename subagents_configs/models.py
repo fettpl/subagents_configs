@@ -27,8 +27,14 @@ class SourceSpec:
     identifier: str
     source: PurePosixPath
     destination: PurePosixPath | None
-    kind: Literal["agent", "routing-source", "project-template", "validation-runtime"]
-    source_format: Literal["toml", "yaml-frontmatter", "markdown", "python"]
+    kind: Literal[
+        "agent",
+        "routing-source",
+        "project-template",
+        "validation-runtime",
+        "command-gate",
+    ]
+    source_format: Literal["toml", "yaml-frontmatter", "markdown", "python", "json"]
     optional_role: Literal["commit-pusher"] | None = None
 
 
@@ -86,6 +92,8 @@ class JournalOperation:
         "rolled-back",
         "ambiguous",
     ]
+    expected_before_evidence: object | None = None
+    expected_after_evidence: object | None = None
 
 
 @dataclass(frozen=True)

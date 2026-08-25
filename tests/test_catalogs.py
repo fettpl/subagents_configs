@@ -381,6 +381,36 @@ class CatalogTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsafe tool"):
             formats.validate_source_inventory(repo, Target.CLAUDE_CODE, specs)
 
+    def test_yaml_catalog_rejects_duplicate_and_unknown_frontmatter(self):
+        formats = importlib.import_module("subagents_configs.formats")
+        duplicate = (
+            "---\nname: code-explorer\nname: code-reviewer\nmode: subagent\n---\nbody\n"
+        )
+        unknown = "---\nname: code-explorer\nsurprise: true\n---\nbody\n"
+        for content in (duplicate, unknown):
+            repo, specs = self._temporary_agent_specs(
+                Target.OPENCODE, (("code-explorer", content),)
+            )
+            with self.subTest(content=content):
+                with self.assertRaises(ValueError):
+                    formats.validate_source_inventory(repo, Target.OPENCODE, specs)
+
+    def test_opencode_permission_order_and_unknown_key_fail_closed(self):
+        formats = importlib.import_module("subagents_configs.formats")
+        source = ROOT / "opencode/agents/code-explorer.md"
+        content = source.read_text()
+        mutations = (
+            content.replace("  edit: deny\n  bash: deny", "  bash: deny\n  edit: deny"),
+            content.replace("  skill: deny", "  skill: deny\n  mystery: deny"),
+        )
+        for mutated in mutations:
+            repo, specs = self._temporary_agent_specs(
+                Target.OPENCODE, (("code-explorer", mutated),)
+            )
+            with self.subTest(mutated=mutated):
+                with self.assertRaises(ValueError):
+                    formats.validate_source_inventory(repo, Target.OPENCODE, specs)
+
 
 if __name__ == "__main__":
     unittest.main()

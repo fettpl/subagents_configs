@@ -43,6 +43,47 @@ _COMMON_SECRET_PATH_SUFFIXES = frozenset(
         ".docker/config.json",
     }
 )
+_CACHE_COMPONENTS = frozenset(
+    {
+        "cache",
+        ".cache",
+        "__pycache__",
+        ".pytest_cache",
+        ".ruff_cache",
+        "node_modules",
+    }
+)
+
+
+def is_protected_component(name: str) -> bool:
+    """Return whether one relative-path component is never source input.
+
+    Inventory records come from Git and are untrusted.  The policy is kept in
+    one case-folded function so tracked and non-ignored-untracked records use
+    exactly the same secret, environment, and cache exclusions.
+    """
+
+    if not isinstance(name, str) or not name or "/" in name or "\\" in name:
+        return False
+    folded = name.casefold()
+    if folded in _COMMON_SECRET_BASENAMES or folded in _CACHE_COMPONENTS:
+        return True
+    if folded in {".env", ".envrc"} or folded.startswith(".env."):
+        return True
+    return False
+
+
+def is_excluded_relative_path(path: PurePosixPath) -> bool:
+    """Apply the explicit, case-insensitive source inventory policy."""
+
+    if not isinstance(path, PurePosixPath) or path.is_absolute() or ".." in path.parts:
+        return True
+    folded = path.as_posix().casefold()
+    if any(part == ".git" for part in folded.split("/")):
+        return True
+    if any(is_protected_component(part) for part in path.parts):
+        return True
+    return any(folded.endswith(suffix) for suffix in _COMMON_SECRET_PATH_SUFFIXES)
 
 
 def _trusted_git() -> Path:
@@ -127,12 +168,12 @@ def _safe_directory(path: Path, label: str) -> Path:
         try:
             item = os.lstat(current)
         except FileNotFoundError as exc:
-            raise UnsafePathError(f"{label} does not exist: {path}") from exc
+            raise UnsafePathError(f"{label} does not exist") from exc
         if stat.S_ISLNK(item.st_mode) and not (
             current == Path("/var")
             and Path(os.path.realpath(current)) == Path("/private/var")
         ):
-            raise UnsafePathError(f"{label} contains a symlink: {path}")
+            raise UnsafePathError(f"{label} contains a symlink")
     item = os.lstat(path)
     if not stat.S_ISDIR(item.st_mode):
         raise UnsafePathError(f"{label} is not a directory")
@@ -144,8 +185,7 @@ def _checked_git(
 ) -> subprocess.CompletedProcess[bytes]:
     result = git_runner(tuple(arguments), cwd)
     if result.returncode != 0:
-        detail = result.stderr.decode("utf-8", "replace")[:160]
-        raise GitSnapshotError(f"Git command failed: {detail}")
+        raise GitSnapshotError("Git command failed")
     if not isinstance(result.stdout, bytes) or not isinstance(result.stderr, bytes):
         raise GitSnapshotError("Git runner did not return captured bytes")
     return result
@@ -202,26 +242,7 @@ def _relative_path(raw: bytes) -> PurePosixPath | None:
         raise GitSnapshotError("Git inventory contains a malformed path")
     if ".git" in path.parts:
         raise GitSnapshotError("Git inventory exposed .git")
-    if path.name.casefold() in _COMMON_SECRET_BASENAMES or any(
-        path.as_posix().casefold().endswith(suffix)
-        for suffix in _COMMON_SECRET_PATH_SUFFIXES
-    ):
-        return None
-    if any(
-        component
-        in {
-            "cache",
-            ".cache",
-            "__pycache__",
-            ".pytest_cache",
-            ".ruff_cache",
-            "node_modules",
-        }
-        for component in path.parts
-    ):
-        return None
-    basename = path.name
-    if basename in {".env", ".envrc"} or basename.startswith(".env."):
+    if is_excluded_relative_path(path):
         return None
     return path
 
@@ -265,8 +286,7 @@ def list_source_paths(
     ):
         raise GitSnapshotError("Git runner did not return captured bytes")
     if ignored_result.returncode != 0:
-        detail = ignored_result.stderr.decode("utf-8", "replace")[:160]
-        raise GitSnapshotError(f"Git ignored-file inventory failed: {detail}")
+        raise GitSnapshotError("Git ignored-file inventory failed")
     tracked = _parse_nul_inventory(tracked_result.stdout)
     untracked = _parse_nul_inventory(untracked_result.stdout)
     _parse_nul_inventory(ignored_result.stdout)
@@ -517,14 +537,14 @@ def _snapshot_file(
         except FileNotFoundError:
             return SnapshotFile(relative, False, None, None)
         if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-            raise UnsafePathError(f"source path is not a regular file: {relative}")
+            raise UnsafePathError("source path is not a regular file")
         if before.st_nlink != 1:
-            raise UnsafePathError(f"source path is hard-linked: {relative}")
+            raise UnsafePathError("source path is hard-linked")
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(name, flags, dir_fd=parent_descriptor)
         opened = os.fstat(descriptor)
         if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-            raise UnsafePathError(f"source path changed before read: {relative}")
+            raise UnsafePathError("source path changed before read")
         digest = hashlib.sha256()
         while True:
             chunk = os.read(descriptor, _CHUNK_SIZE)
@@ -538,16 +558,14 @@ def _snapshot_file(
             after_path.st_dev,
             after_path.st_ino,
         ) != identity:
-            raise UnsafePathError(f"source path changed while reading: {relative}")
+            raise UnsafePathError("source path changed while reading")
         if (
             after_fd.st_size != before.st_size
             or after_fd.st_mtime_ns != before.st_mtime_ns
             or stat.S_IMODE(after_fd.st_mode) != stat.S_IMODE(before.st_mode)
             or after_fd.st_nlink != 1
         ):
-            raise UnsafePathError(
-                f"source path metadata changed while reading: {relative}"
-            )
+            raise UnsafePathError("source path metadata changed while reading")
         if root_descriptor is not None:
             _check_relative_directory(
                 root_descriptor,
@@ -709,7 +727,7 @@ def _copy_one(
         else _open_directory(worktree / Path(*relative.parts[:-1]), "source")
     )
     if source_parent is None:
-        raise UnsafePathError(f"source parent disappeared: {relative}")
+        raise UnsafePathError("source parent disappeared")
     destination_parent = _destination_directory(
         destination,
         PurePosixPath(*relative.parts[:-1]),
@@ -721,18 +739,18 @@ def _copy_one(
         name = relative.parts[-1]
         source_stat = os.stat(name, dir_fd=source_parent, follow_symlinks=False)
         if stat.S_ISLNK(source_stat.st_mode) or not stat.S_ISREG(source_stat.st_mode):
-            raise UnsafePathError(f"source path is not a regular file: {relative}")
+            raise UnsafePathError("source path is not a regular file")
         if source_stat.st_nlink != 1:
-            raise UnsafePathError(f"source path is hard-linked: {relative}")
+            raise UnsafePathError("source path is hard-linked")
         source_mode = stat.S_IMODE(source_stat.st_mode)
         if source_mode != expected.mode:
-            raise UnsafePathError(f"source mode changed before copying: {relative}")
+            raise UnsafePathError("source mode changed before copying")
         source_descriptor = os.open(
             name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=source_parent
         )
         opened = os.fstat(source_descriptor)
         if (opened.st_dev, opened.st_ino) != (source_stat.st_dev, source_stat.st_ino):
-            raise UnsafePathError(f"source path changed before copy: {relative}")
+            raise UnsafePathError("source path changed before copy")
         destination_descriptor = os.open(
             name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
@@ -760,7 +778,7 @@ def _copy_one(
             or stat.S_IMODE(destination_stat.st_mode) != destination_mode
             or destination_stat.st_size != copied_size
         ):
-            raise UnsafePathError(f"destination file metadata changed: {relative}")
+            raise UnsafePathError("destination file metadata changed")
         final_stat = os.stat(name, dir_fd=destination_parent, follow_symlinks=False)
         if (
             (final_stat.st_dev, final_stat.st_ino)
@@ -770,7 +788,7 @@ def _copy_one(
             or stat.S_IMODE(final_stat.st_mode) != destination_mode
             or final_stat.st_size != copied_size
         ):
-            raise UnsafePathError(f"destination file was replaced: {relative}")
+            raise UnsafePathError("destination file was replaced")
         verify_descriptor = os.open(
             name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=destination_parent
         )
@@ -798,7 +816,7 @@ def _copy_one(
                 or verify_after.st_size != copied_size
                 or verify_digest.hexdigest() != expected.sha256
             ):
-                raise UnsafePathError(f"destination content changed: {relative}")
+                raise UnsafePathError("destination content changed")
         finally:
             os.close(verify_descriptor)
         after_source = os.fstat(source_descriptor)
@@ -810,14 +828,14 @@ def _copy_one(
             after_path.st_dev,
             after_path.st_ino,
         ) != (source_stat.st_dev, source_stat.st_ino):
-            raise UnsafePathError(f"source path changed while copying: {relative}")
+            raise UnsafePathError("source path changed while copying")
         if (
             after_source.st_size != source_stat.st_size
             or stat.S_IMODE(after_source.st_mode) != expected.mode
             or after_source.st_nlink != 1
             or digest.hexdigest() != expected.sha256
         ):
-            raise UnsafePathError(f"source path size changed while copying: {relative}")
+            raise UnsafePathError("source path size changed while copying")
         if source_root_descriptor is not None:
             _check_relative_directory(
                 source_root_descriptor,

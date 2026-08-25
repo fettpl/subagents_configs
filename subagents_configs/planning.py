@@ -61,6 +61,8 @@ class PlannedOperation:
     ownership: Ownership | None
     backup_required: bool
     managed_block_id: str | None
+    expected_before_evidence: object | None = None
+    expected_after_evidence: object | None = None
 
 
 @dataclass(frozen=True)
@@ -205,7 +207,12 @@ def _selected_sources(
         descriptor = descriptor_for(target)
         specs = selected_sources(descriptor, request.include_commit_pusher)
         try:
-            inventories[target] = validate_source_inventory(repo_root, target, specs)
+            inventories[target] = validate_source_inventory(
+                repo_root,
+                target,
+                specs,
+                require_commit_pusher=request.include_commit_pusher,
+            )
         except ValidationBlockedError:
             raise
         except (OSError, RuntimeError, ValueError) as exc:
@@ -226,11 +233,16 @@ def _source_bytes(target: Target, source: ValidatedSource, home: Path) -> bytes:
     if source.spec.kind != "agent":
         return source.content
     if source.spec.identifier != "code-validator":
-        if b"{{VALIDATION_HELPER}}" in source.content:
-            raise ValueError("validation placeholder is restricted to code-validator")
+        if (
+            b"{{VALIDATION_HELPER}}" in source.content
+            or b"{{CLAUDE_HOOK}}" in source.content
+        ):
+            raise ValueError("agent placeholders are restricted to code-validator")
         return source.content
     if b"{{VALIDATION_HELPER}}" not in source.content:
         raise ValueError("code-validator source is missing validation placeholder")
+    if target is Target.CLAUDE_CODE and b"{{CLAUDE_HOOK}}" not in source.content:
+        raise ValueError("Claude validator source is missing hook placeholder")
     helper = normalized_absolute(
         home / ".subagents_configs/validation/run-validation-isolated.py"
     )
@@ -238,14 +250,31 @@ def _source_bytes(target: Target, source: ValidatedSource, home: Path) -> bytes:
     rendered = source.content.replace(
         b"{{VALIDATION_HELPER}}", helper_text.encode("utf-8")
     )
+    if target is Target.CLAUDE_CODE:
+        hook = normalized_absolute(
+            home / ".subagents_configs/claude-hooks/code-validator-pretooluse.py"
+        )
+        rendered = rendered.replace(b"{{CLAUDE_HOOK}}", str(hook).encode("utf-8"))
     if b"{{VALIDATION_HELPER}}" in rendered:
         raise ValueError("validation placeholder remained unresolved")
+    if b"{{CLAUDE_HOOK}}" in rendered:
+        raise ValueError("Claude hook placeholder remained unresolved")
     validate_rendered_agent(
         target,
         source.spec.identifier,
         Path(source.spec.destination or source.spec.source),
         rendered,
         helper_text,
+        hook_path=(
+            str(
+                normalized_absolute(
+                    home
+                    / ".subagents_configs/claude-hooks/code-validator-pretooluse.py"
+                )
+            )
+            if target is Target.CLAUDE_CODE
+            else "{{CLAUDE_HOOK}}"
+        ),
     )
     return rendered
 
@@ -266,6 +295,7 @@ def _make_file_operation(
     ownership: Ownership,
     *,
     backup_required: bool,
+    after_mode: int = 0o600,
 ) -> PlannedOperation | None:
     after_hash = _digest(after)
     before_hash = _digest(before) if before is not None else None
@@ -279,7 +309,7 @@ def _make_file_operation(
                 before_hash,
                 after_hash,
                 before_mode,
-                0o600,
+                after_mode,
                 after,
                 ownership,
                 False,
@@ -295,7 +325,7 @@ def _make_file_operation(
         before_hash,
         after_hash,
         before_mode,
-        0o600,
+        after_mode,
         after,
         ownership,
         backup_required,
@@ -322,6 +352,7 @@ def _plan_regular_source(
         conflicts.append(reason)
         return None, ManifestEntry(**{**prior.__dict__, "unresolved_reason": reason})
     proposed = _source_bytes(target, source, home)
+    installed_mode = 0o700 if source.spec.kind == "command-gate" else 0o600
     existing: tuple[bytes, int] | None
     try:
         existing = _read_regular(destination, source.spec.identifier)
@@ -357,12 +388,13 @@ def _plan_regular_source(
             proposed,
             prior.ownership,
             backup_required=True,
+            after_mode=installed_mode,
         )
         return operation, _entry_for_file(
             source.spec.identifier,
             relative,
             proposed,
-            0o600,
+            installed_mode,
             prior.ownership,
             backup_path=prior.backup_path,
             backup_hash=prior.backup_hash,
@@ -382,15 +414,16 @@ def _plan_regular_source(
             proposed,
             "created",
             backup_required=False,
+            after_mode=installed_mode,
         )
         return operation, _entry_for_file(
-            source.spec.identifier, relative, proposed, 0o600, "created"
+            source.spec.identifier, relative, proposed, installed_mode, "created"
         )
     current, current_mode = existing
     current_hash = _digest(current)
     proposed_hash = _digest(proposed)
     if current_hash == proposed_hash:
-        if current_mode & ~0o600:
+        if current_mode & ~installed_mode:
             reason = f"identical preexisting destination has broad mode {relative}"
             conflicts.append(reason)
             return None, None
@@ -410,13 +443,14 @@ def _plan_regular_source(
         proposed,
         "replaced",
         backup_required=True,
+        after_mode=installed_mode,
     )
     backup_path = _backup_name(source.spec.identifier, current_hash)
     return operation, _entry_for_file(
         source.spec.identifier,
         relative,
         proposed,
-        0o600,
+        installed_mode,
         "replaced",
         backup_path=backup_path,
         backup_hash=current_hash,
@@ -771,7 +805,7 @@ def _target_install(
     conflicts: list[str] = []
     for source in inventory:
         if source.spec.destination is None or (
-            source.spec.kind != "agent" and source.spec.kind != "validation-runtime"
+            source.spec.kind not in {"agent", "validation-runtime", "command-gate"}
         ):
             continue
         operation, entry = _plan_regular_source(
@@ -883,7 +917,7 @@ def _target_install(
             entries[stale.relative_path] = stale
 
     resulting_entries = tuple(entries[key] for key in sorted(entries))
-    resulting = Manifest(1, target, resulting_entries)
+    resulting = Manifest(2, target, resulting_entries)
     manifest_operation = _plan_manifest_operation(
         target, home, prior_manifest, resulting
     )
@@ -1084,7 +1118,7 @@ def _target_uninstall(
         conflicts.append(reason)
         entries.append(ManifestEntry(**{**prior.__dict__, "unresolved_reason": reason}))
     resulting = Manifest(
-        1, target, tuple(sorted(entries, key=lambda item: item.relative_path))
+        2, target, tuple(sorted(entries, key=lambda item: item.relative_path))
     )
     manifest_operation = _plan_manifest_operation(
         target, home, manifest, resulting if entries else None

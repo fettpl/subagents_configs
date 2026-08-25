@@ -29,6 +29,7 @@ ACTIVE_PYTHON = tuple(
             REPOSITORY / "scripts/run-validation-isolated.py",
             REPOSITORY / "scripts/manage-subagents-configs.py",
             REPOSITORY / "scripts/validate-catalogs.py",
+            REPOSITORY / "claude-code/hooks/code-validator-pretooluse.py",
         ),
         key=lambda path: path.as_posix(),
     )
@@ -43,6 +44,7 @@ EXPECTED_ACTIVE_PYTHON = frozenset(
         "subagents_configs/errors.py",
         "subagents_configs/filesystem.py",
         "subagents_configs/formats.py",
+        "subagents_configs/locks.py",
         "subagents_configs/models.py",
         "subagents_configs/orchestrator.py",
         "subagents_configs/paths.py",
@@ -61,6 +63,7 @@ EXPECTED_ACTIVE_PYTHON = frozenset(
         "scripts/validation_isolation/git_snapshot.py",
         "scripts/validation_isolation/models.py",
         "scripts/validation_isolation/runner.py",
+        "claude-code/hooks/code-validator-pretooluse.py",
     )
 )
 

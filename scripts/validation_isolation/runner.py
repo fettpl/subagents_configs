@@ -35,6 +35,54 @@ class ValidationResult:
     evidence: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ValidationFailure:
+    """Bounded primary-failure evidence suitable for cleanup precedence."""
+
+    code: str
+    message: str
+
+
+@dataclass(frozen=True)
+class CleanupResult:
+    """Stable cleanup outcome; no filesystem or exception details are exposed."""
+
+    code: str
+    primary_present: bool
+
+    def __repr__(self) -> str:
+        return (
+            f"CleanupResult(code={self.code!r}, "
+            f"primary_present={self.primary_present!r})"
+        )
+
+
+def _failure_for(exc: BaseException) -> ValidationFailure:
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return ValidationFailure("timeout", "validation command timed out")
+    if isinstance(exc, OSError):
+        return ValidationFailure("launch_failed", "validation command failed to launch")
+    return ValidationFailure("validation_failed", "validation was blocked")
+
+
+def _failure_for_result(result: ValidationResult) -> ValidationFailure | None:
+    if result.returncode == 0:
+        return None
+    return ValidationFailure("child_failed", "validation command returned nonzero")
+
+
+def cleanup_validation_root(
+    root: Path, *, primary: ValidationFailure | None
+) -> CleanupResult:
+    """Remove a private validation root and return only stable typed evidence."""
+
+    try:
+        shutil.rmtree(root, ignore_errors=False)
+    except BaseException:
+        return CleanupResult("cleanup_failed", primary is not None)
+    return CleanupResult("cleaned", primary is not None)
+
+
 ProcessRunner: TypeAlias = Callable[
     [Sequence[str], Path, Mapping[str, str], float | None],
     subprocess.CompletedProcess[str],
@@ -70,7 +118,7 @@ def run_isolated(
     command: Sequence[str],
     start_dir: Path,
     platform_name: str,
-    process_runner=run_process,
+    process_runner: ProcessRunner = run_process,
 ) -> ValidationResult:
     if not command:
         raise ValidationIsolationError("validation command is empty")
@@ -110,6 +158,10 @@ def run_isolated(
             raise ValidationIsolationError(
                 "validation isolation probe timed out"
             ) from exc
+        except (OSError, ValueError, RuntimeError):
+            raise ValidationIsolationError(
+                "validation isolation probe failed"
+            ) from None
         verify_backend(backend)
         private_roots = (
             _private_directory(snapshot.snapshot_root, "snapshot"),
@@ -150,20 +202,25 @@ def run_isolated(
         except BaseException as exc:
             mutation_error = exc
 
-    cleanup_error = None
-    try:
-        shutil.rmtree(isolation_root, ignore_errors=False)
-    except BaseException as exc:
-        cleanup_error = exc
+    primary_exception = mutation_error or primary_error
+    if primary_exception is not None:
+        primary_for_cleanup = _failure_for(primary_exception)
+    else:
+        primary_for_cleanup = None if result is None else _failure_for_result(result)
+    cleanup_result = cleanup_validation_root(
+        isolation_root,
+        primary=primary_for_cleanup,
+    )
 
     if mutation_error is not None:
         raise mutation_error
-    if cleanup_error is not None:
-        raise ValidationIsolationError(
-            "validation temporary cleanup failed"
-        ) from cleanup_error
     if primary_error is not None:
         raise primary_error
     if result is None:
         raise ValidationIsolationError("validation did not produce a result")
-    return result
+    return ValidationResult(
+        result.returncode,
+        result.stdout,
+        result.stderr,
+        (*result.evidence, f"cleanup={cleanup_result.code}"),
+    )

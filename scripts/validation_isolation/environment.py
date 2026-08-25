@@ -41,7 +41,7 @@ def _absolute_without_symlinks(
         except FileNotFoundError as exc:
             if allow_missing_final and current == path:
                 break
-            raise EnvironmentBuildError(f"{label} does not exist: {path}") from exc
+            raise EnvironmentBuildError(f"{label} does not exist") from exc
         # macOS exposes the system temporary tree through the conventional
         # ``/var`` alias.  It is a fixed platform alias, not a user-controlled
         # component; all user-controlled components remain no-follow.
@@ -49,7 +49,7 @@ def _absolute_without_symlinks(
             current == Path("/var")
             and Path(os.path.realpath(current)) == Path("/private/var")
         ):
-            raise EnvironmentBuildError(f"{label} contains a symlink: {path}")
+            raise EnvironmentBuildError(f"{label} contains a symlink")
     return path
 
 
@@ -150,7 +150,10 @@ def build_child_environment(
     """Return a sterile environment without reading any source value.
 
     ``source_env`` is intentionally accepted for the public interface but is
-    never consulted.  This makes accidental future allowlisting impossible.
+    never consulted.  This makes accidental future allowlisting impossible;
+    all returned values are derived from the validated private root and fixed
+    system directories, so hostile caller environment values cannot cross the
+    child-process boundary.
     """
 
     del source_env

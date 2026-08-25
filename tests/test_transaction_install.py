@@ -84,6 +84,7 @@ class TransactionInstallTests(unittest.TestCase):
         plan = self._plan(Target.CODEX, Target.OPENCODE)
         events = []
         original_atomic = transaction.filesystem.atomic_write
+        original_compare_and_swap = transaction.filesystem.compare_and_swap
 
         def record(path, content, mode=0o600):
             events.append(
@@ -91,11 +92,19 @@ class TransactionInstallTests(unittest.TestCase):
             )
             original_atomic(path, content, mode)
 
+        def record_compare_and_swap(path, before, content, mode, action):
+            events.append(
+                ("write", Path(path).relative_to(self.root).as_posix(), content)
+            )
+            return original_compare_and_swap(path, before, content, mode, action)
+
         transaction.filesystem.atomic_write = record
+        transaction.filesystem.compare_and_swap = record_compare_and_swap
         try:
             transaction.apply_transaction(plan)
         finally:
             transaction.filesystem.atomic_write = original_atomic
+            transaction.filesystem.compare_and_swap = original_compare_and_swap
         first_managed = next(
             i
             for i, event in enumerate(events)
@@ -193,6 +202,49 @@ class TransactionInstallTests(unittest.TestCase):
             transaction.filesystem.atomic_write = original
         self.assertTrue(any("applying" in statuses for statuses in writes))
         self.assertTrue(any("applied" in statuses for statuses in writes))
+
+    def test_complete_recovery_rejects_same_content_inode_replacement(self):
+        from subagents_configs import transaction
+
+        plan = self._plan(Target.CODEX)
+        self._apply_leaving_journals(plan)
+        home = self._home()
+        target = home / "agents/code-explorer.toml"
+        original = target.read_bytes()
+        transaction.filesystem.atomic_write(target, original, 0o600)
+        with self.assertRaises(transaction.IncompleteRollbackError):
+            transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertTrue((home / ".subagents_configs/journal.json").exists())
+
+    def test_apply_rejects_same_content_inode_replacement_after_precondition(self):
+        from subagents_configs import transaction
+
+        home = self._home()
+        transaction.apply_transaction(self._plan(Target.CODEX))
+        target = home / "agents/code-explorer.toml"
+        from subagents_configs.planning import preflight_uninstall
+        from tests.helpers import planning_request
+
+        plan = preflight_uninstall(
+            self.repository,
+            planning_request("uninstall", {Target.CODEX: home}),
+        )
+
+        class ReplaceBeforeApply:
+            def __init__(self):
+                self.done = False
+
+            def before_operation(self, _operation_id):
+                if self.done:
+                    return
+                self.done = True
+                content = target.read_bytes()
+                target.unlink()
+                target.write_bytes(content)
+                target.chmod(0o644)
+
+        with self.assertRaises(transaction.TransactionError):
+            transaction.apply_transaction(plan, ReplaceBeforeApply())
 
     def test_noop_reinstall_does_not_rewrite_managed_files_or_create_backups(self):
         from subagents_configs import transaction
@@ -1042,7 +1094,7 @@ class TransactionInstallTests(unittest.TestCase):
         home = self._home()
         transaction.filesystem.ensure_private_directory(home / ".subagents_configs")
         journal = Journal(
-            1,
+            2,
             "empty-complete",
             Target.CODEX,
             (Target.CODEX,),
@@ -1193,7 +1245,7 @@ class TransactionInstallTests(unittest.TestCase):
                 (self._home(target) / ".subagents_configs/journal.json").exists()
             )
 
-    def test_post_replace_journal_failure_also_cleans_every_installed_journal(self):
+    def test_post_replace_journal_failure_retains_unproven_journal(self):
         from subagents_configs import transaction
         from subagents_configs.transaction import apply_transaction
 
@@ -1214,10 +1266,15 @@ class TransactionInstallTests(unittest.TestCase):
         with patch.object(transaction.filesystem, "atomic_write", fail_after_replace):
             with self.assertRaises(transaction.TransactionPreparationError):
                 apply_transaction(plan)
-        for target in (Target.CODEX, Target.OPENCODE):
-            self.assertFalse(
-                (self._home(target) / ".subagents_configs/journal.json").exists()
-            )
+        self.assertFalse(
+            (self._home(Target.CODEX) / ".subagents_configs/journal.json").exists()
+        )
+        # The second atomic write replaced its journal before reporting the
+        # post-replace failure. Its exact identity was not returned, so the
+        # preparation cleanup must retain that recovery evidence.
+        self.assertTrue(
+            (self._home(Target.OPENCODE) / ".subagents_configs/journal.json").exists()
+        )
 
     def test_injected_baseexception_rolls_back_then_reraises_primary(self):
         from subagents_configs.transaction import apply_transaction
@@ -1326,7 +1383,7 @@ class TransactionInstallTests(unittest.TestCase):
         runtime.write_bytes(b"user runtime bytes\n")
         runtime.chmod(0o600)
         (self._home() / ".subagents_configs/manifest.json").write_bytes(
-            encode_manifest(Manifest(1, Target.CODEX, ()))
+            encode_manifest(Manifest(2, Target.CODEX, ()))
         )
         (self._home() / ".subagents_configs/manifest.json").chmod(0o600)
         plan = self._plan(Target.CODEX)
@@ -1361,8 +1418,10 @@ class TransactionInstallTests(unittest.TestCase):
         ):
             with self.assertRaises(transaction.IncompleteRollbackError) as error:
                 apply_transaction(plan, FailBefore())
-        self.assertIn("primary failure", str(error.exception))
-        self.assertIn("cleanup", str(error.exception))
+        self.assertEqual(
+            str(error.exception),
+            "transaction failed and rolled back, but journal cleanup failed",
+        )
         self.assertTrue((self._home() / ".subagents_configs/journal.json").exists())
 
     def test_environment_cannot_activate_a_failure_injector(self):
@@ -1502,7 +1561,7 @@ class TransactionInstallTests(unittest.TestCase):
             "sync_directory",
             side_effect=[OSError("state fsync failed"), None],
         ):
-            with self.assertRaises(OSError):
+            with self.assertRaises(transaction.TransactionError):
                 transaction.recover_incomplete_journal(home, descriptor)
         self.assertTrue((home / ".subagents_configs/journal.json").exists())
         transaction.recover_incomplete_journal(home, descriptor)
@@ -1529,8 +1588,9 @@ class TransactionInstallTests(unittest.TestCase):
         ):
             with self.assertRaises(transaction.TransactionError) as error:
                 transaction.recover_incomplete_journal(home, descriptor)
-        self.assertIn("state fsync failed", str(error.exception))
-        self.assertIn("journal recreate failed", str(error.exception))
+        self.assertEqual(
+            str(error.exception), "journal restoration could not be proved"
+        )
 
     def test_complete_recovery_rejects_sparse_journal_with_original_transaction_id(
         self,

@@ -144,7 +144,14 @@ file already exists.
 
 The safe default is private, target-scoped role/runtime installation with no
 global routing, no Codex multi-agent table, no `commit-pusher`, no network
-access, and no execution of installed prompts or hooks.
+access, and no execution of installed prompts. Claude Code additionally
+receives a managed `PreToolUse` Bash hook at
+`.subagents_configs/claude-hooks/code-validator-pretooluse.py`, scoped to the
+installed `code-validator` agent frontmatter. The hook is a technical gate: it
+parses the Bash event as untrusted JSON and allows only the exact argv shape
+`python3 <installed-helper> -- <safe-relative-arguments>`. It never executes
+the command. The native hook entry is an executable command path with
+`args: []`; direct unrestricted Bash remains denied by the role policy.
 
 ## Command line
 
@@ -242,7 +249,9 @@ Repository files, prompts, issue text, documentation, build scripts, package
 hooks, tool output, and subagent reports are untrusted data. Inspect scripts,
 package lifecycle hooks, Makefiles, and build logic before asking a role to run
 anything. Read-only explorer and reviewer controls are technical client
-restrictions, but model instructions are not a complete security boundary.
+restrictions, and Claude validator commands additionally pass through the
+technical `PreToolUse` gate described above; model instructions are not a
+complete security boundary.
 Review every command and hook, especially commands that can publish Git data,
 delete files, access external directories, or read secrets.
 
@@ -321,10 +330,10 @@ fail-closed backend behavior. Local verification includes:
 ```sh
 python3 scripts/validate-catalogs.py
 python3 -m unittest discover -s tests -p 'test_*.py' -v
-ruff check subagents_configs scripts tests
-ruff format --check subagents_configs scripts tests
+ruff check claude-code subagents_configs scripts tests
+ruff format --check claude-code subagents_configs scripts tests
 shellcheck install.sh uninstall.sh install-codex.sh uninstall-codex.sh install-opencode.sh uninstall-opencode.sh install-claude-code.sh uninstall-claude-code.sh
-python3 -m compileall -q subagents_configs scripts tests
+python3 -m compileall -q claude-code subagents_configs scripts tests
 git diff --check
 ```
 

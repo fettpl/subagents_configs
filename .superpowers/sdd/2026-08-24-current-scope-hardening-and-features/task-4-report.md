@@ -1,0 +1,225 @@
+# Task 4 report — Claude technical command gate and catalog semantics
+
+Status: complete
+Commit: planned `fix: gate Claude validator commands technically`
+
+## TDD record
+
+- RED: the focused gate test could not load the absent
+  `claude-code/hooks/code-validator-pretooluse.py`; the pre-existing catalog
+  policy also did not reject the mutated Claude validator authority.
+- GREEN: the focused gate, catalog, routing, static-security, and full-matrix
+  suite passes after adding the standalone gate, managed settings lifecycle,
+  and exhaustive target/role semantic checks.
+
+## Changed files
+
+- `claude-code/hooks/code-validator-pretooluse.py`: standalone standard-library
+  Claude `PreToolUse` parser and fixed-argv validator. It emits only the fixed
+  denial diagnostic and never executes a command.
+- `claude-code/agents/code-validator.md` and `README.md`: document the
+  technical hook boundary and its non-executing, fixed-helper contract.
+- `subagents_configs/models.py` and `subagents_configs/targets.py`: add typed
+  command-gate and managed-JSON-setting descriptors for Claude.
+- `subagents_configs/formats.py`: enforce model, tool, permission, rule-order,
+  helper, body, role, and optional-role catalog contracts.
+- `subagents_configs/planning.py`: preserve unrelated `settings.json` keys,
+  reject conflicting Bash hooks, and record file/setting ownership and
+  evidence.
+- `subagents_configs/state.py` and `subagents_configs/transaction.py`: decode,
+  validate, inventory, install, rollback, and uninstall command-gate files and
+  setting-owned entries conservatively.
+- `tests/helpers.py`, `tests/test_full_install_matrix.py`, and
+  `tests/test_security_static.py`: include the managed hook in isolated source,
+  lifecycle, mode, and static inventories.
+- `tests/test_claude_command_gate.py`: parser, hostile-input, no-execution,
+  conflict, preservation, ownership, and lifecycle coverage.
+
+## Requirement mapping
+
+- SEC-03: Claude validator Bash is exposed only for the managed `PreToolUse`
+  seam; the hook accepts exactly `python3 <absolute-helper> -- <safe argv>` and
+  treats all event/command data as hostile.
+- TEST-02: source inventories fail closed on catalog authority broadening,
+  missing semantics, helper drift, body-contract drift, role drift, and
+  optional-role inventory changes.
+- Lifecycle: unrelated settings survive installation; conflicting Bash hooks
+  fail before writes; only unchanged repository-owned hook files/settings are
+  removed on uninstall.
+
+## Self-review and concerns
+
+- The hook uses only Python standard-library parsing/path utilities and has no
+  subprocess, shell, network, credential, dynamic-import, or package behavior.
+- The installer does not construct or execute a validation command; it only
+  renders the installed hook path into the managed settings entry.
+- The command-gate file is intentionally owner-private executable (`0700`);
+  all other managed files remain `0600`.
+- Task 5 registry/generator work and Pi behavior are intentionally absent.
+
+## Verification
+
+- Focused: 52 tests passed.
+- Full discovery: 404 tests passed, 1 explicit unsupported-host validation
+  smoke skip.
+- `scripts/validate-catalogs.py`: passed.
+- Ruff check and format check: passed.
+- Python compileall: passed.
+- `git diff --check`: passed.
+
+## Fix round 3/5 — strict effort object and permission mode enum
+
+Status: complete
+Commit: pending `fix: validate Claude hook effort schema`
+
+### TDD record
+
+- RED: the valid realistic event using object-shaped effort and
+  `permission_mode: auto` failed the previous string-only effort parser.
+  Missing/extra/wrong-type/unsupported/control-bearing effort mutations were
+  added as denial cases.
+- GREEN: the parser now accepts only the exact `{"level": ...}` effort object
+  with supported `low`, `medium`, `high`, `xhigh`, or `max` levels, and accepts
+  the documented `auto` permission mode while preserving fixed rejection
+  behavior.
+
+### Verification
+
+- Focused: 55 tests passed.
+- Full discovery: 407 tests passed, 1 explicit unsupported-host validation
+  smoke skip.
+- Catalog validation, Ruff check/format, compileall, and diff-check passed.
+
+## Fix round 1/5 — controller review closure
+
+Status: complete
+Commit: pending `fix: scope Claude command gate to validator agent`
+
+### TDD record
+
+- RED: the new realistic-event and post-`--` attack cases failed against the
+  two-key parser and permissive argv validator; the old settings lifecycle did
+  not prove role scope; and syntax-only command-gate validation accepted a
+  mutated unconditional allow source.
+- GREEN: the revised focused suite passes after moving the hook into validator
+  agent frontmatter, removing global settings ownership, hardening the parser
+  and argv contract, and adding semantic source/catalog checks.
+
+### Review mapping
+
+- Claude `PreToolUse` is now rendered only in `code-validator` frontmatter with
+  the deterministic absolute installed hook path. Global `settings.json`
+  managed-setting models, planning, state, transaction, and lifecycle logic
+  were removed. The installed executable hook file remains managed normally.
+- Hook input requires the realistic common event fields, validates documented
+  optional fields and `agent_type`, rejects duplicate/unknown/type changes,
+  and keeps fixed diagnostics/no execution.
+- Post-helper argv rejects shells, launchers, interpreters, absolute or
+  executable paths, assignments, traversal, glob, and tilde expansion while
+  retaining finite validation command data.
+- Command-gate source validation now checks AST imports/calls, required
+  parser/validator/hook symbols, fixed statuses, policy constants, and the
+  non-executing validation path.
+- YAML duplicate/unknown frontmatter, OpenCode permission maps/order, and
+  Claude role-scoped hook/tool contracts are fail-closed and mutation-tested.
+- README describes role-scoped enforcement; active Ruff/format checks include
+  `claude-code`.
+
+### Fix-round verification
+
+- Focused: 55 tests passed.
+- Full discovery: 407 tests passed, 1 explicit unsupported-host validation
+  smoke skip.
+- `scripts/validate-catalogs.py`: passed.
+- Ruff check and format check over `claude-code subagents_configs scripts tests`:
+  passed.
+- Compileall over `claude-code subagents_configs scripts tests`: passed.
+- `git diff --check`: passed.
+
+### Concerns
+
+- Claude installations on versions without agent-frontmatter hooks must be
+  rejected by future compatibility validation rather than silently falling
+  back to a global hook; no global authority-changing fallback is retained.
+
+## Fix round 2/5 — native exec form, strict event schema, and pinned source
+
+Status: complete
+Commit: pending `fix: harden Claude validator hook contract`
+
+### TDD record
+
+- RED: native `args: []` was absent, realistic optional event/tool-input fields
+  were rejected, broad post-`--` commands (`rm`, `curl`, `git`, `sed`,
+  `busybox`, and unknown PATH tools) were accepted, and the finite Python
+  module validator forms were rejected.
+- GREEN: the focused suite passes after implementing the native exec form,
+  bounded optional schema, finite command grammar, and canonical hook digest
+  contract.
+
+### Review mapping
+
+- Validator frontmatter now requires the exact native command path plus
+  `args: []`; rendered hostile home paths remain data and cannot become shell
+  syntax.
+- PreToolUse parsing accepts documented `prompt_id`, `effort`, permission,
+  transcript, agent, and Bash description/timeout/background fields only with
+  strict types, enums, bounds, control rejection, duplicate rejection, and
+  validator-agent scoping.
+- Command authority is finite: direct `unittest`, `pytest`, `ruff`, and
+  `shellcheck`, or `python3 -m unittest|compileall|pytest`; arbitrary PATH
+  executables, shells, interpreters, launchers, package/network/destructive
+  tools, globbing, tilde, traversal, and assignments are denied.
+- The command-gate source is checked against a canonical SHA-256 digest in
+  addition to its fail-closed AST contract, so every byte mutation is rejected.
+- CI and README Ruff/format/compileall commands include `claude-code`.
+
+### Fix-round verification
+
+- Focused: 55 tests passed.
+- Full discovery: 407 tests passed, 1 explicit unsupported-host validation
+  smoke skip.
+- `scripts/validate-catalogs.py`: passed.
+- Ruff check and format check over `claude-code subagents_configs scripts tests`:
+  passed.
+- Compileall over `claude-code subagents_configs scripts tests`: passed.
+- `git diff --check`: passed.
+
+## Fix round 4/5 — reject explicit null effort
+
+Status: complete
+Commit: pending `fix: reject null Claude hook effort`
+
+### TDD record
+
+- RED: the regression supplied a valid PreToolUse event with explicit
+  `"effort": null`; the `top.get`-based parser treated it like an absent
+  optional field and did not raise `ValueError`.
+- GREEN: effort validation now checks key presence, so absent effort remains
+  allowed while explicit null is rejected as an invalid object.
+
+### Review mapping and self-review
+
+- Updated only the parser condition and its regression assertion; no event
+  fields, supported effort levels, command grammar, lifecycle behavior, or
+  diagnostics were broadened.
+- Recomputed the pinned hook digest after the source-byte change so catalog
+  validation continues to reject any unapproved hook mutation.
+- Confirmed the regression uses the real parser and a complete valid event,
+  rather than a mock or implementation-only assertion.
+
+### Verification
+
+- Focused: 55 tests passed.
+- Full discovery: 407 tests passed, 1 explicit unsupported-host validation
+  smoke skip.
+- `scripts/validate-catalogs.py`: passed.
+- Ruff check and format check over `claude-code subagents_configs scripts tests`:
+  passed.
+- Compileall over `claude-code subagents_configs scripts tests`: passed.
+- `git diff --check`: passed.
+
+### Concerns
+
+- None for this review item; absent effort remains backward-compatible and
+  explicit null is fail-closed.

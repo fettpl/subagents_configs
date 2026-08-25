@@ -37,6 +37,27 @@ _TRUSTED_SYSTEM_PREFIXES = (
     Path("/lib"),
     Path("/lib64"),
 )
+_USR_MERGE_ALIASES = (
+    (Path("/bin"), Path("/usr/bin")),
+    (Path("/sbin"), Path("/usr/sbin")),
+    (Path("/lib"), Path("/usr/lib")),
+    (Path("/lib64"), Path("/usr/lib64")),
+)
+_COMMAND_LINE_TOOLS_PYTHON_FRAMEWORK = Path(
+    "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework"
+)
+_COMMAND_LINE_TOOLS_PYTHON_EXECUTABLE = Path(
+    "/Library/Developer/CommandLineTools/Library/Frameworks/"
+    "Python3.framework/Versions/3.9/bin/python3.9"
+)
+_COMMAND_LINE_TOOLS_READ_ANCESTORS = (
+    Path("/"),
+    Path("/Library"),
+    Path("/Library/Developer"),
+    Path("/Library/Developer/CommandLineTools"),
+    Path("/Library/Developer/CommandLineTools/Library"),
+    Path("/Library/Developer/CommandLineTools/Library/Frameworks"),
+)
 _SECRET_COMPONENTS = frozenset(
     {
         ".aws",
@@ -258,6 +279,7 @@ def _validate_trusted_interpreter(path: Path, platform_name: str) -> None:
         allowed = (
             Path("/usr/bin"),
             Path("/System/Library/Frameworks/Python.framework"),
+            _COMMAND_LINE_TOOLS_PYTHON_FRAMEWORK,
         )
     else:
         allowed = (Path("/usr/bin"), Path("/bin"), Path("/sbin"))
@@ -466,7 +488,12 @@ def _approved_absolute_argument(
         for part in path.parts
     ):
         raise ValidationIsolationError("validation command references protected data")
-    if path in {Path("/dev/null"), Path("/dev/urandom"), Path("/dev/random")}:
+    if path in {
+        Path("/dev/null"),
+        Path("/dev/urandom"),
+        Path("/dev/random"),
+        _COMMAND_LINE_TOOLS_PYTHON_EXECUTABLE,
+    }:
         return
     if not any(_is_within(path, prefix) for prefix in _TRUSTED_SYSTEM_PREFIXES):
         raise ValidationIsolationError(
@@ -497,6 +524,8 @@ def _validate_backend_command(
     snapshot_root: Path,
     temp_root: Path,
     approved_executable: Path | None = None,
+    *,
+    allow_probe_paths: bool = False,
 ) -> tuple[str, ...]:
     values = tuple(command)
     if not values:
@@ -516,7 +545,10 @@ def _validate_backend_command(
                 continue
             if approved_executable is not None and path == approved_executable:
                 continue
-            if token == _probe_script() and path == Path("/proc/self/ns/net"):
+            if allow_probe_paths and path in {
+                Path("/etc/hosts"),
+                Path("/proc/self/ns/net"),
+            }:
                 continue
             _approved_absolute_argument(path, raw=candidate)
     return values
@@ -538,6 +570,43 @@ def render_macos_profile(
     framework = Path("/System/Library/Frameworks/Python.framework")
     if _is_within(python_executable, framework) and framework.exists():
         read_roots.add(_validate_system_directory(framework, "macOS Python framework"))
+    read_literals: tuple[Path, ...] = ()
+    if python_executable == Path("/usr/bin/python3"):
+        read_roots.add(
+            _validate_system_directory(
+                _COMMAND_LINE_TOOLS_PYTHON_FRAMEWORK,
+                "macOS CommandLineTools Python framework",
+            )
+        )
+    elif _is_within(python_executable, _COMMAND_LINE_TOOLS_PYTHON_FRAMEWORK):
+        for ancestor in _COMMAND_LINE_TOOLS_READ_ANCESTORS[1:]:
+            _validate_system_directory(
+                ancestor, "macOS CommandLineTools Python runtime"
+            )
+        urandom = Path("/dev/urandom")
+        try:
+            canonical = urandom.resolve(strict=True)
+            item = os.lstat(urandom)
+        except (OSError, RuntimeError) as exc:
+            raise ValidationIsolationError(
+                "macOS CommandLineTools random source is unavailable"
+            ) from exc
+        if (
+            canonical != urandom
+            or stat.S_ISLNK(item.st_mode)
+            or not stat.S_ISCHR(item.st_mode)
+            or item.st_uid != 0
+        ):
+            raise ValidationIsolationError(
+                "macOS CommandLineTools random source is unsafe"
+            )
+        read_roots.add(
+            _validate_system_directory(
+                _COMMAND_LINE_TOOLS_PYTHON_FRAMEWORK,
+                "macOS CommandLineTools Python framework",
+            )
+        )
+        read_literals = (*_COMMAND_LINE_TOOLS_READ_ANCESTORS, Path("/dev"), urandom)
     lines = [
         "(version 1)",
         "(deny default)",
@@ -550,6 +619,8 @@ def render_macos_profile(
     ]
     for root in sorted(read_roots):
         lines.append(f'(allow file-read* (subpath "{_profile_path(Path(root))}"))')
+    for literal in read_literals:
+        lines.append(f'(allow file-read* (literal "{_profile_path(literal)}"))')
     lines.extend(
         [
             f'(allow file-read* (subpath "{snapshot}"))',
@@ -585,6 +656,40 @@ def build_linux_mount_plan(python_executable: Path) -> tuple[Path, ...]:
     return tuple(mounts)
 
 
+def _safe_usrmerge_aliases() -> tuple[tuple[Path, Path], ...]:
+    """Return fixed usrmerge aliases that are safe to recreate in the guest."""
+
+    aliases: list[tuple[Path, Path]] = []
+    for alias, expected in _USR_MERGE_ALIASES:
+        try:
+            item = os.lstat(alias)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValidationIsolationError(
+                "Linux usrmerge alias is unavailable"
+            ) from exc
+        if not stat.S_ISLNK(item.st_mode):
+            continue
+        if item.st_uid != 0:
+            raise ValidationIsolationError("Linux usrmerge alias is unsafe")
+        # POSIX symlink permission bits are ignored and Linux reports them as
+        # 0777.  The fixed parent and resolved target directories carry the
+        # meaningful root-owned, non-writable safety contract instead.
+        _validate_system_directory(alias.parent, "Linux usrmerge alias parent")
+        try:
+            canonical = alias.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValidationIsolationError(
+                "Linux usrmerge alias is unavailable"
+            ) from exc
+        if canonical != expected:
+            raise ValidationIsolationError("Linux usrmerge alias target is unexpected")
+        _validate_system_directory(expected, "Linux usrmerge alias target")
+        aliases.append((alias, expected))
+    return tuple(aliases)
+
+
 def _existing_mounts(python_executable: Path) -> tuple[Path, ...]:
     return build_linux_mount_plan(python_executable)
 
@@ -595,9 +700,15 @@ def build_backend_argv(
     snapshot_root: Path,
     temp_root: Path,
     env: Mapping[str, str],
+    *,
+    allow_probe_paths: bool = False,
 ) -> tuple[str, ...]:
     command = _validate_backend_command(
-        command, snapshot_root, temp_root, backend.python_executable
+        command,
+        snapshot_root,
+        temp_root,
+        backend.python_executable,
+        allow_probe_paths=allow_probe_paths,
     )
     _validate_child_environment(env, temp_root)
     if backend.name == "macos":
@@ -644,6 +755,8 @@ def build_backend_argv(
     ]
     for mount in _existing_mounts(backend.python_executable):
         argv.extend(("--ro-bind", str(mount), str(mount)))
+    for alias, expected in _safe_usrmerge_aliases():
+        argv.extend(("--symlink", str(expected.relative_to("/")), str(alias)))
     for key, value in sorted(env.items()):
         argv.extend(("--setenv", key, guest_path(value)))
     argv.extend(("--chdir", str(guest_snapshot), "--"))
@@ -681,13 +794,24 @@ def _private_directory(path: Path, label: str) -> PrivateRootIdentity:
 def _probe_script() -> str:
     return (
         "import os,socket,sys\n"
-        "marker,port,parent_ns=sys.argv[1:]\n"
+        "marker,port,parent_ns,snapshot_file=sys.argv[1:]\n"
         "try:\n"
         " socket.create_connection(('127.0.0.1',int(port)),timeout=0.5)\n"
         "except OSError:\n"
         " pass\n"
         "else:\n"
         " raise SystemExit(17)\n"
+        "try:\n"
+        " open('/etc/hosts','rb').read(1)\n"
+        "except OSError:\n"
+        " pass\n"
+        "else:\n"
+        " raise SystemExit(19)\n"
+        "if snapshot_file:\n"
+        " try:\n"
+        "  open(snapshot_file,'rb').read(1)\n"
+        " except OSError:\n"
+        "  raise SystemExit(20)\n"
         "if parent_ns and os.readlink('/proc/self/ns/net') == parent_ns:\n"
         " raise SystemExit(18)\n"
         "with open(marker,'x',encoding='ascii') as output:\n"
@@ -778,6 +902,17 @@ def probe_backend(
             raise ValidationIsolationError(
                 "loopback probe listener is unavailable"
             ) from exc
+        snapshot_file_argument = ""
+        for candidate in sorted(snapshot_root.rglob("*"), key=lambda path: str(path)):
+            try:
+                item = os.lstat(candidate)
+            except OSError as exc:
+                raise ValidationIsolationError(
+                    "validation snapshot probe file is unsafe"
+                ) from exc
+            if stat.S_ISREG(item.st_mode):
+                snapshot_file_argument = str(candidate)
+                break
         probe_command = (
             str(backend.python_executable),
             "-c",
@@ -785,8 +920,16 @@ def probe_backend(
             str(marker),
             str(listener.getsockname()[1]),
             parent_namespace,
+            snapshot_file_argument,
         )
-        argv = build_backend_argv(backend, probe_command, snapshot_root, temp_root, env)
+        argv = build_backend_argv(
+            backend,
+            probe_command,
+            snapshot_root,
+            temp_root,
+            env,
+            allow_probe_paths=True,
+        )
         try:
             completed = run_verified_process(
                 backend,

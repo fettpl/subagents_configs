@@ -7,10 +7,12 @@ import json
 import os
 import re
 import stat
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import filesystem
+from .locks import IdentityEvidence, capture_evidence
 from .models import (
     Journal,
     JournalOperation,
@@ -28,7 +30,7 @@ from .paths import (
     strict_relative_path,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _OWNERSHIPS = {"created", "replaced", "preexisting"}
 _ACTIONS = {
     "create",
@@ -89,6 +91,7 @@ _OPERATION_KEYS = {
     "backup_hash",
     "status",
 }
+_EVIDENCE_KEYS = {"device", "inode", "size", "nlink", "mode", "sha256"}
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
@@ -108,10 +111,45 @@ def _dict(value: object, expected: set[str], label: str) -> dict[str, Any]:
     return value
 
 
-def _schema(value: object) -> int:
-    if type(value) is not int or value != SCHEMA_VERSION:
-        raise ValueError("schema_version must be exactly 1")
+def _schema(value: object, *, allow_legacy: bool = False) -> int:
+    versions = {SCHEMA_VERSION}
+    if allow_legacy:
+        versions.add(1)
+    if type(value) is not int or value not in versions:
+        raise ValueError("unsupported schema_version")
     return value
+
+
+def _evidence(value: object, field: str) -> IdentityEvidence | None:
+    if value is None:
+        return None
+    item = _dict(value, _EVIDENCE_KEYS, field)
+    numeric = ("device", "inode", "size", "nlink", "mode")
+    for key in numeric:
+        if type(item[key]) is not int or item[key] < 0:
+            raise ValueError(f"{field}.{key} must be a non-negative integer")
+    if item["nlink"] < 1:
+        raise ValueError(f"{field}.nlink must be positive")
+    mode = item["mode"]
+    if mode > 0o777:
+        raise ValueError(f"{field}.mode is invalid")
+    digest = _hash(item["sha256"], f"{field}.sha256")
+    return IdentityEvidence(
+        item["device"], item["inode"], item["size"], item["nlink"], mode, digest
+    )
+
+
+def _evidence_json(value: IdentityEvidence | None) -> dict[str, object] | None:
+    if value is None:
+        return None
+    return {
+        "device": value.device,
+        "inode": value.inode,
+        "size": value.size,
+        "nlink": value.nlink,
+        "mode": value.mode,
+        "sha256": value.sha256,
+    }
 
 
 def _target(value: object, descriptor: TargetDescriptor) -> Target:
@@ -157,7 +195,7 @@ def _optional_hash(value: object, field: str) -> str | None:
 def _mode(value: object, field: str, *, installed: bool = False) -> int:
     if type(value) is not int or not 0 <= value <= 0o777:
         raise ValueError(f"{field} must be an integer mode from 000 through 777")
-    if installed and value & ~0o600:
+    if installed and value & ~0o700:
         raise ValueError("installed_mode must not grant group or other access")
     return value
 
@@ -293,7 +331,11 @@ def _entry(
     if relative_path != identifiers[identifier]:
         raise ValueError("relative_path does not match managed identifier")
     installed_hash = _hash(value["installed_hash"], "installed_hash")
-    installed_mode = _mode(value["installed_mode"], "installed_mode", installed=True)
+    installed_mode = _mode(
+        value["installed_mode"],
+        "installed_mode",
+        installed=identifier != "claude/code-validator-command-gate",
+    )
     ownership = value["ownership"]
     if type(ownership) is not str or ownership not in _OWNERSHIPS:
         raise ValueError("invalid ownership")
@@ -357,10 +399,11 @@ def _decode_manifest(
     descriptor: TargetDescriptor,
     home: Path,
     *,
+    allow_legacy: bool = False,
     verify_backups: bool,
 ) -> Manifest:
     value = _dict(raw, _MANIFEST_KEYS, "manifest")
-    schema_version = _schema(value["schema_version"])
+    schema_version = _schema(value["schema_version"], allow_legacy=allow_legacy)
     target = _target(value["target"], descriptor)
     if type(value["entries"]) is not list:
         raise ValueError("manifest entries must be an array")
@@ -383,9 +426,18 @@ def _operation(
     descriptor: TargetDescriptor,
     home: Path,
     *,
+    schema_version: int = SCHEMA_VERSION,
     verify_backups: bool = True,
 ) -> JournalOperation:
-    value = _dict(raw, _OPERATION_KEYS, "journal operation")
+    expected_keys = _OPERATION_KEYS | {
+        "expected_before_evidence",
+        "expected_after_evidence",
+    }
+    value = _dict(
+        raw,
+        expected_keys if schema_version >= 2 else _OPERATION_KEYS,
+        "journal operation",
+    )
     operation_id = _safe_id(value["operation_id"], "operation_id")
     identifier = _string(value["identifier"], "identifier")
     allowed = _supported_identifiers(descriptor)
@@ -416,6 +468,29 @@ def _operation(
     after_hash = _optional_hash(value["expected_after_hash"], "expected_after_hash")
     before_mode = _optional_mode(value["expected_before_mode"], "expected_before_mode")
     after_mode = _optional_mode(value["expected_after_mode"], "expected_after_mode")
+    before_identity = (
+        _evidence(value["expected_before_evidence"], "expected_before_evidence")
+        if schema_version >= 2
+        else None
+    )
+    after_identity = (
+        _evidence(value["expected_after_evidence"], "expected_after_evidence")
+        if schema_version >= 2
+        else None
+    )
+    if schema_version >= 2:
+        if (before_hash is None) != (before_identity is None):
+            raise ValueError("before hash and identity evidence must agree")
+        if after_identity is not None and after_hash is None:
+            raise ValueError("after identity evidence requires after hash")
+        if before_identity is not None and (
+            before_hash != before_identity.sha256 or before_mode != before_identity.mode
+        ):
+            raise ValueError("before identity evidence disagrees with hash/mode")
+        if after_identity is not None and (
+            after_hash != after_identity.sha256 or after_mode != after_identity.mode
+        ):
+            raise ValueError("after identity evidence disagrees with hash/mode")
     before_evidence = (before_hash is not None, before_mode is not None)
     after_evidence = (after_hash is not None, after_mode is not None)
     if before_evidence[0] != before_evidence[1]:
@@ -476,7 +551,10 @@ def _operation(
     if requires_reverse_backup and backup_hash != before_hash:
         raise ValueError("backup hash must match expected-before hash")
     if action in {"create", "replace", "write-block", "write-manifest"}:
-        if after_mode is not None and after_mode & ~0o600:
+        allowed_installed_mode = (
+            0o700 if identifier == "claude/code-validator-command-gate" else 0o600
+        )
+        if after_mode is not None and after_mode & ~allowed_installed_mode:
             raise ValueError(
                 "installed journal mode must not grant group or other access"
             )
@@ -494,6 +572,8 @@ def _operation(
         backup_path=backup_path,
         backup_hash=backup_hash,
         status=status,
+        expected_before_evidence=before_identity,
+        expected_after_evidence=after_identity,
     )
 
 
@@ -506,10 +586,11 @@ def _decode_journal(
     descriptor: TargetDescriptor,
     home: Path,
     *,
+    allow_legacy: bool = False,
     verify_backups: bool,
 ) -> Journal:
     value = _dict(raw, _JOURNAL_KEYS, "journal")
-    schema_version = _schema(value["schema_version"])
+    schema_version = _schema(value["schema_version"], allow_legacy=allow_legacy)
     transaction_id = _safe_id(value["transaction_id"], "transaction_id")
     target = _target(value["target"], descriptor)
     if type(value["participants"]) is not list:
@@ -537,6 +618,7 @@ def _decode_journal(
             item,
             descriptor,
             home,
+            schema_version=schema_version,
             verify_backups=verify_backups,
         )
         for item in value["operations"]
@@ -611,7 +693,7 @@ def encode_manifest(manifest: Manifest) -> bytes:
 
 
 def _operation_json(operation: JournalOperation) -> dict[str, object]:
-    return {
+    value = {
         "operation_id": operation.operation_id,
         "identifier": operation.identifier,
         "action": operation.action,
@@ -623,6 +705,7 @@ def _operation_json(operation: JournalOperation) -> dict[str, object]:
         "backup_hash": operation.backup_hash,
         "status": operation.status,
     }
+    return value
 
 
 def encode_journal(journal: Journal) -> bytes:
@@ -647,6 +730,16 @@ def encode_journal(journal: Journal) -> bytes:
         "operations": [_operation_json(operation) for operation in journal.operations],
         "rollback_status": journal.rollback_status,
     }
+    if journal.schema_version >= 2:
+        for operation_value, operation in zip(
+            value["operations"], journal.operations, strict=True
+        ):
+            operation_value["expected_before_evidence"] = _evidence_json(
+                operation.expected_before_evidence
+            )
+            operation_value["expected_after_evidence"] = _evidence_json(
+                operation.expected_after_evidence
+            )
     from .targets import descriptor_for
 
     _decode_journal(
@@ -756,10 +849,24 @@ def _runtime_files(descriptor: TargetDescriptor) -> set[tuple[str, ...]]:
     return files
 
 
+def _command_gate_files(descriptor: TargetDescriptor) -> set[tuple[str, ...]]:
+    files: set[tuple[str, ...]] = set()
+    for source in descriptor.sources:
+        if source.kind != "command-gate" or source.destination is None:
+            continue
+        parts = source.destination.parts
+        if len(parts) < 3 or parts[:2] != (".subagents_configs", "claude-hooks"):
+            raise ValueError("command gate destination is outside state")
+        files.add(tuple(parts[2:]))
+    return files
+
+
 def _inventory_runtime_fd(
     directory_fd: int,
     relative: tuple[str, ...],
     allowed_files: set[tuple[str, ...]],
+    *,
+    executable: bool = False,
 ) -> None:
     for name in _fd_names(directory_fd, "validation directory"):
         candidate = (*relative, name)
@@ -769,7 +876,8 @@ def _inventory_runtime_fd(
         if candidate in allowed_files:
             if not stat.S_ISREG(result.st_mode):
                 raise ValueError("validation runtime file must be regular")
-            if stat.S_IMODE(result.st_mode) & ~0o600:
+            permitted = 0o700 if executable else 0o600
+            if stat.S_IMODE(result.st_mode) & ~permitted:
                 raise ValueError("validation runtime file must be private")
             continue
         if any(path[: len(candidate)] == candidate for path in allowed_files):
@@ -779,7 +887,9 @@ def _inventory_runtime_fd(
                 directory_fd, name, "validation runtime directory"
             )
             try:
-                _inventory_runtime_fd(child_fd, candidate, allowed_files)
+                _inventory_runtime_fd(
+                    child_fd, candidate, allowed_files, executable=executable
+                )
             finally:
                 os.close(child_fd)
             continue
@@ -790,9 +900,16 @@ def _inventory_state_fd(
     state_fd: int, state_dir: Path, descriptor: TargetDescriptor
 ) -> None:
     allowed_runtime = _runtime_files(descriptor)
+    allowed_command_gates = _command_gate_files(descriptor)
     filesystem._after_parent_pin("state-inventory", state_dir)
     names = set(_fd_names(state_fd, "state directory"))
-    allowed = {"manifest.json", "journal.json", "backups", "validation"}
+    allowed = {
+        "manifest.json",
+        "journal.json",
+        "backups",
+        "validation",
+        "claude-hooks",
+    }
     unknown = names - allowed
     if unknown:
         raise ValueError(f"unknown state entries: {sorted(unknown)}")
@@ -818,6 +935,16 @@ def _inventory_state_fd(
             _inventory_runtime_fd(validation_fd, tuple(), allowed_runtime)
         finally:
             os.close(validation_fd)
+    if "claude-hooks" in names:
+        hooks_fd = _open_private_directory(
+            state_fd, "claude-hooks", "command gate directory"
+        )
+        try:
+            _inventory_runtime_fd(
+                hooks_fd, tuple(), allowed_command_gates, executable=True
+            )
+        finally:
+            os.close(hooks_fd)
 
 
 def _read_state_files(
@@ -847,7 +974,7 @@ def _read_state_files(
     if (
         result["manifest.json"] is None
         and result["journal.json"] is None
-        and not state_names.intersection({"backups", "validation"})
+        and not state_names.intersection({"backups", "validation", "claude-hooks"})
     ):
         raise ValueError("unknown or unsafe .subagents_configs state")
     return result
@@ -856,13 +983,23 @@ def _read_state_files(
 def load_manifest(home: Path, descriptor: TargetDescriptor) -> Manifest | None:
     try:
         raw = _read_state_files(home, descriptor)
-        manifest = (
-            decode_manifest(raw["manifest.json"], descriptor, home)
-            if raw["manifest.json"] is not None
-            else None
-        )
+        if raw["manifest.json"] is None:
+            manifest = None
+        elif (
+            isinstance(raw["manifest.json"], dict)
+            and raw["manifest.json"].get("schema_version") == 1
+        ):
+            manifest = migrate_manifest_schema(raw["manifest.json"], descriptor, home)
+        else:
+            manifest = decode_manifest(raw["manifest.json"], descriptor, home)
         if raw["journal.json"] is not None:
-            decode_journal(raw["journal.json"], descriptor, home)
+            if (
+                isinstance(raw["journal.json"], dict)
+                and raw["journal.json"].get("schema_version") == 1
+            ):
+                inspect_legacy_journal(raw["journal.json"], descriptor, home)
+            else:
+                decode_journal(raw["journal.json"], descriptor, home)
         return manifest
     except ValueError as exc:
         raise ValueError(
@@ -873,15 +1010,88 @@ def load_manifest(home: Path, descriptor: TargetDescriptor) -> Manifest | None:
 def load_journal(home: Path, descriptor: TargetDescriptor) -> Journal | None:
     try:
         raw = _read_state_files(home, descriptor)
-        journal = (
-            decode_journal(raw["journal.json"], descriptor, home)
-            if raw["journal.json"] is not None
-            else None
-        )
+        if raw["journal.json"] is None:
+            journal = None
+        elif (
+            isinstance(raw["journal.json"], dict)
+            and raw["journal.json"].get("schema_version") == 1
+        ):
+            inspect_legacy_journal(raw["journal.json"], descriptor, home)
+            journal = None
+        else:
+            journal = decode_journal(raw["journal.json"], descriptor, home)
         if raw["manifest.json"] is not None:
-            decode_manifest(raw["manifest.json"], descriptor, home)
+            if (
+                isinstance(raw["manifest.json"], dict)
+                and raw["manifest.json"].get("schema_version") == 1
+            ):
+                migrate_manifest_schema(raw["manifest.json"], descriptor, home)
+            else:
+                decode_manifest(raw["manifest.json"], descriptor, home)
         return journal
     except ValueError as exc:
         raise ValueError(
             f"unsafe or legacy journal state; manual recovery is required: {exc}"
         ) from exc
+
+
+@dataclass(frozen=True)
+class LegacyJournalEvidence:
+    """Metadata that can be shown to an operator without becoming a Journal."""
+
+    transaction_id: str
+    target: Target
+    operation_count: int
+    rollback_status: str
+
+
+def migrate_manifest_schema(
+    raw: object, descriptor: TargetDescriptor, home: Path
+) -> Manifest:
+    """Migrate a v1 manifest after proving every live entry exactly."""
+
+    if type(raw) is not dict or raw.get("schema_version") != 1:
+        raise ValueError("manifest migration requires schema version 1")
+    legacy = _decode_manifest(
+        raw, descriptor, home, allow_legacy=True, verify_backups=True
+    )
+    for entry in legacy.entries:
+        candidate = normalized_absolute(home / PurePosixPath(entry.relative_path))
+        evidence = capture_evidence(candidate, f"legacy manifest {entry.identifier}")
+        if (
+            evidence is None
+            or evidence.sha256 != entry.installed_hash
+            or evidence.mode != entry.installed_mode
+        ):
+            raise ValueError("legacy manifest live evidence does not match")
+    return Manifest(SCHEMA_VERSION, legacy.target, legacy.entries)
+
+
+def inspect_legacy_journal(
+    raw: object, descriptor: TargetDescriptor, home: Path
+) -> LegacyJournalEvidence:
+    """Inspect v1 journal metadata; pending v1 journals require manual recovery."""
+
+    if type(raw) is not dict or raw.get("schema_version") != 1:
+        raise ValueError("legacy journal inspection requires schema version 1")
+    journal = _decode_journal(
+        raw, descriptor, home, allow_legacy=True, verify_backups=False
+    )
+    if not journal.operations:
+        raise ValueError("legacy journal has no operations")
+    evidence = LegacyJournalEvidence(
+        journal.transaction_id,
+        journal.target,
+        len(journal.operations),
+        journal.rollback_status,
+    )
+    if journal.rollback_status != "complete" or any(
+        operation.status not in {"applied", "rolled-back"}
+        for operation in journal.operations
+    ):
+        from .transaction import IncompleteRollbackError
+
+        raise IncompleteRollbackError(
+            "schema-v1 pending journal is inspect-only; manual recovery is required"
+        )
+    return evidence

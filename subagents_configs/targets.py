@@ -21,6 +21,10 @@ _VALIDATION_FILES = (
     "scripts/validation_isolation/runner.py",
     "scripts/validation_isolation/cli.py",
 )
+_CLAUDE_HOOK_SOURCE = "claude-code/hooks/code-validator-pretooluse.py"
+_CLAUDE_HOOK_DESTINATION = (
+    ".subagents_configs/claude-hooks/code-validator-pretooluse.py"
+)
 
 
 def _agent_sources(target: Target, directory: str, suffix: str) -> list[SourceSpec]:
@@ -81,6 +85,16 @@ def _descriptor(
         ),
         *_runtime_sources(),
     ]
+    if target is Target.CLAUDE_CODE:
+        sources.append(
+            SourceSpec(
+                identifier="claude/code-validator-command-gate",
+                source=PurePosixPath(_CLAUDE_HOOK_SOURCE),
+                destination=PurePosixPath(_CLAUDE_HOOK_DESTINATION),
+                kind="command-gate",
+                source_format="python",
+            )
+        )
     return TargetDescriptor(
         target=target,
         environment_variable=environment_variable,
