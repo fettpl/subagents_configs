@@ -543,6 +543,16 @@ def render_macos_profile(
     framework = Path("/System/Library/Frameworks/Python.framework")
     if _is_within(python_executable, framework) and framework.exists():
         read_roots.add(_validate_system_directory(framework, "macOS Python framework"))
+    command_line_tools_framework = Path(
+        "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework"
+    )
+    if python_executable == Path("/usr/bin/python3"):
+        read_roots.add(
+            _validate_system_directory(
+                command_line_tools_framework,
+                "macOS CommandLineTools Python framework",
+            )
+        )
     lines = [
         "(version 1)",
         "(deny default)",

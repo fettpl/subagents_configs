@@ -219,6 +219,35 @@ class BackendArgumentTests(unittest.TestCase):
             ):
                 self.assertNotIn(f'(subpath "{optional_root}")', profile)
 
+    def test_macos_profile_allows_exact_command_line_tools_python_root(self):
+        from scripts.validation_isolation.backend import render_macos_profile
+
+        profile = render_macos_profile(
+            Path("/private/tmp/snapshot"),
+            Path("/private/tmp/temp"),
+            Path("/usr/bin/python3"),
+        )
+        self.assertIn(
+            '(allow file-read* (subpath "/Library/Developer/CommandLineTools/'
+            'Library/Frameworks/Python3.framework"))',
+            profile,
+        )
+
+    def test_macos_profile_does_not_grant_command_line_tools_root_to_other_interpreters(
+        self,
+    ):
+        from scripts.validation_isolation.backend import render_macos_profile
+
+        profile = render_macos_profile(
+            Path("/private/tmp/snapshot"),
+            Path("/private/tmp/temp"),
+            Path("/usr/bin/true"),
+        )
+        self.assertNotIn(
+            "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework",
+            profile,
+        )
+
     def test_macos_profile_rejects_custom_home_interpreter_and_broad_reads(self):
         from scripts.validation_isolation.backend import render_macos_profile
 
@@ -413,6 +442,18 @@ class BackendArgumentTests(unittest.TestCase):
         from scripts.validation_isolation.backend import _probe_script
 
         script = _probe_script()
+        for assertion in (
+            "socket.create_connection(('127.0.0.1',int(port)),timeout=0.5)",
+            "open('/etc/hosts','rb').read(1)",
+            "open(snapshot_file,'rb').read(1)",
+            "os.readlink('/proc/self/ns/net') == parent_ns",
+            "os.fchmod(output.fileno(),0o600)",
+            "output.flush()",
+            "os.fsync(output.fileno())",
+        ):
+            self.assertIn(assertion, script)
+        for denial in ("raise SystemExit(17)", "raise SystemExit(19)"):
+            self.assertIn(denial, script)
         self.assertIn("output.flush()", script)
         self.assertIn("os.fsync(output.fileno())", script)
 
