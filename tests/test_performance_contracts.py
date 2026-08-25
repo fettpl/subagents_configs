@@ -54,20 +54,54 @@ class PerformanceContractTests(unittest.TestCase):
         ):
             self.assertEqual(source_hash(source, cache), source.sha256)
 
-    def test_regular_reads_and_state_inventory_are_reused_in_scope(self):
-        path = ROOT / "agents" / "implementer.toml"
+    def test_preflight_reuses_explicit_destination_snapshots(self):
+        with private_tempdir() as temporary:
+            home = Path(temporary) / "home"
+            home.mkdir(mode=0o700)
+            instruction = b"User instructions\n"
+            config = b"[features]\n"
+            (home / "AGENTS.md").write_bytes(instruction)
+            (home / "AGENTS.md").chmod(0o600)
+            (home / "config.toml").write_bytes(config)
+            (home / "config.toml").chmod(0o600)
+            request = planning_request(
+                "install",
+                {Target.CODEX: home},
+                targets=(Target.CODEX,),
+                enable_global_routing=True,
+                enable_codex_multi_agent=True,
+            )
+            with (
+                patch.object(
+                    filesystem.CommandCache,
+                    "read_cached_regular",
+                    side_effect=AssertionError("unchecked path cache"),
+                    create=True,
+                ),
+                patch.object(
+                    filesystem,
+                    "read_bytes_with_evidence",
+                    wraps=filesystem.read_bytes_with_evidence,
+                ) as reader,
+                patch.object(
+                    filesystem, "sha256_bytes", wraps=filesystem.sha256_bytes
+                ) as hasher,
+            ):
+                preflight_install(self.repository, request)
+            labels = [call.args[1] for call in reader.call_args_list]
+            self.assertEqual(labels.count("instructions"), 1)
+            self.assertEqual(labels.count("config"), 1)
+            hashed = [call.args[0] for call in hasher.call_args_list]
+            self.assertEqual(hashed.count(instruction), 1)
+            self.assertEqual(hashed.count(config), 1)
+
         with (
             filesystem.CommandCache() as cache,
-            patch.object(
-                filesystem,
-                "read_bytes_with_evidence",
-                wraps=filesystem.read_bytes_with_evidence,
-            ) as reader,
+            patch.object(state, "load_state", wraps=state.load_state) as load_state,
         ):
-            first = cache.read_regular(path, "test")
-            second = cache.read_cached_regular(path)
-            self.assertEqual(first, second)
-            self.assertEqual(reader.call_count, 1)
+            cache.inventory_state(ROOT, descriptor_for(Target.CODEX))
+            cache.inventory_state(ROOT, descriptor_for(Target.CODEX))
+            self.assertEqual(load_state.call_count, 1)
 
         with (
             filesystem.CommandCache() as cache,
@@ -82,7 +116,7 @@ class PerformanceContractTests(unittest.TestCase):
             path = Path(temporary) / "source"
             path.write_bytes(b"before")
             with filesystem.CommandCache() as cache:
-                self.assertEqual(cache.read_regular(path, "test")[0], b"before")
+                self.assertEqual(cache.read_regular(path, "test").content, b"before")
                 path.write_bytes(b"after!")
                 with self.assertRaises(TransactionError):
                     cache.read_regular(path, "test")
@@ -139,6 +173,30 @@ class PerformanceContractTests(unittest.TestCase):
 
             with self.assertRaises(TransactionError):
                 apply_transaction(plan, failure_injector=MutateBeforeSecondOperation())
+
+    def test_same_size_mutation_after_preflight_fails_real_cas(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            destination = home / "agents" / "implementer.toml"
+            destination.parent.mkdir(mode=0o700, parents=True)
+            proposed = (self.repository / "agents/implementer.toml").read_bytes()
+            destination.write_bytes(b"x" * len(proposed))
+            destination.chmod(0o600)
+            request = planning_request(
+                "install", {Target.CODEX: home}, targets=(Target.CODEX,)
+            )
+            plan = preflight_install(self.repository, request)
+            from subagents_configs.transaction import apply_transaction
+
+            class MutateBeforePlannedOperation:
+                def before_operation(self, operation_id):
+                    if "agents-implementer.toml" in operation_id:
+                        destination.write_bytes(b"y" * len(proposed))
+                        destination.chmod(0o600)
+
+            with self.assertRaises(TransactionError):
+                apply_transaction(plan, failure_injector=MutateBeforePlannedOperation())
 
     def test_ci_has_one_repository_unittest_discovery_entrypoint(self):
         text = WORKFLOW.read_text(encoding="utf-8")

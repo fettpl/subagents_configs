@@ -151,11 +151,30 @@ class StateInventory:
     journal: object | None
 
 
+@dataclass(frozen=True)
+class ReadSnapshot:
+    """Immutable bytes tied to complete evidence for one normalized path."""
+
+    path: Path
+    evidence: IdentityEvidence
+    content: bytes
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, Path):
+            raise TypeError("read snapshot path must be a Path")
+        if not isinstance(self.evidence, IdentityEvidence):
+            raise TypeError("read snapshot evidence is required")
+        if type(self.content) is not bytes:
+            raise TypeError("read snapshot content must be bytes")
+        if self.evidence.size != len(self.content):
+            raise ValueError("read snapshot size does not match identity evidence")
+
+
 class CommandCache:
     """Ephemeral read/hash/state cache owned by one preflight command."""
 
     def __init__(self) -> None:
-        self._bytes: dict[Path, tuple[IdentityEvidence, bytes]] = {}
+        self._bytes: dict[Path, ReadSnapshot] = {}
         self._hashes: dict[bytes, str] = {}
         self._states: dict[tuple[Path, object], StateInventory] = {}
 
@@ -184,7 +203,8 @@ class CommandCache:
         if evidence.size != len(content) or evidence.sha256 != digest:
             raise ValueError("cached bytes disagree with identity evidence")
         self._hashes[content] = evidence.sha256
-        self._bytes[normalized_absolute(path)] = (evidence, content)
+        key = normalized_absolute(path)
+        self._bytes[key] = ReadSnapshot(key, evidence, content)
         return content
 
     def read_bytes(self, path: Path, evidence: IdentityEvidence) -> bytes:
@@ -194,15 +214,15 @@ class CommandCache:
             raise TypeError("cached read requires a Path and identity evidence")
         key = normalized_absolute(path)
         cached = self._bytes.get(key)
-        if cached is not None and cached[0] == evidence:
-            return cached[1]
+        if cached is not None and cached.evidence == evidence:
+            return cached.content
         actual, content = read_bytes_with_evidence(key, "cached file")
         if actual != evidence:
             raise TransactionError("cached file identity evidence does not match")
-        self._bytes[key] = (actual, content)
+        self._bytes[key] = ReadSnapshot(key, actual, content)
         return content
 
-    def read_regular(self, path: Path, label: str) -> tuple[bytes, int]:
+    def read_regular(self, path: Path, label: str) -> ReadSnapshot:
         """Read and revalidate a regular file against complete cached evidence."""
 
         key = normalized_absolute(path)
@@ -212,20 +232,14 @@ class CommandCache:
                 evidence, content = read_bytes_with_evidence(key, label)
             except FileNotFoundError:
                 raise
-            self._bytes[key] = (evidence, content)
-            return content, evidence.mode
+            self._hashes[content] = evidence.sha256
+            snapshot = ReadSnapshot(key, evidence, content)
+            self._bytes[key] = snapshot
+            return snapshot
         evidence, content = read_bytes_with_evidence(key, label)
-        if evidence != cached[0]:
+        if evidence != cached.evidence:
             raise TransactionError("cached regular file identity changed")
-        return cached[1], cached[0].mode
-
-    def read_cached_regular(self, path: Path) -> tuple[bytes, int]:
-        """Reuse a complete validated immutable buffer within read-only planning."""
-
-        cached = self._bytes.get(normalized_absolute(path))
-        if cached is None:
-            raise TransactionError("cached regular file is unavailable")
-        return cached[1], cached[0].mode
+        return cached
 
     def read_source(
         self, path: Path, reader: Callable[[], tuple[IdentityEvidence, bytes]]
@@ -239,7 +253,7 @@ class CommandCache:
             self._hashes[content] = evidence.sha256
             self.remember_bytes(key, evidence, content)
             return content
-        return cached[1]
+        return cached.content
 
     def hash_bytes(self, content: bytes) -> str:
         if type(content) is not bytes:

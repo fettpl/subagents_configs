@@ -18,7 +18,7 @@ from .blocks import (
     remove_exact_block,
     validate_managed_content,
 )
-from .errors import TransactionError, ValidationBlockedError
+from .errors import ValidationBlockedError
 from .formats import (
     ValidatedSource,
     validate_rendered_agent,
@@ -115,13 +115,19 @@ def _path(home: Path, relative: str) -> Path:
 
 
 def _read_regular(
-    path: Path, label: str, cache: filesystem.CommandCache | None = None
+    path: Path,
+    label: str,
+    cache: filesystem.CommandCache | None = None,
+    *,
+    snapshot: filesystem.ReadSnapshot | None = None,
 ) -> tuple[bytes, int]:
+    if snapshot is not None:
+        if normalized_absolute(path) != snapshot.path:
+            raise ValueError("read snapshot path does not match requested path")
+        return snapshot.content, snapshot.evidence.mode
     if cache is not None:
-        try:
-            return cache.read_cached_regular(path)
-        except TransactionError:
-            return cache.read_regular(path, label)
+        result = cache.read_regular(path, label)
+        return result.content, result.evidence.mode
     result = lstat_existing(path, label)
     if result is None:
         raise FileNotFoundError(path)
@@ -504,6 +510,8 @@ def _plan_block(
     prior: ManifestEntry | None,
     conflicts: list[str],
     cache: filesystem.CommandCache,
+    *,
+    snapshot: filesystem.ReadSnapshot | None = None,
 ) -> tuple[PlannedOperation | None, ManifestEntry | None]:
     from .blocks import render_managed_block
 
@@ -517,7 +525,7 @@ def _plan_block(
         conflicts.append(reason)
         return None, ManifestEntry(**{**prior.__dict__, "unresolved_reason": reason})
     try:
-        existing = _read_regular(destination, identifier, cache)
+        existing = _read_regular(destination, identifier, cache, snapshot=snapshot)
     except FileNotFoundError:
         existing = None
     if prior is not None and existing is None:
@@ -858,10 +866,10 @@ def _target_install(
             entries[entry.relative_path] = entry
 
     instruction = _safe_destination(home, descriptor.global_filename, "instructions")
+    instruction_snapshot: filesystem.ReadSnapshot | None = None
     try:
-        instruction_bytes, _instruction_mode = _read_regular(
-            instruction, "instructions", cache
-        )
+        instruction_snapshot = cache.read_regular(instruction, "instructions")
+        instruction_bytes = instruction_snapshot.content
     except FileNotFoundError:
         pass
     else:
@@ -878,6 +886,7 @@ def _target_install(
             prior.get(descriptor.global_filename),
             conflicts,
             cache,
+            snapshot=instruction_snapshot,
         )
         if operation is not None:
             operations.append(operation)
@@ -892,8 +901,11 @@ def _target_install(
         config = _safe_destination(
             home, descriptor.config_filename or "config.toml", "config"
         )
+        config_snapshot: filesystem.ReadSnapshot | None = None
         try:
-            existing_config, config_mode = _read_regular(config, "config", cache)
+            config_snapshot = cache.read_regular(config, "config")
+            existing_config = config_snapshot.content
+            config_mode = config_snapshot.evidence.mode
         except FileNotFoundError:
             existing_config, config_mode = None, None
         config_identifier = descriptor.config_filename or "config.toml"
@@ -936,6 +948,7 @@ def _target_install(
                 prior_config,
                 conflicts,
                 cache,
+                snapshot=config_snapshot,
             )
             if operation is not None:
                 try:
