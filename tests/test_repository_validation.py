@@ -188,6 +188,7 @@ class LockInventoryTests(unittest.TestCase):
             for line in lines:
                 self.assertIn(line, allowed_lines)
 
+        assert_exact(text)
         mutations = (
             text.replace(next(iter(expected.values())), "0" * 64, 1),
             text + "\n# artifact: pyyaml-extra.whl sha256:" + "0" * 64 + "\n",
@@ -271,7 +272,7 @@ class CanonicalValidatorTests(unittest.TestCase):
         def run(argv, **kwargs):
             del kwargs
             calls.append(tuple(argv))
-            return subprocess.CompletedProcess(argv, 0, "", "")
+            return validator._result(0)
 
         tools = tuple(
             Path(item)
@@ -280,7 +281,7 @@ class CanonicalValidatorTests(unittest.TestCase):
         with (
             patch.object(validator, "_fixed_tools", return_value=tools),
             patch.object(validator, "_backend_gate", return_value=(0, "", "")),
-            patch.object(validator.subprocess, "run", side_effect=run),
+            patch.object(validator, "_run", side_effect=run),
         ):
             self.assertEqual(validator.main([]), 0)
         self.assertEqual(len(calls), len(set(calls)))
@@ -367,6 +368,37 @@ class CanonicalValidatorTests(unittest.TestCase):
             self.assertNotIn("SECRET", message)
             messages.append(message)
         self.assertNotEqual(messages[0], messages[1])
+
+    def test_direct_check_capture_is_capped_and_hashes_full_stream_bytes(self):
+        validator = _load_validator()
+        payload_size = validator._CAPTURE_LIMIT * 4
+        command = (
+            str(Path("/usr/bin/python3")),
+            "-c",
+            f"import sys; sys.stdout.buffer.write(b'o' * {payload_size}); "
+            f"sys.stderr.buffer.write(b'e' * {payload_size})",
+        )
+        result = validator._run(command, env=dict(os.environ), cwd=ROOT)
+        self.assertEqual(result.returncode, 0)
+        self.assertLessEqual(len(result.stdout.text.encode()), validator._CAPTURE_LIMIT)
+        self.assertLessEqual(len(result.stderr.text.encode()), validator._CAPTURE_LIMIT)
+        self.assertEqual(result.stdout.byte_count, payload_size)
+        self.assertEqual(result.stderr.byte_count, payload_size)
+        self.assertEqual(len(result.stdout.sha256), 64)
+        self.assertEqual(len(result.stderr.sha256), 64)
+        self.assertNotIn("o" * (validator._CAPTURE_LIMIT + 1), result.stdout.text)
+
+    def test_direct_check_timeout_kills_child_and_returns_bounded_result(self):
+        validator = _load_validator()
+        command = (
+            "/usr/bin/python3",
+            "-c",
+            "import time; print('timeout marker'); time.sleep(10)",
+        )
+        with patch.object(validator, "_DIRECT_CHECK_TIMEOUT", 0.01):
+            result = validator._run(command, env=dict(os.environ), cwd=ROOT)
+        self.assertEqual(result.returncode, 124)
+        self.assertLessEqual(len(result.stdout.text.encode()), validator._CAPTURE_LIMIT)
 
     def test_backend_probe_command_passes_real_prevalidation(self):
         validator = _load_validator()

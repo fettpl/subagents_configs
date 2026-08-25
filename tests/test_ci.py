@@ -405,7 +405,9 @@ class CiContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('(git, "status", "--short")', validator)
-        self.assertIn('label == "clean checkout" and stdout', validator)
+        self.assertIn(
+            'label == "clean checkout" and result.stdout.byte_count', validator
+        )
         self.assertIn('_diagnostic(label, "dirty"', validator)
 
     def test_checkout_status_errors_fail_closed(self):

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import selectors
 import stat
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import tempfile
 from collections.abc import Sequence
 from hashlib import sha256
 from pathlib import Path
+from time import monotonic
 
 SCRIPT_PATH = Path(__file__)
 _SHELL_FILES = (
@@ -31,6 +33,75 @@ _BACKEND_PROBE = (
     "marker.chmod(0o600)\n"
     "if stat.S_IMODE(marker.stat().st_mode) != 0o600: raise SystemExit(12)\n"
 )
+_CAPTURE_LIMIT = 8192
+_DIRECT_CHECK_TIMEOUT = 900.0
+
+
+class _StreamCapture:
+    """Bounded displayed bytes plus complete stream accounting."""
+
+    __slots__ = ("byte_count", "sha256", "text")
+
+    def __init__(self, text: str, byte_count: int, digest: str) -> None:
+        self.text = text
+        self.byte_count = byte_count
+        self.sha256 = digest
+
+
+class _CheckResult:
+    __slots__ = ("returncode", "stderr", "stdout")
+
+    def __init__(
+        self, returncode: int, stdout: _StreamCapture, stderr: _StreamCapture
+    ) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class _StreamAccumulator:
+    def __init__(self) -> None:
+        self._captured = bytearray()
+        self._byte_count = 0
+        self._digest = sha256()
+
+    def feed(self, chunk: bytes) -> None:
+        self._byte_count += len(chunk)
+        self._digest.update(chunk)
+        remaining = _CAPTURE_LIMIT - len(self._captured)
+        if remaining > 0:
+            self._captured.extend(chunk[:remaining])
+
+    def finish(self) -> _StreamCapture:
+        # Ignoring an incomplete final UTF-8 sequence keeps the displayed
+        # representation no larger than the byte capture cap.
+        return _StreamCapture(
+            bytes(self._captured).decode("utf-8", errors="ignore"),
+            self._byte_count,
+            self._digest.hexdigest(),
+        )
+
+
+def _stream_from_text(value: str) -> _StreamCapture:
+    accumulator = _StreamAccumulator()
+    accumulator.feed(value.encode("utf-8", errors="replace"))
+    return accumulator.finish()
+
+
+def _result(returncode: int, stdout: str = "", stderr: str = "") -> _CheckResult:
+    return _CheckResult(
+        returncode, _stream_from_text(stdout), _stream_from_text(stderr)
+    )
+
+
+def _coerce_result(value: object) -> _CheckResult:
+    """Keep test seams typed while accepting the former tuple seam."""
+
+    if isinstance(value, _CheckResult):
+        return value
+    if isinstance(value, tuple) and len(value) == 3:
+        return _result(value[0], value[1], value[2])
+    raise TypeError("invalid validation result")
 
 
 def _fixed_executable(path: Path, *, label: str, root_owned: bool) -> Path:
@@ -73,34 +144,86 @@ def _fixed_tools() -> tuple[Path, Path, Path, Path]:
     return python, ruff, shell, git
 
 
-def _run(
-    argv: Sequence[str], *, env: dict[str, str], cwd: Path
-) -> tuple[int, str, str]:
+def _run(argv: Sequence[str], *, env: dict[str, str], cwd: Path) -> _CheckResult:
     try:
-        completed = subprocess.run(  # noqa: S603
+        process = subprocess.Popen(  # noqa: S603
             list(argv),
             cwd=cwd,
             env=env,
-            check=False,
-            capture_output=True,
-            text=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            close_fds=True,
         )
     except OSError:
-        return 126, "", ""
-    return completed.returncode, completed.stdout, completed.stderr
+        return _result(126)
+
+    stdout = _StreamAccumulator()
+    stderr = _StreamAccumulator()
+    streams = ((process.stdout, stdout), (process.stderr, stderr))
+    selector = selectors.DefaultSelector()
+    read_failed = False
+    timed_out = False
+    for stream, accumulator in streams:
+        if stream is None:
+            read_failed = True
+            continue
+        selector.register(stream, selectors.EVENT_READ, accumulator)
+    deadline = monotonic() + _DIRECT_CHECK_TIMEOUT
+    try:
+        while selector.get_map():
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                timed_out = True
+                if process.poll() is None:
+                    process.kill()
+                break
+            events = selector.select(remaining)
+            if not events:
+                continue
+            for key, _ in events:
+                try:
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                except OSError:
+                    read_failed = True
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                if chunk:
+                    key.data.feed(chunk)
+                else:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+    finally:
+        if process.poll() is None:
+            timed_out = True
+            process.kill()
+        selector.close()
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        for stream, _ in streams:
+            if stream is not None and not stream.closed:
+                stream.close()
+    if read_failed:
+        returncode = 126
+    elif timed_out:
+        returncode = 124
+    else:
+        returncode = process.returncode
+    return _CheckResult(returncode, stdout.finish(), stderr.finish())
 
 
-def _diagnostic(label: str, status: str, stdout: str, stderr: str) -> str:
-    def metadata(value: str) -> tuple[int, str]:
-        encoded = value.encode("utf-8", errors="replace")
-        return len(encoded), sha256(encoded).hexdigest()
-
-    stdout_bytes, stdout_digest = metadata(stdout)
-    stderr_bytes, stderr_digest = metadata(stderr)
+def _diagnostic(label: str, status: str, result: _CheckResult) -> str:
     return (
         f"validation failed: {label}; status={status}; "
-        f"stdout-bytes={stdout_bytes}; stdout-sha256={stdout_digest}; "
-        f"stderr-bytes={stderr_bytes}; stderr-sha256={stderr_digest}"
+        f"stdout-bytes={result.stdout.byte_count}; "
+        f"stdout-sha256={result.stdout.sha256}; "
+        f"stderr-bytes={result.stderr.byte_count}; "
+        f"stderr-sha256={result.stderr.sha256}"
     )
 
 
@@ -198,7 +321,7 @@ def _checks(
     )
 
 
-def _backend_gate(repo_root: Path, *, env: dict[str, str]) -> tuple[int, str, str]:
+def _backend_gate(repo_root: Path, *, env: dict[str, str]) -> _CheckResult:
     """Run one direct isolated probe and require typed backend evidence."""
 
     inherited = dict(os.environ)
@@ -219,13 +342,13 @@ def _backend_gate(repo_root: Path, *, env: dict[str, str]) -> tuple[int, str, st
             (str(python), "-c", _BACKEND_PROBE), repo_root, sys.platform
         )
     except (ImportError, OSError, RuntimeError, ValueError, TimeoutError):
-        return 125, "", ""
+        return _result(125)
     finally:
         os.environ.clear()
         os.environ.update(inherited)
     if result.returncode == 0 and "probe=passed" in result.evidence:
-        return 0, result.stdout, result.stderr
-    return result.returncode or 1, result.stdout, result.stderr
+        return _result(0, result.stdout, result.stderr)
+    return _result(result.returncode or 1, result.stdout, result.stderr)
 
 
 def main(argv: Sequence[str] = ()) -> int:
@@ -249,25 +372,25 @@ def main(argv: Sequence[str] = ()) -> int:
                     "required" if label == "backend gate" else "optional"
                 )
                 if label == "backend gate":
-                    result, stdout, stderr = _backend_gate(
-                        repo_root, env=check_environment
+                    result = _coerce_result(
+                        _backend_gate(repo_root, env=check_environment)
                     )
                 else:
-                    result, stdout, stderr = _run(
-                        command, env=check_environment, cwd=repo_root
+                    result = _coerce_result(
+                        _run(command, env=check_environment, cwd=repo_root)
                     )
-                if result != 0:
+                if result.returncode != 0:
                     print(
-                        _diagnostic(label, _status(result), stdout, stderr),
+                        _diagnostic(label, _status(result.returncode), result),
                         file=sys.stderr,
                     )
                     return 1
-                if label == "clean checkout" and stdout:
-                    print(_diagnostic(label, "dirty", stdout, stderr), file=sys.stderr)
+                if label == "clean checkout" and result.stdout.byte_count:
+                    print(_diagnostic(label, "dirty", result), file=sys.stderr)
                     return 1
     except (OSError, RuntimeError):
         print(
-            _diagnostic("private validation environment", "blocked", "", ""),
+            _diagnostic("private validation environment", "blocked", _result(1)),
             file=sys.stderr,
         )
         return 1
