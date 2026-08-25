@@ -67,6 +67,29 @@ Commit: planned `fix: gate Claude validator commands technically`
 - Python compileall: passed.
 - `git diff --check`: passed.
 
+## Fix round 3/5 — strict effort object and permission mode enum
+
+Status: complete
+Commit: pending `fix: validate Claude hook effort schema`
+
+### TDD record
+
+- RED: the valid realistic event using object-shaped effort and
+  `permission_mode: auto` failed the previous string-only effort parser.
+  Missing/extra/wrong-type/unsupported/control-bearing effort mutations were
+  added as denial cases.
+- GREEN: the parser now accepts only the exact `{"level": ...}` effort object
+  with supported `low`, `medium`, `high`, `xhigh`, or `max` levels, and accepts
+  the documented `auto` permission mode while preserving fixed rejection
+  behavior.
+
+### Verification
+
+- Focused: 55 tests passed.
+- Full discovery: 407 tests passed, 1 explicit unsupported-host validation
+  smoke skip.
+- Catalog validation, Ruff check/format, compileall, and diff-check passed.
+
 ## Fix round 1/5 — controller review closure
 
 Status: complete

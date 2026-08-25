@@ -18,7 +18,7 @@ from .paths import normalized_absolute, strict_relative_path
 from .targets import DESCRIPTORS, selected_sources
 
 _COMMAND_GATE_SHA256 = (
-    "9af7bace6c3db49b672497566fee72d6653b2daf28daf62a4790e3c7d7f0201e"
+    "a9644ef358f9b8b8d4aea0a9f3c599cc62ad6b43fa257879298acb36abdaecfa"
 )
 
 

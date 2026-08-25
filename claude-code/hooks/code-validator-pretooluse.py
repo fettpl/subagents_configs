@@ -29,7 +29,7 @@ class PreToolUseEvent:
     agent_id: str | None = None
     agent_type: str | None = None
     prompt_id: str | None = None
-    effort: str | None = None
+    effort: dict[str, str] | None = None
     description: str | None = None
     timeout: int | None = None
     run_in_background: bool | None = None
@@ -54,9 +54,10 @@ _EVENT_OPTIONAL_KEYS = {
 _TOP_KEYS = _EVENT_REQUIRED_KEYS | _EVENT_OPTIONAL_KEYS
 _INPUT_KEYS = {"command", "description", "timeout", "run_in_background"}
 _PERMISSION_MODES = frozenset(
-    {"default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"}
+    {"default", "auto", "acceptEdits", "plan", "bypassPermissions", "dontAsk"}
 )
-_EFFORTS = frozenset({"low", "medium", "high"})
+_EFFORT_KEYS = {"level"}
+_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 _EVENT_NAME = "PreToolUse"
 _TOOL_NAME = "Bash"
 _SHELL_META = frozenset(
@@ -201,8 +202,15 @@ def parse_pretooluse_event(raw: bytes) -> PreToolUseEvent:
             raise ValueError("invalid event")
     if "permission_mode" in top and top["permission_mode"] not in _PERMISSION_MODES:
         raise ValueError("invalid event")
-    if "effort" in top and top["effort"] not in _EFFORTS:
-        raise ValueError("invalid event")
+    effort = top.get("effort")
+    if effort is not None:
+        if (
+            type(effort) is not dict
+            or set(effort) != _EFFORT_KEYS
+            or not _safe_text(effort["level"])
+            or effort["level"] not in _EFFORT_LEVELS
+        ):
+            raise ValueError("invalid event")
     if "agent_type" in top and top["agent_type"] != "code-validator":
         raise ValueError("invalid event")
     tool_input = top["tool_input"]
@@ -244,7 +252,7 @@ def parse_pretooluse_event(raw: bytes) -> PreToolUseEvent:
         agent_id=top.get("agent_id"),
         agent_type=top.get("agent_type"),
         prompt_id=top.get("prompt_id"),
-        effort=top.get("effort"),
+        effort=effort,
         description=tool_input.get("description"),
         timeout=tool_input.get("timeout"),
         run_in_background=tool_input.get("run_in_background"),

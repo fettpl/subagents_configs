@@ -46,8 +46,8 @@ class ClaudeCommandGateTests(unittest.TestCase):
                 "tool_use_id": "tool-1",
                 "agent_type": "code-validator",
                 "prompt_id": "prompt-1",
-                "effort": "medium",
-                "permission_mode": "default",
+                "effort": {"level": "medium"},
+                "permission_mode": "auto",
             }
         ).encode()
 
@@ -115,6 +115,22 @@ class ClaudeCommandGateTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             self.hook.parse_pretooluse_event(duplicate)
+        for effort in (
+            {},
+            {"level": "medium", "extra": "nope"},
+            {"level": 1},
+            {"level": "maximum"},
+            {"level": "medium\nunsafe"},
+        ):
+            malformed_effort = json.loads(
+                self._event("python3 /abs/helper -- unittest").decode()
+            )
+            malformed_effort["effort"] = effort
+            with self.subTest(effort=effort):
+                with self.assertRaises(ValueError):
+                    self.hook.parse_pretooluse_event(
+                        json.dumps(malformed_effort).encode()
+                    )
         malformed_input = json.loads(
             self._event("python3 /abs/helper -- unittest").decode()
         )
