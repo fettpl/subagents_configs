@@ -9,7 +9,7 @@ validation; never point checks at real Codex, OpenCode, or Claude homes.
 Run only the canonical validator, with no arguments:
 
 ```sh
-python3 scripts/validate-repository.py
+.venv/bin/python scripts/validate-repository.py
 ```
 
 The validator is read-only and must not install packages, download files, call

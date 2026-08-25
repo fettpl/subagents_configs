@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 from typing import ClassVar
 from unittest.mock import patch
@@ -143,6 +144,11 @@ class LockInventoryTests(unittest.TestCase):
 
         def assert_exact(candidate: str) -> None:
             lines = candidate.splitlines()
+            allowed_headers = {
+                "# Reviewed from https://pypi.org/pypi/PyYAML/6.0.3/json.",
+                "# Install only with: python -m pip install --require-hashes "
+                "--requirement requirements-runtime.lock",
+            }
             comments = re.findall(
                 r"^# artifact: (\S+) sha256:([0-9a-f]{64})$", candidate, re.M
             )
@@ -170,6 +176,17 @@ class LockInventoryTests(unittest.TestCase):
                 re.findall(r"^    --hash=sha256:([0-9a-f]{64})$", candidate, re.M),
                 list(expected.values()),
             )
+            allowed_lines = allowed_headers | {
+                f"# artifact: {key} sha256:{value}" for key, value in expected.items()
+            }
+            allowed_lines |= {
+                f"PyYAML==6.0.3 ; {self.expected_markers[key]} \\" for key in expected
+            }
+            allowed_lines |= {
+                f"    --hash=sha256:{value}" for value in expected.values()
+            }
+            for line in lines:
+                self.assertIn(line, allowed_lines)
 
         mutations = (
             text.replace(next(iter(expected.values())), "0" * 64, 1),
@@ -184,6 +201,9 @@ class LockInventoryTests(unittest.TestCase):
             text + "\nPyYAML==6.0.3\n",
             text + "\n    --hash=sha256:" + "0" * 64 + "\n",
             text + "\nPyYAML>=6.0\n",
+            text + "\nrequests==1.0\n",
+            text + "\n--no-index\n",
+            text + "\n-r requirements-runtime.lock\n",
         )
         for mutation in mutations:
             with self.subTest(mutation=mutation[-80:]):
@@ -199,6 +219,38 @@ class LockInventoryTests(unittest.TestCase):
             (ROOT / "requirements-dev.txt").read_text(encoding="utf-8").strip(),
             "-r requirements-dev.lock",
         )
+
+    def test_developer_lock_rejects_every_unrecognized_semantic_line(self):
+        text = (ROOT / "requirements-dev.lock").read_text(encoding="utf-8")
+        expected_artifacts = {
+            key: value
+            for key, value in self.expected.items()
+            if key.startswith("ruff-")
+        }
+        allowed = [
+            "# Reviewed from https://pypi.org/pypi/ruff/0.16.3/json; "
+            "runtime is included below.",
+            "# Install only with: python -m pip install --require-hashes "
+            "--requirement requirements-dev.lock",
+            "-r requirements-runtime.lock",
+        ]
+        for key, value in expected_artifacts.items():
+            allowed.extend(
+                (
+                    f"# artifact: {key} sha256:{value}",
+                    f"ruff==0.16.3 ; {self.expected_markers[key]} \\",
+                    f"    --hash=sha256:{value}",
+                )
+            )
+        self.assertEqual(Counter(text.splitlines()), Counter(allowed))
+        for mutation in (
+            text + "\nrequests==1.0\n",
+            text + "\n--no-index\n",
+            text + "\n-r requirements-runtime.lock\n",
+            text.replace(allowed[3], allowed[3] + "\n" + allowed[3], 1),
+        ):
+            with self.subTest(mutation=mutation[-80:]):
+                self.assertNotEqual(Counter(mutation.splitlines()), Counter(allowed))
 
 
 class CanonicalValidatorTests(unittest.TestCase):
@@ -227,7 +279,7 @@ class CanonicalValidatorTests(unittest.TestCase):
         )
         with (
             patch.object(validator, "_fixed_tools", return_value=tools),
-            patch.object(validator, "_backend_gate", return_value=0),
+            patch.object(validator, "_backend_gate", return_value=(0, "", "")),
             patch.object(validator.subprocess, "run", side_effect=run),
         ):
             self.assertEqual(validator.main([]), 0)
@@ -278,15 +330,55 @@ class CanonicalValidatorTests(unittest.TestCase):
         with (
             patch.object(validator, "_fixed_tools", return_value=tools),
             patch.object(
-                validator, "_run", return_value=(7, "PRIVATE /Users/pawel secret")
+                validator,
+                "_run",
+                return_value=(7, "PRIVATE stdout secret", "PRIVATE stderr secret"),
             ),
             patch("builtins.print") as printed,
         ):
             self.assertEqual(validator.main([]), 1)
         message = str(printed.call_args)
         self.assertIn("status=exit-7", message)
+        self.assertIn("stdout-sha256=", message)
+        self.assertIn("stderr-sha256=", message)
+        self.assertIn("stdout-bytes=", message)
+        self.assertIn("stderr-bytes=", message)
         self.assertNotIn("PRIVATE", message)
         self.assertNotIn("/Users/pawel", message)
+
+    def test_failure_fingerprints_distinguish_secret_free_failures(self):
+        validator = _load_validator()
+        tools = tuple(
+            Path(item)
+            for item in ("/usr/bin/python3", "/usr/bin/ruff", "/bin/sh", "/usr/bin/git")
+        )
+        messages = []
+        for stdout, stderr in (
+            ("first SECRET", "stderr-a"),
+            ("second SECRET", "stderr-b"),
+        ):
+            with (
+                patch.object(validator, "_fixed_tools", return_value=tools),
+                patch.object(validator, "_run", return_value=(9, stdout, stderr)),
+                patch("builtins.print") as printed,
+            ):
+                self.assertEqual(validator.main([]), 1)
+            message = str(printed.call_args)
+            self.assertNotIn("SECRET", message)
+            messages.append(message)
+        self.assertNotEqual(messages[0], messages[1])
+
+    def test_backend_probe_command_passes_real_prevalidation(self):
+        validator = _load_validator()
+        from scripts.validation_isolation.backend import validate_command_argv
+
+        command = (
+            str(Path("/usr/bin/python3").resolve()),
+            "-c",
+            validator._BACKEND_PROBE,
+        )
+        self.assertNotIn("/etc/hosts", validator._BACKEND_PROBE)
+        self.assertEqual(validate_command_argv(command, ROOT), command)
 
     def test_validator_environment_is_private_and_sanitized(self):
         validator = _load_validator()

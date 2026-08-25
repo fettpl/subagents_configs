@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import sys
+import sys  # noqa: F401 - retained for compatibility with validation test seams
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -90,6 +90,41 @@ ProcessRunner: TypeAlias = Callable[
 MAX_OUTPUT = 8192
 COMMAND_TIMEOUT = 900.0
 
+_SYSTEM_INTERPRETER_CANDIDATES = {
+    "linux": (Path("/usr/bin/python3"), Path("/usr/bin/python3.12")),
+    "darwin": (
+        Path("/usr/bin/python3"),
+        Path(
+            "/Library/Developer/CommandLineTools/Library/Frameworks/"
+            "Python3.framework/Versions/3.9/bin/python3.9"
+        ),
+    ),
+}
+
+
+def _trusted_system_interpreter(platform_name: str, configured: str | None) -> Path:
+    """Select only a reviewed, canonical system interpreter."""
+
+    candidates = _SYSTEM_INTERPRETER_CANDIDATES.get(platform_name)
+    if candidates is None:
+        raise ValidationIsolationError("unsupported validation platform")
+    approved = {str(candidate) for candidate in candidates}
+    if configured is not None:
+        if configured not in approved:
+            raise ValidationIsolationError("unapproved validation interpreter")
+        candidates = (Path(configured),)
+    for candidate in candidates:
+        try:
+            canonical = candidate.resolve(strict=True)
+            from .backend import _validate_trusted_interpreter
+
+            trusted_platform = "macOS" if platform_name == "darwin" else "Linux"
+            _validate_trusted_interpreter(canonical, trusted_platform)
+            return canonical
+        except (OSError, RuntimeError, ValidationIsolationError):
+            continue
+    raise ValidationIsolationError("reviewed validation interpreter unavailable")
+
 
 def _bounded(value: object) -> str:
     if not isinstance(value, str):
@@ -124,7 +159,14 @@ def run_isolated(
         raise ValidationIsolationError("validation command is empty")
     worktree = locate_worktree(start_dir)
     command = validate_command_argv(command, worktree)
-    python_executable = Path(sys.executable)
+    configured_interpreter = (
+        os.environ["VALIDATION_SYSTEM_PYTHON"]
+        if "VALIDATION_SYSTEM_PYTHON" in os.environ
+        else None
+    )
+    python_executable = _trusted_system_interpreter(
+        platform_name, configured_interpreter
+    )
     sandbox_exec = Path("/usr/bin/sandbox-exec")
     bwrap = next(
         (

@@ -409,7 +409,7 @@ with Ruff, shell wrappers with ShellCheck, and fail-closed backend behavior.
 Run the canonical validator from a clean checkout:
 
 ```sh
-python3 scripts/validate-repository.py
+.venv/bin/python scripts/validate-repository.py
 ```
 
 Validation uses temporary private homes and caches. It performs no package

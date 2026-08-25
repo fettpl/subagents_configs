@@ -74,6 +74,17 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertNotIn("license selected", lower)
         self.assertFalse((ROOT / "LICENSE").exists())
 
+    def test_release_and_agent_guidance_uses_bootstrap_interpreter_for_validator(self):
+        expected = ".venv/bin/python scripts/validate-repository.py"
+        for path in (
+            ROOT / "docs" / "RELEASING.md",
+            ROOT / "README.md",
+            ROOT / "AGENTS.md",
+        ):
+            text = path.read_text(encoding="utf-8")
+            self.assertIn(expected, text)
+            self.assertNotIn("python3 scripts/validate-repository.py", text)
+
 
 if __name__ == "__main__":
     unittest.main()

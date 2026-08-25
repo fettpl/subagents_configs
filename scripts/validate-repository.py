@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Sequence
+from hashlib import sha256
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__)
@@ -25,10 +26,7 @@ _SHELL_FILES = (
 _BACKEND_PROBE = (
     "import os,stat\n"
     "from pathlib import Path\n"
-    "try: Path('/etc/hosts').read_bytes()\n"
-    "except OSError: pass\n"
-    "else: raise SystemExit(11)\n"
-    "marker=Path(os.environ['TMPDIR'])/'validator-backend-marker'\n"
+    "marker=Path(os.environ['TMPDIR']).joinpath('validator-backend-marker')\n"
     "marker.write_text('ok')\n"
     "marker.chmod(0o600)\n"
     "if stat.S_IMODE(marker.stat().st_mode) != 0o600: raise SystemExit(12)\n"
@@ -75,7 +73,9 @@ def _fixed_tools() -> tuple[Path, Path, Path, Path]:
     return python, ruff, shell, git
 
 
-def _run(argv: Sequence[str], *, env: dict[str, str], cwd: Path) -> tuple[int, str]:
+def _run(
+    argv: Sequence[str], *, env: dict[str, str], cwd: Path
+) -> tuple[int, str, str]:
     try:
         completed = subprocess.run(  # noqa: S603
             list(argv),
@@ -86,8 +86,26 @@ def _run(argv: Sequence[str], *, env: dict[str, str], cwd: Path) -> tuple[int, s
             text=True,
         )
     except OSError:
-        return 126, ""
-    return completed.returncode, completed.stdout
+        return 126, "", ""
+    return completed.returncode, completed.stdout, completed.stderr
+
+
+def _diagnostic(label: str, status: str, stdout: str, stderr: str) -> str:
+    def metadata(value: str) -> tuple[int, str]:
+        encoded = value.encode("utf-8", errors="replace")
+        return len(encoded), sha256(encoded).hexdigest()
+
+    stdout_bytes, stdout_digest = metadata(stdout)
+    stderr_bytes, stderr_digest = metadata(stderr)
+    return (
+        f"validation failed: {label}; status={status}; "
+        f"stdout-bytes={stdout_bytes}; stdout-sha256={stdout_digest}; "
+        f"stderr-bytes={stderr_bytes}; stderr-sha256={stderr_digest}"
+    )
+
+
+def _status(code: int) -> str:
+    return f"exit-{code}" if code >= 0 else f"signal-{abs(code)}"
 
 
 def _environment(root: Path) -> dict[str, str]:
@@ -180,26 +198,34 @@ def _checks(
     )
 
 
-def _backend_gate(repo_root: Path, *, python: Path, env: dict[str, str]) -> int:
+def _backend_gate(repo_root: Path, *, env: dict[str, str]) -> tuple[int, str, str]:
     """Run one direct isolated probe and require typed backend evidence."""
 
     inherited = dict(os.environ)
     try:
         if str(repo_root) not in sys.path:
             sys.path.insert(0, str(repo_root))
-        from scripts.validation_isolation.runner import run_isolated
+        from scripts.validation_isolation.runner import (
+            _trusted_system_interpreter,
+            run_isolated,
+        )
 
         os.environ.clear()
         os.environ.update(env)
+        python = _trusted_system_interpreter(
+            sys.platform, env.get("VALIDATION_SYSTEM_PYTHON")
+        )
         result = run_isolated(
             (str(python), "-c", _BACKEND_PROBE), repo_root, sys.platform
         )
     except (ImportError, OSError, RuntimeError, ValueError, TimeoutError):
-        return 125
+        return 125, "", ""
     finally:
         os.environ.clear()
         os.environ.update(inherited)
-    return 0 if result.returncode == 0 and "probe=passed" in result.evidence else 1
+    if result.returncode == 0 and "probe=passed" in result.evidence:
+        return 0, result.stdout, result.stderr
+    return result.returncode or 1, result.stdout, result.stderr
 
 
 def main(argv: Sequence[str] = ()) -> int:
@@ -223,27 +249,25 @@ def main(argv: Sequence[str] = ()) -> int:
                     "required" if label == "backend gate" else "optional"
                 )
                 if label == "backend gate":
-                    result = _backend_gate(
-                        repo_root, python=tools[0], env=check_environment
+                    result, stdout, stderr = _backend_gate(
+                        repo_root, env=check_environment
                     )
-                    output = ""
                 else:
-                    result, output = _run(command, env=check_environment, cwd=repo_root)
+                    result, stdout, stderr = _run(
+                        command, env=check_environment, cwd=repo_root
+                    )
                 if result != 0:
                     print(
-                        f"validation failed: {label}; status=exit-{result}",
+                        _diagnostic(label, _status(result), stdout, stderr),
                         file=sys.stderr,
                     )
                     return 1
-                if label == "clean checkout" and output:
-                    print(
-                        "validation failed: clean checkout; status=dirty",
-                        file=sys.stderr,
-                    )
+                if label == "clean checkout" and stdout:
+                    print(_diagnostic(label, "dirty", stdout, stderr), file=sys.stderr)
                     return 1
     except (OSError, RuntimeError):
         print(
-            "validation failed: private validation environment; status=blocked",
+            _diagnostic("private validation environment", "blocked", "", ""),
             file=sys.stderr,
         )
         return 1

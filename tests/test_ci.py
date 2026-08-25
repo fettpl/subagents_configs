@@ -405,15 +405,15 @@ class CiContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('(git, "status", "--short")', validator)
-        self.assertIn('label == "clean checkout" and output', validator)
-        self.assertIn("clean checkout; status=dirty", validator)
+        self.assertIn('label == "clean checkout" and stdout', validator)
+        self.assertIn('_diagnostic(label, "dirty"', validator)
 
     def test_checkout_status_errors_fail_closed(self):
         validator = (ROOT / "scripts" / "validate-repository.py").read_text(
             encoding="utf-8"
         )
         self.assertIn("except OSError:", validator)
-        self.assertIn("validation failed: clean checkout; status=dirty", validator)
+        self.assertIn('_diagnostic(label, "dirty"', validator)
 
     def test_negative_ci_mutations_trigger_contract_guards(self):
         mutations = (
