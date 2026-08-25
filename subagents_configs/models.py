@@ -2,7 +2,7 @@ import base64
 import enum
 import hashlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import ClassVar, Literal
 
@@ -460,6 +460,7 @@ class Request:
     include_commit_pusher: bool
     dry_run: bool
     dry_run_format: DryRunFormat = "text"
+    client_versions: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -605,3 +606,10 @@ class TargetCapability:
     config_filename: str | None
     project_template: PurePosixPath
     agent_suffix: str
+    compatibility_features: frozenset[str] = frozenset()
+    supported_platforms: tuple[Literal["linux", "macos"], ...] = (
+        "linux",
+        "macos",
+    )
+    scope: Literal["user"] = "user"
+    package_source: str | None = None

@@ -8,6 +8,16 @@ Report security concerns against the exact revision you inspected, including
 the client target and operating system when relevant. Pi and
 pi-coding-agent are out of scope and are not supported.
 
+The checked-in client compatibility matrix is read-only policy data. The
+unsupported Pi row is an identity for reporting only: it creates no runtime
+target, descriptor, parser, selector, package command, network path, platform
+claim, or version claim. Compatibility preflight checks native format,
+declared features, platform, user scope, package identity, and an optional
+caller-supplied numeric client version without executing a client or reading
+environment variables. Missing version evidence uses the maintained tested
+row and never probes the host. Matrix updates require separate release-owner
+authorization and separately reviewed read-only client-version evidence.
+
 ## Threat model
 
 Repository files, prompts, issue text, documentation, build scripts, package

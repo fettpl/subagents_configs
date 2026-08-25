@@ -193,9 +193,11 @@ compatibility wrappers inherit the same selection.
 
 Install options are `--target TARGET`, `--all`, `--home TARGET=PATH`,
 `--enable-global-routing`, `--enable-codex-multi-agent`,
-`--include-commit-pusher`, `--dry-run`, `--format text|json`, and sole-argument
+`--include-commit-pusher`, `--client-version TARGET=VERSION`, `--dry-run`,
+`--format text|json`, and sole-argument
 `--help`. `--format json` is accepted only with `--dry-run`.
-Uninstall accepts `--target`, `--all`, `--home`, `--dry-run`, and `--help`; the
+Uninstall accepts `--target`, `--all`, `--home`, `--client-version TARGET=VERSION`,
+`--dry-run`, and `--help`; the
 three install-only opt-ins are rejected during CLI parsing. Repeated targets,
 mixed `--all` and `--target`, unknown options, duplicate homes, homes for
 unselected targets, and `--enable-codex-multi-agent` without Codex are errors
@@ -216,6 +218,30 @@ target, action, hash/evidence, ownership, conflict, recovery, and source
 metadata and never file contents or source paths. A normal install is
 idempotent when nothing has changed. All selected targets undergo a complete
 read-only preflight before the first write.
+
+### Client compatibility contract
+
+Before source inspection or any target write, the installer reads only the
+checked-in `catalogs/client-compatibility.json` matrix. It validates each
+selected target's native format, declared features (including requested
+routing, Codex multi-agent, and optional role blocks), supported Linux/macOS
+platforms, user scope, and package identity. An optional
+`--client-version TARGET=VERSION` is caller-supplied evidence and must be a
+strict numeric `X.Y.Z` version; the installer never invokes a client or reads
+an environment variable to discover it. When omitted, the maintained tested
+row is used without probing. Incompatible requests fail closed with the fixed
+reason codes `target_unsupported`, `format_unsupported`,
+`feature_unsupported`, `platform_unsupported`, `scope_unsupported`,
+`package_unsupported`, and `client_version_too_old`. Text and JSON dry-runs
+expose only the target, support status, and these typed reasons.
+
+The matrix deliberately contains an unsupported, compatibility-only `pi` row.
+It does not register `Target.PI`, a descriptor, parser, selector, install or
+uninstall path, package source, platform, or client-version claim. Updating a
+row is a separately authorized release-owner action: obtain read-only version
+evidence from the client, review format/features/platform/scope/package
+identity, update the JSON and documentation together, and rerun catalog,
+focused, full, and static checks. Do not probe clients during installation.
 
 ## Install, recovery, and uninstall behavior
 

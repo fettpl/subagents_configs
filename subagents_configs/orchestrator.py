@@ -8,6 +8,10 @@ from typing import Literal, TextIO
 
 from . import filesystem
 from .cli import parse_request
+from .compatibility import (
+    CompatibilityPreflightError,
+    validate_request_compatibility,
+)
 from .diagnostics import DiagnosticCode, emit_diagnostic
 from .errors import CliError, ValidationBlockedError
 from .locks import locked_target_homes
@@ -68,9 +72,12 @@ HELP_TEXT = {
         "AGENTS.md/CLAUDE.md or Codex config blocks.\n"
         "--dry-run prints normalized homes and exact effects without any writes;\n"
         "--format json selects the versioned structured dry-run output.\n"
+        "--client-version TARGET=VERSION supplies caller-owned version evidence;\n"
+        "absent versions use the maintained tested matrix row.\n"
         "Options: --target TARGET, --all, --home TARGET=PATH,\n"
         "         --enable-global-routing, --enable-codex-multi-agent,\n"
-        "         --include-commit-pusher, --dry-run, --format text|json, --help\n"
+        "         --include-commit-pusher, --client-version TARGET=VERSION,\n"
+        "         --dry-run, --format text|json, --help\n"
     ),
     "uninstall": (
         "Usage: uninstall.sh (--target TARGET ... | --all) [OPTIONS]\n"
@@ -86,8 +93,11 @@ HELP_TEXT = {
         "Uninstall never accepts install-only routing, Codex, or role options.\n"
         "--dry-run prints normalized homes and exact effects without any writes;\n"
         "--format json selects the versioned structured dry-run output.\n"
-        "Options: --target TARGET, --all, --home TARGET=PATH, --dry-run,\n"
-        "         --format text|json, --help\n"
+        "--client-version TARGET=VERSION supplies caller-owned version evidence;\n"
+        "absent versions use the maintained tested matrix row.\n"
+        "Options: --target TARGET, --all, --home TARGET=PATH,\n"
+        "         --client-version TARGET=VERSION,\n"
+        "         --dry-run, --format text|json, --help\n"
     ),
 }
 
@@ -111,6 +121,7 @@ def _emit(
     status: str,
     targets: Sequence[Target] = (),
     homes: Sequence[Path] = (),
+    reasons: tuple[str, ...] = (),
 ) -> bool:
     """Emit a typed diagnostic using only normalized, safe context."""
 
@@ -124,6 +135,7 @@ def _emit(
         operation,
         phase,
         status,
+        reasons,
     )
 
 
@@ -134,6 +146,7 @@ def _emit_request(
     *,
     phase: str,
     status: str,
+    reasons: tuple[str, ...] = (),
 ) -> bool:
     return _emit(
         stderr,
@@ -143,7 +156,62 @@ def _emit_request(
         status=status,
         targets=request.targets,
         homes=tuple(request.homes[target] for target in request.targets),
+        reasons=reasons,
     )
+
+
+def _compatibility_output(
+    stdout: TextIO,
+    request: Request,
+    failure: CompatibilityPreflightError,
+) -> bool:
+    """Render bounded compatibility reasons for a failed dry-run."""
+
+    if request.dry_run_format == "json":
+        import json
+
+        rendered = (
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "operation": request.operation,
+                    "compatibility": {
+                        "target": failure.target,
+                        "supported": False,
+                        "reasons": list(failure.result.reasons),
+                    },
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+    else:
+        rendered = (
+            f"compatibility: target={failure.target} supported=false "
+            f"reasons={','.join(failure.result.reasons)}\n"
+        )
+    return _write_output(stdout, rendered)
+
+
+def _handle_compatibility_failure(
+    request: Request,
+    failure: CompatibilityPreflightError,
+    *,
+    stdout: TextIO | None,
+    stderr: TextIO,
+) -> int:
+    if stdout is not None and request.dry_run:
+        _compatibility_output(stdout, request, failure)
+    _emit_request(
+        stderr,
+        request,
+        DiagnosticCode.PREFLIGHT_REJECTED,
+        phase="preflight",
+        status="rejected",
+        reasons=failure.result.reasons,
+    )
+    return EXIT_PREFLIGHT_ERROR
 
 
 def _journal_groups(
@@ -446,6 +514,22 @@ def _run_mutating_locked(
 ) -> int:
     """Run recovery, planning, preparation, apply, and cleanup in one lock scope."""
 
+    try:
+        validate_request_compatibility(request)
+    except CompatibilityPreflightError as failure:
+        return _handle_compatibility_failure(
+            request, failure, stdout=stdout, stderr=stderr
+        )
+    except (ValueError, OSError):
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.PREFLIGHT_REJECTED,
+            phase="preflight",
+            status="rejected",
+        )
+        return EXIT_PREFLIGHT_ERROR
+
     homes = {
         target: normalized_absolute(request.homes[target]) for target in request.targets
     }
@@ -509,6 +593,12 @@ def _run_mutating_locked(
                 return _finish(EXIT_INCOMPLETE_ROLLBACK)
             try:
                 plan = _plan(request, repo_root)
+            except CompatibilityPreflightError as failure:
+                return _finish(
+                    _handle_compatibility_failure(
+                        request, failure, stdout=stdout, stderr=stderr
+                    )
+                )
             except ValidationBlockedError:
                 _emit_request(
                     stderr,
@@ -719,9 +809,32 @@ def run(
             failure_injector=failure_injector,
         )
 
+    # Compatibility is the first read-only preflight fact for both dry-run
+    # renderers; do not inspect recovery state before an incompatible request
+    # has been rejected.
+    try:
+        validate_request_compatibility(request)
+    except CompatibilityPreflightError as failure:
+        return _handle_compatibility_failure(
+            request, failure, stdout=stdout, stderr=stderr
+        )
+    except (ValueError, OSError):
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.PREFLIGHT_REJECTED,
+            phase="preflight",
+            status="rejected",
+        )
+        return EXIT_PREFLIGHT_ERROR
+
     if request.dry_run_format == "json":
         try:
             plan, fingerprint = _collect_stable_dry_run_evidence(request, repo_root)
+        except CompatibilityPreflightError as failure:
+            return _handle_compatibility_failure(
+                request, failure, stdout=stdout, stderr=stderr
+            )
         except ConcurrentDryRunChangeError:
             _emit_request(
                 stderr,
@@ -939,6 +1052,10 @@ def run(
             plan = collect_stable_dry_run_evidence(request, repo_root)
         else:
             plan = _plan(request, repo_root)
+    except CompatibilityPreflightError as failure:
+        return _handle_compatibility_failure(
+            request, failure, stdout=stdout, stderr=stderr
+        )
     except ConcurrentDryRunChangeError:
         _emit_request(
             stderr,

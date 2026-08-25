@@ -1,0 +1,446 @@
+import io
+import json
+import tempfile
+import unittest
+from dataclasses import FrozenInstanceError, replace
+from pathlib import Path
+from unittest.mock import patch
+
+from subagents_configs.cli import parse_request
+from subagents_configs.compatibility import (
+    COMPATIBILITY_TARGETS,
+    ClientCompatibility,
+    CompatibilityResult,
+    load_compatibility_matrix,
+    validate_client_compatibility,
+)
+from subagents_configs.errors import CliError
+from subagents_configs.models import Target
+from subagents_configs.orchestrator import EXIT_PREFLIGHT_ERROR, run
+from subagents_configs.targets import CAPABILITIES, DESCRIPTORS, capability_for
+from tests.helpers import environment
+
+
+def _row(**overrides):
+    row = {
+        "target": "codex",
+        "supported": True,
+        "format_version": "toml",
+        "features": ["agents", "managed-blocks", "validation-runtime"],
+        "minimum_client_version": "1.2.0",
+        "tested_client_version": "1.4.0",
+        "tested_python": ["3.11", "3.12"],
+        "supported_platforms": ["linux", "macos"],
+        "tested_os_backends": ["bwrap", "sandbox-exec"],
+        "package_source": None,
+        "scope": "user",
+    }
+    row.update(overrides)
+    return row
+
+
+class CompatibilityLoaderTests(unittest.TestCase):
+    def test_loader_requires_exact_v1_object_envelope_and_list_rows(self):
+        valid = {"schema_version": 1, "rows": [_row()]}
+        cases = (
+            [_row()],
+            {"schema_version": True, "rows": [_row()]},
+            {"schema_version": 1.0, "rows": [_row()]},
+            {"schema_version": 1, "rows": tuple([_row()])},
+            {"schema_version": 1, "rows": [_row()], "extra": False},
+        )
+        for raw in cases:
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "matrix.json"
+                path.write_text(json.dumps(raw), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    load_compatibility_matrix(path)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "matrix.json"
+            path.write_text(json.dumps(valid), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_compatibility_matrix(path)
+
+    def test_checked_in_matrix_has_three_runtime_rows_and_unsupported_pi(self):
+        rows = load_compatibility_matrix(
+            Path(__file__).parents[1] / "catalogs/client-compatibility.json"
+        )
+        self.assertEqual({row.target for row in rows}, set(COMPATIBILITY_TARGETS))
+        self.assertEqual(
+            {row.target for row in rows if row.supported},
+            {"codex", "opencode", "claude-code"},
+        )
+        pi = next(row for row in rows if row.target == "pi")
+        self.assertFalse(pi.supported)
+        self.assertIsNone(pi.tested_client_version)
+        self.assertIsNone(pi.package_source)
+        self.assertEqual(pi.supported_platforms, ())
+
+    def test_loader_rejects_unknown_keys_duplicate_targets_and_invalid_versions(self):
+        cases = (
+            ({"extra": True}, "unknown"),
+            ({"target": "codex"}, "duplicate"),
+            ({"minimum_client_version": "1"}, "semver"),
+            ({"tested_client_version": "1.2"}, "semver"),
+            ({"features": []}, "feature"),
+        )
+        for changes, _label in cases:
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as raw:
+                path = Path(raw) / "matrix.json"
+                rows = [
+                    _row(),
+                    _row(target="opencode", format_version="yaml-frontmatter"),
+                ]
+                if "target" not in changes:
+                    rows[0].update(changes)
+                else:
+                    rows[1]["target"] = changes["target"]
+                path.write_text(json.dumps(rows), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    load_compatibility_matrix(path)
+
+    def test_loader_rejects_duplicate_json_keys(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "matrix.json"
+            row = json.dumps(_row())[:-1] + ', "target": "codex"}'
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "rows": [json.loads(row)],
+                    }
+                ).replace('"target": "codex"', '"target": "codex", "target": "codex"'),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                load_compatibility_matrix(path)
+
+    def test_loader_rejects_supported_pi_and_missing_optional_pi_fields(self):
+        for changes in (
+            {"target": "pi", "supported": True},
+            {"target": "pi", "supported": False, "tested_client_version": "1.0.0"},
+            {"target": "pi", "supported": False, "features": ["agents"]},
+        ):
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as raw:
+                path = Path(raw) / "matrix.json"
+                row = _row(**changes)
+                if changes["target"] == "pi":
+                    row["supported_platforms"] = []
+                    row["scope"] = None
+                    row["package_source"] = None
+                path.write_text(json.dumps([row]), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    load_compatibility_matrix(path)
+
+
+class CompatibilityAdapterTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.rows = load_compatibility_matrix(
+            Path(__file__).parents[1] / "catalogs/client-compatibility.json"
+        )
+
+    def test_unsupported_pi_is_queryable_without_runtime_registration(self):
+        pi = next(row for row in self.rows if row.target == "pi")
+        codex = capability_for(Target.CODEX)
+        result = validate_client_compatibility(
+            codex, pi, requested_features=frozenset()
+        )
+        self.assertFalse(result.supported)
+        self.assertEqual(result.reasons, ("target_unsupported",))
+        self.assertNotIn("pi", {target.value for target in Target})
+        self.assertNotIn("pi", {target.value for target in DESCRIPTORS})
+
+    def test_current_rows_validate_their_capability_contract(self):
+        for capability in CAPABILITIES:
+            row = next(
+                row for row in self.rows if row.target == capability.target.value
+            )
+            result = validate_client_compatibility(
+                capability,
+                row,
+                requested_features=frozenset(),
+            )
+            self.assertTrue(result.supported, result.reasons)
+            self.assertEqual(result.reasons, ())
+
+    def test_runtime_registry_declares_explicit_authoritative_features(self):
+        expected = {
+            Target.CODEX: frozenset(
+                {
+                    "agents",
+                    "managed-blocks",
+                    "validation-runtime",
+                    "codex-multi-agent-v2",
+                }
+            ),
+            Target.OPENCODE: frozenset(
+                {"agents", "managed-blocks", "validation-runtime"}
+            ),
+            Target.CLAUDE_CODE: frozenset(
+                {"agents", "managed-blocks", "validation-runtime", "command-gate"}
+            ),
+        }
+        self.assertEqual(
+            {
+                capability.target: capability.compatibility_features
+                for capability in CAPABILITIES
+            },
+            expected,
+        )
+
+    def test_capability_feature_registry_drift_fails_closed(self):
+        row = next(row for row in self.rows if row.target == "codex")
+        for declared in (frozenset(), frozenset({"agents"}), ["agents"]):
+            with self.subTest(declared=declared):
+                capability = replace(
+                    capability_for(Target.CODEX), compatibility_features=declared
+                )
+                with self.assertRaises(ValueError):
+                    validate_client_compatibility(
+                        capability, row, requested_features=frozenset()
+                    )
+
+    def test_fixed_reasons_fail_closed_for_contract_fields(self):
+        capability = capability_for(Target.CODEX)
+        row = next(row for row in self.rows if row.target == "codex")
+        mutations = (
+            ("format_version", "yaml-frontmatter", "format_unsupported"),
+            ("features", frozenset({"not-a-feature"}), "feature_unsupported"),
+            ("supported_platforms", ("macos",), "platform_unsupported"),
+            ("scope", "user", "scope_unsupported"),
+            ("package_source", "npm:wrong", "package_unsupported"),
+            ("minimum_client_version", "1.0.0", "client_version_too_old"),
+        )
+        for field, value, reason in mutations:
+            with self.subTest(field=field):
+                capability = capability_for(Target.CODEX)
+                changed = {field: value}
+                if field == "supported_platforms":
+                    capability = replace(capability, supported_platforms=("linux",))
+                elif field == "scope":
+                    capability = replace(capability, scope="project")
+                elif field == "package_source":
+                    capability = replace(capability, package_source="npm:expected")
+                candidate = ClientCompatibility(**{**row.__dict__, **changed})
+                result = validate_client_compatibility(
+                    capability,
+                    candidate,
+                    requested_features=frozenset(),
+                    client_version="0.9.0",
+                )
+                self.assertFalse(result.supported)
+                self.assertIn(reason, result.reasons)
+
+    def test_optional_requested_features_are_checked(self):
+        row = next(row for row in self.rows if row.target == "codex")
+        result = validate_client_compatibility(
+            capability_for(Target.CODEX),
+            row,
+            requested_features=frozenset({"feature-not-maintained"}),
+        )
+        self.assertFalse(result.supported)
+        self.assertEqual(result.reasons, ("feature_unsupported",))
+
+    def test_result_is_immutable_and_reasons_are_closed(self):
+        result = CompatibilityResult(False, ("target_unsupported",))
+        with self.assertRaises(FrozenInstanceError):
+            result.supported = True
+        with self.assertRaises(ValueError):
+            CompatibilityResult(False, ("arbitrary",))
+
+    def test_direct_constructor_rejects_duplicate_or_control_tuple_members(self):
+        row = next(row for row in self.rows if row.target == "codex")
+        for field, value in (
+            ("tested_python", ("3.11", "3.11")),
+            ("tested_python", ("3.11\n",)),
+            ("tested_os_backends", ("bwrap", "bwrap")),
+            ("tested_os_backends", ("bwrap\x00",)),
+        ):
+            with self.subTest(field=field, value=value):
+                with self.assertRaises((TypeError, ValueError)):
+                    ClientCompatibility(**{**row.__dict__, field: value})
+
+    def test_adapter_is_read_only_and_does_not_read_environment_or_write(self):
+        row = next(row for row in self.rows if row.target == "codex")
+        capability = capability_for(Target.CODEX)
+        with patch(
+            "subagents_configs.compatibility.Path.write_text",
+            side_effect=AssertionError,
+        ):
+            result = validate_client_compatibility(
+                capability, row, requested_features=frozenset()
+            )
+        self.assertTrue(result.supported)
+
+
+class ClientVersionCliTests(unittest.TestCase):
+    def test_client_version_is_caller_supplied_and_typed(self):
+        request = parse_request(
+            "install",
+            ["--target", "codex", "--client-version", "codex=1.4.0"],
+            environment(Path(tempfile.gettempdir())),
+        )
+        self.assertEqual(request.client_versions, {"codex": "1.4.0"})
+
+    def test_client_version_rejects_duplicates_unselected_and_invalid_values(self):
+        for argv in (
+            [
+                "--target",
+                "codex",
+                "--client-version",
+                "codex=1.0.0",
+                "--client-version",
+                "codex=1.1.0",
+            ],
+            ["--target", "codex", "--client-version", "opencode=1.0.0"],
+            ["--target", "codex", "--client-version", "codex=1"],
+            ["--target", "codex", "--client-version", "codex=1.0.0\x00"],
+        ):
+            with self.subTest(argv=argv), self.assertRaises(CliError):
+                parse_request("install", argv, environment(Path(tempfile.gettempdir())))
+
+    def test_client_version_rejection_precedes_home_environment_reads(self):
+        class ExplodingEnvironment(dict):
+            def get(self, key, default=None):
+                raise AssertionError(
+                    f"environment read before version validation: {key}"
+                )
+
+            def __getitem__(self, key):
+                raise AssertionError(
+                    f"environment read before version validation: {key}"
+                )
+
+        environ = ExplodingEnvironment()
+        for version in ("codex=1", "opencode=1.0.0"):
+            with self.subTest(version=version), self.assertRaises(CliError):
+                parse_request(
+                    "install",
+                    ["--target", "codex", "--client-version", version],
+                    environ,
+                )
+
+    def test_incompatible_non_dry_install_and_uninstall_do_not_read_pending_recovery(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "home"
+            state = home / ".subagents_configs"
+            state.mkdir(parents=True)
+            (state / "journal.json").write_text("pending", encoding="utf-8")
+            before = {
+                path: path.read_bytes() for path in root.rglob("*") if path.is_file()
+            }
+            for operation in ("install", "uninstall"):
+                out, err = io.StringIO(), io.StringIO()
+                with patch("subagents_configs.orchestrator._journal_groups") as groups:
+                    status = run(
+                        operation,
+                        [
+                            "--target",
+                            "codex",
+                            "--home",
+                            f"codex={home}",
+                            "--client-version",
+                            "codex=0.1.0",
+                        ],
+                        repo_root=Path(__file__).parents[1],
+                        environ={"HOME": str(root)},
+                        stdout=out,
+                        stderr=err,
+                    )
+                self.assertEqual(status, EXIT_PREFLIGHT_ERROR)
+                self.assertIn("client_version_too_old", err.getvalue())
+                groups.assert_not_called()
+                self.assertEqual(
+                    before,
+                    {
+                        path: path.read_bytes()
+                        for path in root.rglob("*")
+                        if path.is_file()
+                    },
+                )
+
+    def test_optional_feature_mismatch_fails_before_source_or_home_planning(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "home"
+            matrix = load_compatibility_matrix(
+                Path(__file__).parents[1] / "catalogs/client-compatibility.json"
+            )
+            changed = tuple(
+                replace(row, features=row.features - {"routing-codex"})
+                if row.target == "codex"
+                else row
+                for row in matrix
+            )
+            out, err = io.StringIO(), io.StringIO()
+            with (
+                patch(
+                    "subagents_configs.compatibility.load_compatibility_matrix",
+                    return_value=changed,
+                ),
+                patch("subagents_configs.planning._selected_sources") as sources,
+            ):
+                status = run(
+                    "install",
+                    [
+                        "--target",
+                        "codex",
+                        "--home",
+                        f"codex={home}",
+                        "--enable-global-routing",
+                    ],
+                    repo_root=Path(__file__).parents[1],
+                    environ={"HOME": str(root)},
+                    stdout=out,
+                    stderr=err,
+                )
+            self.assertEqual(status, EXIT_PREFLIGHT_ERROR)
+            self.assertIn("feature_unsupported", err.getvalue())
+            self.assertEqual(tuple(root.rglob("*")), ())
+            sources.assert_not_called()
+
+    def test_incompatible_dry_run_returns_fixed_reasons_without_writes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "home"
+            home.mkdir()
+            before = set(root.rglob("*"))
+            for format_name in ("text", "json"):
+                out, err = io.StringIO(), io.StringIO()
+                argv = [
+                    "--target",
+                    "codex",
+                    "--home",
+                    f"codex={home}",
+                    "--client-version",
+                    "codex=0.1.0",
+                    "--dry-run",
+                ]
+                if format_name == "json":
+                    argv += ["--format", "json"]
+                status = run(
+                    "install",
+                    argv,
+                    repo_root=Path(__file__).parents[1],
+                    environ={"HOME": str(root)},
+                    stdout=out,
+                    stderr=err,
+                )
+                self.assertEqual(status, EXIT_PREFLIGHT_ERROR)
+                self.assertIn("client_version_too_old", out.getvalue())
+                self.assertIn("client_version_too_old", err.getvalue())
+                if format_name == "json":
+                    payload = json.loads(out.getvalue())
+                    self.assertEqual(
+                        payload["compatibility"]["reasons"], ["client_version_too_old"]
+                    )
+                self.assertEqual(set(root.rglob("*")), before)
+
+
+if __name__ == "__main__":
+    unittest.main()

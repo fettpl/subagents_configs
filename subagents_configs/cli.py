@@ -3,6 +3,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal
 
+from .compatibility import validate_client_version
 from .errors import CliError
 from .models import DryRunFormat, Request, Target
 from .targets import descriptor_for, targets_for_request
@@ -23,11 +24,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--include-commit-pusher", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument("--client-version", action="append")
     return parser
 
 
 def _reject_duplicate_flags(argv: Sequence[str]) -> None:
-    repeatable = {"--target", "--home"}
+    repeatable = {"--target", "--home", "--client-version"}
     seen: set[str] = set()
     for argument in argv:
         option = argument.split("=", 1)[0]
@@ -106,6 +108,28 @@ def parse_request(
     if args.enable_codex_multi_agent and Target.CODEX not in targets:
         raise CliError("--enable-codex-multi-agent requires the codex target")
 
+    client_versions: dict[str, str] = {}
+    for raw_version in args.client_version or []:
+        target_name, separator, version = raw_version.partition("=")
+        if not separator or not target_name or not version:
+            raise CliError("--client-version requires TARGET=VERSION")
+        try:
+            target = Target(target_name)
+        except ValueError as exc:
+            raise CliError(
+                f"unknown target in --client-version: {target_name}"
+            ) from exc
+        if target not in targets:
+            raise CliError(
+                f"client version supplied for unselected target: {target_name}"
+            )
+        if target.value in client_versions:
+            raise CliError(f"duplicate client version: {target_name}")
+        try:
+            client_versions[target.value] = validate_client_version(version)
+        except ValueError as exc:
+            raise CliError(f"invalid client version for {target_name}") from exc
+
     homes: dict[Target, Path] = {}
     for raw_home in args.home or []:
         target_name, separator, raw_path = raw_home.partition("=")
@@ -134,4 +158,5 @@ def parse_request(
         include_commit_pusher=args.include_commit_pusher,
         dry_run=args.dry_run,
         dry_run_format=dry_run_format,
+        client_versions=client_versions,
     )

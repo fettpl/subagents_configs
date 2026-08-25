@@ -11,6 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from subagents_configs.compatibility import load_compatibility_matrix  # noqa: E402
 from subagents_configs.formats import validate_all_catalogs  # noqa: E402
 
 _GENERATOR_PATH = REPO_ROOT / "scripts/generate-catalogs.py"
@@ -26,6 +27,7 @@ _GENERATOR_SPEC.loader.exec_module(_GENERATOR)
 def main() -> int:
     try:
         validate_all_catalogs(REPO_ROOT)
+        load_compatibility_matrix(REPO_ROOT / "catalogs" / "client-compatibility.json")
         if _GENERATOR.main(["--check"]) != 0:
             raise ValueError("generated catalogs are not reproducible")
     except (OSError, RuntimeError, ValueError) as exc:
