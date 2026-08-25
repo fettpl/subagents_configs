@@ -16,7 +16,7 @@ class GitSnapshotTests(unittest.TestCase):
         root_gitignore = (Path(__file__).resolve().parents[1] / ".gitignore").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(root_gitignore.splitlines().count(".venv/"), 1)
+        self.assertEqual(root_gitignore.splitlines().count("/.venv/"), 1)
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
             git(repository, "init", "--quiet")
@@ -26,6 +26,14 @@ class GitSnapshotTests(unittest.TestCase):
             interpreter.write_text("private\n", encoding="utf-8")
             result = git(repository, "check-ignore", "--quiet", ".venv/bin/python")
             self.assertEqual(result.returncode, 0)
+            nested_interpreter = repository / "subproject" / ".venv" / "bin" / "python"
+            nested_interpreter.parent.mkdir(parents=True)
+            nested_interpreter.write_text("nested\n", encoding="utf-8")
+            with self.assertRaises(subprocess.CalledProcessError) as failure:
+                git(
+                    repository, "check-ignore", "--quiet", "subproject/.venv/bin/python"
+                )
+            self.assertNotEqual(failure.exception.returncode, 0)
 
     def test_inventory_includes_tracked_modified_and_nonignored_untracked_files(self):
         with tempfile.TemporaryDirectory() as temporary:
