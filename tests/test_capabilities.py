@@ -141,6 +141,30 @@ class CapabilityRegistryTests(unittest.TestCase):
                 )
         finally:
             formats.ROLE_POLICY["codex"] = original
+
+    def test_native_inventory_uses_registry_validator_dispatch(self):
+        from unittest.mock import patch
+
+        import subagents_configs.targets as targets_module
+        from subagents_configs import formats
+        from subagents_configs.targets import descriptor_for
+
+        spec = next(
+            source
+            for source in descriptor_for(Target.CODEX).sources
+            if source.identifier == "code-explorer"
+        )
+        altered = tuple(
+            replace(capability, semantic_validator="unsupported")
+            if capability.target is Target.CODEX
+            else capability
+            for capability in CAPABILITIES
+        )
+        with patch.object(targets_module, "CAPABILITIES", altered):
+            with self.assertRaisesRegex(ValueError, "unsupported semantic validator"):
+                formats.validate_source_inventory(
+                    Path(__file__).resolve().parents[1], Target.CODEX, (spec,)
+                )
         self.assertEqual(
             targets_for_request((Target.CLAUDE_CODE, Target.CODEX), False),
             (Target.CODEX, Target.CLAUDE_CODE),

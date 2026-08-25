@@ -563,6 +563,28 @@ def validate_agent_semantics(
         )
 
 
+def _validate_agent_with_registry(
+    target: Target,
+    role: str,
+    parsed: Mapping[str, object],
+    body: str,
+    *,
+    validation_helper: str = "{{VALIDATION_HELPER}}",
+    hook_path: str = "{{CLAUDE_HOOK}}",
+) -> None:
+    validator = semantic_validator_for(target)
+    if validator != "agent":
+        raise ValueError(f"unsupported semantic validator: {validator}")
+    validate_agent_semantics(
+        target,
+        role,
+        parsed,
+        body,
+        validation_helper=validation_helper,
+        hook_path=hook_path,
+    )
+
+
 def validate_rendered_agent(
     target: Target,
     role: str,
@@ -584,18 +606,14 @@ def validate_rendered_agent(
         parsed = validate_yaml_agent(path, content)
     else:
         raise ValueError(f"unsupported rendered agent parser: {parser}")
-    validator = semantic_validator_for(target)
-    if validator == "agent":
-        validate_agent_semantics(
-            target,
-            role,
-            parsed,
-            body,
-            validation_helper=helper,
-            hook_path=hook_path,
-        )
-    else:
-        raise ValueError(f"unsupported semantic validator: {validator}")
+    _validate_agent_with_registry(
+        target,
+        role,
+        parsed,
+        body,
+        validation_helper=helper,
+        hook_path=hook_path,
+    )
     return parsed
 
 
@@ -755,7 +773,7 @@ def validate_source_inventory(
             )
         )
     for spec, parsed, body in pending_agents:
-        validate_agent_semantics(target, spec.identifier, parsed, body)
+        _validate_agent_with_registry(target, spec.identifier, parsed, body)
     if parsed_roles and sum(spec.kind == "agent" for spec in specs) >= 5:
         required_roles = {
             "code-explorer",
