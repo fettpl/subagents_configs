@@ -94,7 +94,7 @@ class CiContractTests(unittest.TestCase):
         if text.count("scripts/bootstrap-developer.sh") != 1:
             violations.append("bootstrap mechanism count")
         if re.search(
-            r"(?m)^\s*(?:run:\s*)?(?:python3?|\.venv/bin/python)\s+-m\s+pip\s+install\b",
+            r"(?m)^\s*(?:run:\s*)?(?:(?:python3?|\.venv/bin/python)\s+-m\s+)?pip\s+install\b",
             text,
         ):
             violations.append("direct workflow dependency install")
@@ -498,6 +498,9 @@ class CiContractTests(unittest.TestCase):
             f"{self.text}\n"
             "      - name: duplicate dependency install\n"
             "        run: python -m pip install requirements-dev.lock\n",
+            f"{self.text}\n"
+            "      - name: bare dependency install\n"
+            "        run: pip install requests\n",
             f"{self.text}\nrun: sudo true\n",
             f"{self.text}\nrun: apt-get install shellcheck\n",
             f"{self.text}\nrun: brew install shellcheck\n",
