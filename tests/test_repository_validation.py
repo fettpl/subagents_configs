@@ -310,6 +310,43 @@ class CanonicalValidatorTests(unittest.TestCase):
         )
         self.assertTrue(all(Path(call[0]).is_absolute() for call in calls))
 
+    def test_system_interpreter_configuration_is_backend_gate_only(self):
+        validator = _load_validator()
+        ordinary_environments: list[dict[str, str]] = []
+        backend_environments: list[dict[str, str]] = []
+
+        def run(_argv, **kwargs):
+            ordinary_environments.append(kwargs["env"])
+            return validator._result(0)
+
+        def backend(_repo_root, *, env):
+            backend_environments.append(env)
+            return validator._result(0)
+
+        tools = tuple(
+            Path(item)
+            for item in ("/usr/bin/python3", "/usr/bin/ruff", "/bin/sh", "/usr/bin/git")
+        )
+        with (
+            patch.dict(
+                validator.os.environ,
+                {"VALIDATION_SYSTEM_PYTHON": "/reviewed/system/python"},
+                clear=False,
+            ),
+            patch.object(validator, "_fixed_tools", return_value=tools),
+            patch.object(validator, "_backend_gate", side_effect=backend),
+            patch.object(validator, "_run", side_effect=run),
+        ):
+            self.assertEqual(validator.main([]), 0)
+        self.assertTrue(ordinary_environments)
+        self.assertTrue(
+            all("VALIDATION_SYSTEM_PYTHON" not in env for env in ordinary_environments)
+        )
+        self.assertEqual(
+            backend_environments[0]["VALIDATION_SYSTEM_PYTHON"],
+            "/reviewed/system/python",
+        )
+
     def test_fixed_tools_reject_symlinked_executable(self):
         validator = _load_validator()
         with tempfile.TemporaryDirectory() as temporary:

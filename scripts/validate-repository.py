@@ -254,9 +254,7 @@ def _environment(root: Path) -> dict[str, str]:
     for directory in (home, tmp, cache, config, pycache, ruff_cache):
         directory.mkdir(mode=0o700)
     environment = {
-        key: os.environ[key]
-        for key in ("CI", "LANG", "LC_ALL", "VALIDATION_SYSTEM_PYTHON")
-        if key in os.environ
+        key: os.environ[key] for key in ("CI", "LANG", "LC_ALL") if key in os.environ
     }
     environment.update(
         {
@@ -380,6 +378,7 @@ def main(argv: Sequence[str] = ()) -> int:
         )
         return 1
     try:
+        configured_system_python = os.environ.get("VALIDATION_SYSTEM_PYTHON")
         temporary_parent = "/private/tmp" if Path("/private/tmp").is_dir() else None
         with tempfile.TemporaryDirectory(
             prefix="subagents-validation-", dir=temporary_parent
@@ -392,6 +391,10 @@ def main(argv: Sequence[str] = ()) -> int:
                     "required" if label == "backend gate" else "optional"
                 )
                 if label == "backend gate":
+                    if configured_system_python is not None:
+                        check_environment["VALIDATION_SYSTEM_PYTHON"] = (
+                            configured_system_python
+                        )
                     result = _coerce_result(
                         _backend_gate(repo_root, env=check_environment)
                     )

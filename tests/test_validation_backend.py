@@ -1055,15 +1055,16 @@ class BackendIntegrationTests(unittest.TestCase):
                     captured, 17 if is_probe else 0, "", ""
                 )
 
-            try:
-                runner.run_isolated(
-                    ("python3", "-c", "print('bounded')"),
-                    repository,
-                    platform_name,
-                    sentinel,
-                )
-            except ValueError:
-                pass
+            with patch.object(runner, "select_backend", side_effect=select_and_capture):
+                try:
+                    runner.run_isolated(
+                        ("python3", "-c", "print('bounded')"),
+                        repository,
+                        platform_name,
+                        sentinel,
+                    )
+                except ValueError:
+                    pass
             if not selected:
                 self.assertEqual(calls, [])
             else:
