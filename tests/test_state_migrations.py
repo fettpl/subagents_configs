@@ -1,6 +1,5 @@
 import hashlib
 import json
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,6 +12,7 @@ from subagents_configs.state import (
     migrate_manifest_schema,
 )
 from subagents_configs.targets import descriptor_for
+from tests.helpers import private_tempdir
 
 
 class StateMigrationTests(unittest.TestCase):
@@ -53,7 +53,7 @@ class StateMigrationTests(unittest.TestCase):
 
     def test_schema2_journal_round_trip_preserves_exact_identity_evidence(self):
         raw = self._v2_journal()
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with private_tempdir() as temporary:
             journal = decode_journal(raw, descriptor_for(Target.CODEX), Path(temporary))
         self.assertEqual(json.loads(encode_journal(journal)), raw)
 
@@ -75,7 +75,7 @@ class StateMigrationTests(unittest.TestCase):
             {**evidence, "sha256": "a" * 63},
         )
         descriptor = descriptor_for(Target.CODEX)
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with private_tempdir() as temporary:
             for item in malformed:
                 candidate = {
                     **raw,
@@ -104,7 +104,7 @@ class StateMigrationTests(unittest.TestCase):
             "operations": [],
             "rollback_status": "complete",
         }
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with private_tempdir() as temporary:
             home = Path(temporary)
             descriptor = descriptor_for(Target.CODEX)
             with self.assertRaises(ValueError):
@@ -113,7 +113,7 @@ class StateMigrationTests(unittest.TestCase):
                 decode_journal(journal, descriptor, home)
 
     def test_v1_manifest_migrates_only_when_live_hash_mode_and_path_match(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with private_tempdir() as temporary:
             home = Path(temporary)
             managed = home / "agents" / "code-explorer.toml"
             managed.parent.mkdir(mode=0o700)
@@ -167,14 +167,14 @@ class StateMigrationTests(unittest.TestCase):
             ],
             "rollback_status": "not-started",
         }
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with private_tempdir() as temporary:
             with self.assertRaisesRegex(RuntimeError, "manual recovery is required"):
                 inspect_legacy_journal(
                     raw, descriptor_for(Target.CODEX), Path(temporary)
                 )
 
     def test_v0_and_future_schemas_are_rejected_and_unknown_keys_are_rejected(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with private_tempdir() as temporary:
             home = Path(temporary)
             for version in (0, 3):
                 with self.assertRaises(ValueError):

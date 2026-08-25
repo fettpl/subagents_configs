@@ -1,4 +1,3 @@
-import tempfile
 import threading
 import unittest
 from dataclasses import replace
@@ -11,11 +10,12 @@ from subagents_configs.locks import (
 )
 from subagents_configs.models import Target
 from subagents_configs.transaction import TransactionError
+from tests.helpers import private_tempdir
 
 
 class LockAndEvidenceTests(unittest.TestCase):
     def test_second_lock_waits_until_first_releases(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with private_tempdir() as temporary:
             home = Path(temporary) / "home"
             home.mkdir(mode=0o700)
             acquired = threading.Event()
@@ -44,7 +44,7 @@ class LockAndEvidenceTests(unittest.TestCase):
             self.assertTrue(contender_acquired.is_set())
 
     def test_lock_rejects_noncanonical_or_duplicate_target_sequences(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with private_tempdir() as temporary:
             homes = {
                 Target.CODEX: Path(temporary) / "codex",
                 Target.OPENCODE: Path(temporary) / "opencode",
@@ -59,7 +59,7 @@ class LockAndEvidenceTests(unittest.TestCase):
                     pass
 
     def test_compare_and_swap_rejects_each_identity_field_change(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with private_tempdir() as temporary:
             path = Path(temporary) / "managed"
             path.write_bytes(b"before")
             path.chmod(0o600)

@@ -37,6 +37,12 @@ _TRUSTED_SYSTEM_PREFIXES = (
     Path("/lib"),
     Path("/lib64"),
 )
+_USR_MERGE_ALIASES = (
+    (Path("/bin"), Path("/usr/bin")),
+    (Path("/sbin"), Path("/usr/sbin")),
+    (Path("/lib"), Path("/usr/lib")),
+    (Path("/lib64"), Path("/usr/lib64")),
+)
 _COMMAND_LINE_TOOLS_PYTHON_FRAMEWORK = Path(
     "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework"
 )
@@ -650,6 +656,40 @@ def build_linux_mount_plan(python_executable: Path) -> tuple[Path, ...]:
     return tuple(mounts)
 
 
+def _safe_usrmerge_aliases() -> tuple[tuple[Path, Path], ...]:
+    """Return fixed usrmerge aliases that are safe to recreate in the guest."""
+
+    aliases: list[tuple[Path, Path]] = []
+    for alias, expected in _USR_MERGE_ALIASES:
+        try:
+            item = os.lstat(alias)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValidationIsolationError(
+                "Linux usrmerge alias is unavailable"
+            ) from exc
+        if not stat.S_ISLNK(item.st_mode):
+            continue
+        if item.st_uid != 0:
+            raise ValidationIsolationError("Linux usrmerge alias is unsafe")
+        # POSIX symlink permission bits are ignored and Linux reports them as
+        # 0777.  The fixed parent and resolved target directories carry the
+        # meaningful root-owned, non-writable safety contract instead.
+        _validate_system_directory(alias.parent, "Linux usrmerge alias parent")
+        try:
+            canonical = alias.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValidationIsolationError(
+                "Linux usrmerge alias is unavailable"
+            ) from exc
+        if canonical != expected:
+            raise ValidationIsolationError("Linux usrmerge alias target is unexpected")
+        _validate_system_directory(expected, "Linux usrmerge alias target")
+        aliases.append((alias, expected))
+    return tuple(aliases)
+
+
 def _existing_mounts(python_executable: Path) -> tuple[Path, ...]:
     return build_linux_mount_plan(python_executable)
 
@@ -715,6 +755,8 @@ def build_backend_argv(
     ]
     for mount in _existing_mounts(backend.python_executable):
         argv.extend(("--ro-bind", str(mount), str(mount)))
+    for alias, expected in _safe_usrmerge_aliases():
+        argv.extend(("--symlink", str(expected.relative_to("/")), str(alias)))
     for key, value in sorted(env.items()):
         argv.extend(("--setenv", key, guest_path(value)))
     argv.extend(("--chdir", str(guest_snapshot), "--"))
