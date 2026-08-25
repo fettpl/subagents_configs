@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import tomllib
@@ -26,6 +27,7 @@ from .formats import (
     validate_validation_helper,
 )
 from .models import (
+    IdentityEvidence,
     ManagedBlock,
     Manifest,
     ManifestEntry,
@@ -41,7 +43,12 @@ from .paths import (
     normalized_absolute,
 )
 from .state import encode_manifest
-from .targets import descriptor_for, selected_sources, targets_for_request
+from .targets import (
+    descriptor_for,
+    registry_target_order,
+    selected_sources,
+    targets_for_request,
+)
 
 
 @dataclass(frozen=True)
@@ -80,9 +87,33 @@ class TargetPlan:
 
 
 @dataclass(frozen=True)
+class SourceEvidence:
+    """Stable source metadata exposed by structured dry-run output."""
+
+    identifier: str
+    kind: str
+    format: str
+    source_hash: str
+
+
+@dataclass(frozen=True)
+class RecoverySummary:
+    """Validated, metadata-only description of pending transaction recovery."""
+
+    required: bool = False
+    action: Literal["cleanup", "rollback", "none"] = "none"
+    participants: tuple[Target, ...] = ()
+    homes: tuple[Path, ...] = ()
+    journal_identifiers: tuple[str, ...] = ()
+    manual_resolution: bool = False
+
+
+@dataclass(frozen=True)
 class TransactionPlan:
     operation: Literal["install", "uninstall"]
     targets: tuple[TargetPlan, ...]
+    sources: tuple[SourceEvidence, ...] = ()
+    recovery: RecoverySummary = RecoverySummary()
 
 
 _LEGACY_STATE_NAMES = {
@@ -1202,6 +1233,8 @@ def _validate_request(request: Request, operation: str) -> None:
     ):
         if type(getattr(request, option)) is not bool:
             raise ValueError(f"{option} must be a bool")
+    if request.dry_run_format not in ("text", "json"):
+        raise ValueError("dry_run_format must be text or json")
     if not request.targets:
         raise ValueError("at least one target is required")
     if any(type(target) is not Target for target in request.targets):
@@ -1255,7 +1288,17 @@ def preflight_install(repo_root: Path, request: Request) -> TransactionPlan:
             _target_install(root, request, target, inventories[target], cache)
             for target in targets_for_request(request.targets, False)
         )
-    return TransactionPlan("install", target_plans)
+    source_evidence = tuple(
+        SourceEvidence(
+            source.spec.identifier,
+            source.spec.kind,
+            source.spec.source_format,
+            source.sha256,
+        )
+        for target in targets_for_request(request.targets, False)
+        for source in inventories[target]
+    )
+    return TransactionPlan("install", target_plans, source_evidence)
 
 
 def preflight_uninstall(repo_root: Path, request: Request) -> TransactionPlan:
@@ -1267,7 +1310,17 @@ def preflight_uninstall(repo_root: Path, request: Request) -> TransactionPlan:
             _target_uninstall(root, request, target, inventories[target], cache)
             for target in targets_for_request(request.targets, False)
         )
-    return TransactionPlan("uninstall", target_plans)
+    source_evidence = tuple(
+        SourceEvidence(
+            source.spec.identifier,
+            source.spec.kind,
+            source.spec.source_format,
+            source.sha256,
+        )
+        for target in targets_for_request(request.targets, False)
+        for source in inventories[target]
+    )
+    return TransactionPlan("uninstall", target_plans, source_evidence)
 
 
 def render_plan(plan: TransactionPlan) -> str:
@@ -1292,3 +1345,152 @@ def render_plan(plan: TransactionPlan) -> str:
         for conflict in target.conflicts:
             lines.append(f"  conflict: {conflict}")
     return "\n".join(lines) + "\n"
+
+
+def _json_evidence(value: object, fallback_hash: str | None, fallback_mode: int | None):
+    """Reduce evidence to the public, content-free structured representation."""
+
+    if isinstance(value, IdentityEvidence):
+        return {
+            "hash": value.sha256,
+            "mode": value.mode,
+            "device": value.device,
+            "inode": value.inode,
+            "size": value.size,
+            "nlink": value.nlink,
+        }
+    if fallback_hash is None and fallback_mode is None:
+        return None
+    return {
+        "hash": fallback_hash,
+        "mode": fallback_mode,
+        "device": None,
+        "inode": None,
+        "size": None,
+        "nlink": None,
+    }
+
+
+def _safe_conflict(value: str) -> str:
+    """Return only a stable, bounded conflict label for JSON output."""
+
+    if type(value) is not str:
+        return "conflict"
+    # Planner conflicts are already reduced to managed relative paths.  Keep
+    # the label bounded in case a future planner adds a diagnostic prefix.
+    return value[:256]
+
+
+def render_plan_json(
+    plan: TransactionPlan, *, recovery: RecoverySummary | None = None
+) -> bytes:
+    """Render a deterministic, versioned plan without source or user content."""
+
+    if not isinstance(plan, TransactionPlan):
+        raise TypeError("plan must be a TransactionPlan")
+    if recovery is None:
+        recovery = plan.recovery
+    if not isinstance(recovery, RecoverySummary):
+        raise TypeError("recovery must be a RecoverySummary")
+
+    target_order = {
+        target: index for index, target in enumerate(registry_target_order())
+    }
+    target_records = [
+        {"target": target.target.value, "home": str(normalized_absolute(target.home))}
+        for target in sorted(plan.targets, key=lambda item: target_order[item.target])
+    ]
+    action_records: list[dict[str, object]] = []
+    hash_records: list[dict[str, object]] = []
+    ownership_records: list[dict[str, object]] = []
+    conflicts: list[dict[str, object]] = []
+    for target in sorted(plan.targets, key=lambda item: target_order[item.target]):
+        target_conflicts = tuple(target.conflicts)
+        conflicts.extend(
+            {"target": target.target.value, "reason": _safe_conflict(reason)}
+            for reason in target_conflicts
+        )
+        for operation in sorted(
+            target.operations,
+            key=lambda item: (
+                target_order[item.target],
+                item.relative_path,
+                item.identifier,
+            ),
+        ):
+            before = _json_evidence(
+                operation.expected_before_evidence,
+                operation.expected_before_hash,
+                operation.expected_before_mode,
+            )
+            after = _json_evidence(
+                operation.expected_after_evidence,
+                operation.expected_after_hash,
+                operation.expected_after_mode,
+            )
+            action_records.append(
+                {
+                    "target": operation.target.value,
+                    "home": str(normalized_absolute(target.home)),
+                    "identifier": operation.identifier,
+                    "action": operation.action,
+                    "relative_path": operation.relative_path,
+                    "before": before,
+                    "after": after,
+                    "ownership": operation.ownership,
+                    "conflict": None,
+                }
+            )
+            hash_records.append(
+                {
+                    "target": operation.target.value,
+                    "identifier": operation.identifier,
+                    "before": operation.expected_before_hash,
+                    "after": operation.expected_after_hash,
+                }
+            )
+            ownership_records.append(
+                {
+                    "target": operation.target.value,
+                    "identifier": operation.identifier,
+                    "ownership": operation.ownership,
+                }
+            )
+    source_records = [
+        {
+            "identifier": source.identifier,
+            "kind": source.kind,
+            "format": source.format,
+            "source_hash": source.source_hash,
+        }
+        for source in sorted(
+            plan.sources,
+            key=lambda item: (
+                item.identifier,
+                item.kind,
+                item.format,
+                item.source_hash,
+            ),
+        )
+    ]
+    payload = {
+        "schema_version": 1,
+        "operation": plan.operation,
+        "targets": target_records,
+        "actions": action_records,
+        "hashes": hash_records,
+        "ownership": ownership_records,
+        "conflicts": conflicts,
+        "recovery": {
+            "required": recovery.required,
+            "action": recovery.action,
+            "participants": [target.value for target in recovery.participants],
+            "homes": [str(normalized_absolute(home)) for home in recovery.homes],
+            "journal_identifiers": list(recovery.journal_identifiers),
+            "manual_resolution": recovery.manual_resolution,
+        },
+        "sources": source_records,
+    }
+    return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )

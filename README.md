@@ -193,7 +193,8 @@ compatibility wrappers inherit the same selection.
 
 Install options are `--target TARGET`, `--all`, `--home TARGET=PATH`,
 `--enable-global-routing`, `--enable-codex-multi-agent`,
-`--include-commit-pusher`, `--dry-run`, and sole-argument `--help`.
+`--include-commit-pusher`, `--dry-run`, `--format text|json`, and sole-argument
+`--help`. `--format json` is accepted only with `--dry-run`.
 Uninstall accepts `--target`, `--all`, `--home`, `--dry-run`, and `--help`; the
 three install-only opt-ins are rejected during CLI parsing. Repeated targets,
 mixed `--all` and `--target`, unknown options, duplicate homes, homes for
@@ -209,9 +210,12 @@ paths are not permission to escape the selected home; existing components,
 targets, state, and managed files must pass the symlink and containment checks.
 
 `--dry-run` prints the normalized plan and exact effects without creating
-homes, state, journals, backups, temporary files, or managed blocks. A normal
-install is idempotent when nothing has changed. All selected targets undergo a
-complete read-only preflight before the first write.
+homes, state, journals, backups, temporary files, or managed blocks. Add
+`--format json` for the versioned structured schema; it contains only stable
+target, action, hash/evidence, ownership, conflict, recovery, and source
+metadata and never file contents or source paths. A normal install is
+idempotent when nothing has changed. All selected targets undergo a complete
+read-only preflight before the first write.
 
 ## Install, recovery, and uninstall behavior
 
@@ -262,17 +266,16 @@ normalized plan and safe recovery status, for example:
 error: code=RECOVERY_REQUIRED targets=codex,opencode homes=home-1,home-2 operation=uninstall phase=recovery status=required
 ```
 
-The structured JSON example below is documentation for a future compatibility
-surface, not an implemented option in this scope; current `--dry-run` output
-is text and has no JSON flag:
+The structured JSON dry-run has a versioned top-level contract:
 
 ```json
-{"code":"RECOVERY_REQUIRED","targets":["codex"],"homes":["home-1"],"operation":"uninstall","phase":"recovery","status":"required"}
+{"actions":[],"conflicts":[],"hashes":[],"operation":"uninstall","ownership":[],"recovery":{"action":"none","homes":[],"journal_identifiers":[],"manual_resolution":false,"participants":[],"required":false},"schema_version":1,"sources":[],"targets":[]}
 ```
 
-Both examples intentionally omit file contents, transaction identifiers,
-absolute homes, exception messages, and environment values. A dry-run creates
-no homes, journals, backups, temporary files, or managed blocks.
+Both examples intentionally omit file contents, exception messages, and
+environment values; structured recovery may include validated journal
+identifiers and normalized participant homes. A dry-run creates no homes,
+journals, backups, temporary files, or managed blocks.
 
 ### Exit status
 

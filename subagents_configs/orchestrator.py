@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal, TextIO
 
+from . import filesystem
 from .cli import parse_request
 from .diagnostics import DiagnosticCode, emit_diagnostic
 from .errors import CliError, ValidationBlockedError
@@ -13,10 +14,13 @@ from .locks import locked_target_homes
 from .models import Journal, Request, Target
 from .paths import normalized_absolute
 from .planning import (
+    RecoverySummary,
+    TargetPlan,
     TransactionPlan,
     preflight_install,
     preflight_uninstall,
     render_plan,
+    render_plan_json,
 )
 from .recovery import recover_transaction
 from .state import load_journal
@@ -62,10 +66,11 @@ HELP_TEXT = {
         "Installed files are home/agents/<role>, the private\n"
         "home/.subagents_configs/validation runtime, and only opted-in managed\n"
         "AGENTS.md/CLAUDE.md or Codex config blocks.\n"
-        "--dry-run prints normalized homes and exact effects without any writes.\n"
+        "--dry-run prints normalized homes and exact effects without any writes;\n"
+        "--format json selects the versioned structured dry-run output.\n"
         "Options: --target TARGET, --all, --home TARGET=PATH,\n"
         "         --enable-global-routing, --enable-codex-multi-agent,\n"
-        "         --include-commit-pusher, --dry-run, --help\n"
+        "         --include-commit-pusher, --dry-run, --format text|json, --help\n"
     ),
     "uninstall": (
         "Usage: uninstall.sh (--target TARGET ... | --all) [OPTIONS]\n"
@@ -79,8 +84,10 @@ HELP_TEXT = {
         "Managed files are home/agents/<role> and opted-in AGENTS.md/CLAUDE.md or\n"
         "Codex config blocks; no unrelated files are removed.\n"
         "Uninstall never accepts install-only routing, Codex, or role options.\n"
-        "--dry-run prints normalized homes and exact effects without any writes.\n"
-        "Options: --target TARGET, --all, --home TARGET=PATH, --dry-run, --help\n"
+        "--dry-run prints normalized homes and exact effects without any writes;\n"
+        "--format json selects the versioned structured dry-run output.\n"
+        "Options: --target TARGET, --all, --home TARGET=PATH, --dry-run,\n"
+        "         --format text|json, --help\n"
     ),
 }
 
@@ -217,6 +224,216 @@ def _plan(request: Request, repo_root: Path) -> TransactionPlan:
     if request.operation == "install":
         return preflight_install(repo_root, request)
     return preflight_uninstall(repo_root, request)
+
+
+class ConcurrentDryRunChangeError(RuntimeError):
+    """Raised when the two lock-free dry-run evidence collections disagree."""
+
+
+def _evidence_fingerprint(value: object) -> tuple[object, ...] | None:
+    fields = ("device", "inode", "size", "nlink", "mode", "sha256")
+    if not all(hasattr(value, field) for field in fields):
+        return None
+    return tuple(getattr(value, field) for field in fields)
+
+
+def _plan_fingerprint(plan: TransactionPlan) -> tuple[object, ...]:
+    targets = []
+    for target in plan.targets:
+        operations = []
+        for operation in target.operations:
+            operations.append(
+                (
+                    operation.target.value,
+                    operation.identifier,
+                    operation.action,
+                    operation.relative_path,
+                    operation.expected_before_hash,
+                    operation.expected_after_hash,
+                    operation.expected_before_mode,
+                    operation.expected_after_mode,
+                    operation.ownership,
+                    _evidence_fingerprint(operation.expected_before_evidence),
+                    _evidence_fingerprint(operation.expected_after_evidence),
+                )
+            )
+        targets.append(
+            (
+                target.target.value,
+                str(normalized_absolute(target.home)),
+                tuple(operations),
+                tuple(target.conflicts),
+            )
+        )
+    sources = tuple(
+        (item.identifier, item.kind, item.format, item.source_hash)
+        for item in plan.sources
+    )
+    return (plan.operation, tuple(targets), sources)
+
+
+def _state_fingerprint(request: Request) -> tuple[object, ...]:
+    """Capture existing state/journal identities without creating substrates."""
+
+    records = []
+    for target in request.targets:
+        home = normalized_absolute(request.homes[target])
+        state_dir = home / ".subagents_configs"
+        state_identity = (
+            filesystem.capture_evidence(state_dir / "manifest.json", "dry-run manifest")
+            if (state_dir / "manifest.json").exists()
+            else None
+        )
+        journal_identity = (
+            filesystem.capture_evidence(state_dir / "journal.json", "dry-run journal")
+            if (state_dir / "journal.json").exists()
+            else None
+        )
+        records.append(
+            (
+                target.value,
+                _evidence_fingerprint(state_identity),
+                _evidence_fingerprint(journal_identity),
+            )
+        )
+    return tuple(records)
+
+
+def _recovery_fingerprint(
+    groups: tuple[tuple[dict[Target, Path], tuple[Journal, ...]], ...],
+) -> tuple[object, ...]:
+    records = []
+    for homes, journals in groups:
+        for journal in journals:
+            records.append(
+                (
+                    journal.target.value,
+                    str(normalized_absolute(homes[journal.target])),
+                    journal.transaction_id,
+                    journal.operation,
+                    tuple(journal.participants),
+                    journal.rollback_status,
+                    tuple(
+                        (
+                            operation.operation_id,
+                            operation.identifier,
+                            operation.action,
+                            operation.status,
+                            operation.expected_before_hash,
+                            operation.expected_after_hash,
+                            operation.expected_before_mode,
+                            operation.expected_after_mode,
+                            _evidence_fingerprint(operation.expected_before_evidence),
+                            _evidence_fingerprint(operation.expected_after_evidence),
+                        )
+                        for operation in journal.operations
+                    ),
+                )
+            )
+    return tuple(records)
+
+
+def _collect_stable_dry_run_evidence(
+    request: Request, repo_root: Path | None = None
+) -> tuple[TransactionPlan, tuple[object, ...]]:
+    """Collect complete read-only planning evidence twice without acquiring locks."""
+
+    root = Path(__file__).parents[1] if repo_root is None else repo_root
+    first_groups = _journal_groups(request)
+    first_state = _state_fingerprint(request)
+    if first_groups:
+        first = TransactionPlan(
+            request.operation,
+            tuple(
+                TargetPlan(
+                    target,
+                    normalized_absolute(request.homes[target]),
+                    (),
+                    None,
+                    (),
+                )
+                for target in request.targets
+            ),
+            recovery=_recovery_summary(first_groups),
+        )
+    else:
+        first = _plan(request, root)
+    second_groups = _journal_groups(request)
+    second = (
+        TransactionPlan(
+            request.operation,
+            tuple(
+                TargetPlan(
+                    target,
+                    normalized_absolute(request.homes[target]),
+                    (),
+                    None,
+                    (),
+                )
+                for target in request.targets
+            ),
+            recovery=_recovery_summary(second_groups),
+        )
+        if second_groups
+        else _plan(request, root)
+    )
+
+    second_state = _state_fingerprint(request)
+    recovery_fingerprint = _recovery_fingerprint(first_groups)
+    plan_fingerprint = _plan_fingerprint(first)
+    if (
+        first_state != second_state
+        or recovery_fingerprint != _recovery_fingerprint(second_groups)
+        or plan_fingerprint != _plan_fingerprint(second)
+    ):
+        raise ConcurrentDryRunChangeError("dry-run evidence changed")
+    return first, (first_state, recovery_fingerprint, plan_fingerprint)
+
+
+def collect_stable_dry_run_evidence(
+    request: Request, repo_root: Path | None = None
+) -> TransactionPlan:
+    """Collect complete read-only planning evidence twice without acquiring locks."""
+
+    plan, _fingerprint = _collect_stable_dry_run_evidence(request, repo_root)
+    return plan
+
+
+def _recovery_summary(
+    groups: tuple[tuple[dict[Target, Path], tuple[Journal, ...]], ...],
+) -> RecoverySummary:
+    if not groups:
+        return RecoverySummary()
+    participants: list[Target] = []
+    homes: list[Path] = []
+    identifiers: list[str] = []
+    actions: set[str] = set()
+    manual_resolution = False
+    for group_homes, journals in groups:
+        actions.add(_recovery_action(journals))
+        for journal in journals:
+            if journal.target not in participants:
+                participants.append(journal.target)
+            homes.append(group_homes[journal.target])
+            identifiers.extend(
+                operation.operation_id for operation in journal.operations
+            )
+            manual_resolution = (
+                manual_resolution
+                or journal.rollback_status in {"incomplete"}
+                or any(
+                    operation.status == "ambiguous" for operation in journal.operations
+                )
+            )
+    action = next(iter(sorted(actions))) if len(actions) == 1 else "rollback"
+    return RecoverySummary(
+        required=True,
+        action=action,
+        participants=tuple(participants),
+        homes=tuple(homes),
+        journal_identifiers=tuple(identifiers),
+        manual_resolution=manual_resolution,
+    )
 
 
 def _run_mutating_locked(
@@ -502,6 +719,115 @@ def run(
             failure_injector=failure_injector,
         )
 
+    if request.dry_run_format == "json":
+        try:
+            plan, fingerprint = _collect_stable_dry_run_evidence(request, repo_root)
+        except ConcurrentDryRunChangeError:
+            _emit_request(
+                stderr,
+                request,
+                DiagnosticCode.PREFLIGHT_CONCURRENT_CHANGE,
+                phase="preflight",
+                status="rejected",
+            )
+            return EXIT_PREFLIGHT_ERROR
+        except ValidationBlockedError:
+            _emit_request(
+                stderr,
+                request,
+                DiagnosticCode.VALIDATION_BLOCKED,
+                phase="validation",
+                status="blocked",
+            )
+            return EXIT_BLOCKED_VALIDATION
+        except ValueError:
+            _emit_request(
+                stderr,
+                request,
+                DiagnosticCode.PREFLIGHT_REJECTED,
+                phase="preflight",
+                status="rejected",
+            )
+            return EXIT_PREFLIGHT_ERROR
+        except (RuntimeError, OSError):
+            _emit_request(
+                stderr,
+                request,
+                DiagnosticCode.PREFLIGHT_REJECTED,
+                phase="preflight",
+                status="rejected",
+            )
+            return EXIT_PREFLIGHT_ERROR
+        except Exception:
+            _emit_request(
+                stderr,
+                request,
+                DiagnosticCode.PREFLIGHT_REJECTED,
+                phase="preflight",
+                status="rejected",
+            )
+            return EXIT_PREFLIGHT_ERROR
+        try:
+            rendered = render_plan_json(plan).decode("utf-8")
+        except Exception:
+            _emit_request(
+                stderr,
+                request,
+                DiagnosticCode.OUTPUT_FAILED,
+                phase="output",
+                status="failed",
+            )
+            return EXIT_PREFLIGHT_ERROR
+        try:
+            _post_render_plan, post_fingerprint = _collect_stable_dry_run_evidence(
+                request, repo_root
+            )
+            if post_fingerprint != fingerprint:
+                raise ConcurrentDryRunChangeError(
+                    "dry-run evidence changed after render"
+                )
+        except ConcurrentDryRunChangeError:
+            _emit_request(
+                stderr,
+                request,
+                DiagnosticCode.PREFLIGHT_CONCURRENT_CHANGE,
+                phase="preflight",
+                status="rejected",
+            )
+            return EXIT_PREFLIGHT_ERROR
+        except Exception:
+            _emit_request(
+                stderr,
+                request,
+                DiagnosticCode.PREFLIGHT_CONCURRENT_CHANGE,
+                phase="preflight",
+                status="rejected",
+            )
+            return EXIT_PREFLIGHT_ERROR
+        try:
+            if not _write_output(stdout, rendered):
+                raise OSError("structured output unavailable")
+            has_conflicts = any(target.conflicts for target in plan.targets)
+        except Exception:
+            _emit_request(
+                stderr,
+                request,
+                DiagnosticCode.OUTPUT_FAILED,
+                phase="output",
+                status="failed",
+            )
+            return EXIT_PREFLIGHT_ERROR
+        if request.operation == "install" and has_conflicts:
+            _emit_request(
+                stderr,
+                request,
+                DiagnosticCode.MANAGED_CONFLICT,
+                phase="preflight",
+                status="conflict",
+            )
+            return EXIT_MANAGED_CONFLICT
+        return EXIT_SUCCESS
+
     try:
         groups = _journal_groups(request)
     except (ValueError, OSError):
@@ -524,6 +850,35 @@ def run(
         return EXIT_BLOCKED_VALIDATION
 
     if groups and request.dry_run:
+        if request.dry_run_format == "json":
+            try:
+                recovery = _recovery_summary(groups)
+                plan = TransactionPlan(
+                    request.operation,
+                    tuple(
+                        TargetPlan(
+                            target,
+                            normalized_absolute(request.homes[target]),
+                            (),
+                            None,
+                            (),
+                        )
+                        for target in request.targets
+                    ),
+                )
+                rendered = render_plan_json(plan, recovery=recovery).decode("utf-8")
+                if not _write_output(stdout, rendered):
+                    raise OSError("recovery output unavailable")
+            except Exception:
+                _emit_request(
+                    stderr,
+                    request,
+                    DiagnosticCode.OUTPUT_FAILED,
+                    phase="output",
+                    status="failed",
+                )
+                return EXIT_PREFLIGHT_ERROR
+            return EXIT_SUCCESS
         try:
             for homes, journals in groups:
                 del journals
@@ -580,7 +935,19 @@ def run(
         return EXIT_INCOMPLETE_ROLLBACK
 
     try:
-        plan = _plan(request, repo_root)
+        if request.dry_run_format == "json":
+            plan = collect_stable_dry_run_evidence(request, repo_root)
+        else:
+            plan = _plan(request, repo_root)
+    except ConcurrentDryRunChangeError:
+        _emit_request(
+            stderr,
+            request,
+            DiagnosticCode.PREFLIGHT_CONCURRENT_CHANGE,
+            phase="preflight",
+            status="rejected",
+        )
+        return EXIT_PREFLIGHT_ERROR
     except ValidationBlockedError:
         _emit_request(
             stderr,
@@ -628,7 +995,10 @@ def run(
         return EXIT_PREFLIGHT_ERROR
 
     try:
-        rendered = render_plan(plan)
+        if request.dry_run_format == "json":
+            rendered = render_plan_json(plan).decode("utf-8")
+        else:
+            rendered = render_plan(plan)
     except Exception:
         _emit_request(
             stderr,
