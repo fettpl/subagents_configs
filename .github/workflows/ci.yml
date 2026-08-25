@@ -28,7 +28,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends bubblewrap=0.9.0-1ubuntu0.1 apparmor=4.0.1really4.0.1-0ubuntu0.24.04.5 apparmor-profiles=4.0.1really4.0.1-0ubuntu0.24.04.5
+          sudo apt-get install --yes --no-install-recommends bubblewrap=0.9.0-1ubuntu0.1 apparmor=4.0.1really4.0.1-0ubuntu0.24.04.7 apparmor-profiles=4.0.1really4.0.1-0ubuntu0.24.04.7
           profile_source=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
           parser=/usr/sbin/apparmor_parser
           if ! test -f "$profile_source" || ! test "$(realpath "$profile_source")" = "$profile_source" || ! test "$(stat -c '%u' "$profile_source")" = 0; then

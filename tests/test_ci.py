@@ -34,8 +34,8 @@ class CiContractTests(unittest.TestCase):
             r"          sudo apt-get update\n"
             r"          sudo apt-get install --yes --no-install-recommends "
             r"bubblewrap=0\.9\.0-1ubuntu0\.1 "
-            r"apparmor=4\.0\.1really4\.0\.1-0ubuntu0\.24\.04\.5 "
-            r"apparmor-profiles=4\.0\.1really4\.0\.1-0ubuntu0\.24\.04\.5\n"
+            r"apparmor=4\.0\.1really4\.0\.1-0ubuntu0\.24\.04\.7 "
+            r"apparmor-profiles=4\.0\.1really4\.0\.1-0ubuntu0\.24\.04\.7\n"
             r"          profile_source=/usr/share/apparmor/extra-profiles/"
             r"bwrap-userns-restrict\n"
             r"          parser=/usr/sbin/apparmor_parser\n"
@@ -171,8 +171,8 @@ class CiContractTests(unittest.TestCase):
             "sudo apt-get update\n"
             "sudo apt-get install --yes --no-install-recommends "
             "bubblewrap=0.9.0-1ubuntu0.1 "
-            "apparmor=4.0.1really4.0.1-0ubuntu0.24.04.5 "
-            "apparmor-profiles=4.0.1really4.0.1-0ubuntu0.24.04.5\n"
+            "apparmor=4.0.1really4.0.1-0ubuntu0.24.04.7 "
+            "apparmor-profiles=4.0.1really4.0.1-0ubuntu0.24.04.7\n"
             "profile_source=/usr/share/apparmor/extra-profiles/"
             "bwrap-userns-restrict\n"
             "parser=/usr/sbin/apparmor_parser\n"
@@ -223,10 +223,11 @@ class CiContractTests(unittest.TestCase):
         self.assertIn(
             "sudo apt-get install --yes --no-install-recommends "
             "bubblewrap=0.9.0-1ubuntu0.1 "
-            "apparmor=4.0.1really4.0.1-0ubuntu0.24.04.5 "
-            "apparmor-profiles=4.0.1really4.0.1-0ubuntu0.24.04.5",
+            "apparmor=4.0.1really4.0.1-0ubuntu0.24.04.7 "
+            "apparmor-profiles=4.0.1really4.0.1-0ubuntu0.24.04.7",
             self.text,
         )
+        self.assertNotIn("0ubuntu0.24.04.5", self.text)
         for fixed_tool in ("/usr/bin/bwrap", "/bin/bwrap", "/usr/bin/shellcheck"):
             self.assertIn(fixed_tool, self.text)
         self.assertRegex(
@@ -424,6 +425,11 @@ class CiContractTests(unittest.TestCase):
                 "kernel.apparmor_restrict_unprivileged_userns=0\n"
                 "          sudo /usr/sbin/apparmor_parser --replace "
                 "/etc/apparmor.d/bwrap-userns-restrict\n",
+                1,
+            ),
+            self.text.replace(
+                "apparmor=4.0.1really4.0.1-0ubuntu0.24.04.7",
+                "apparmor=4.0.1really4.0.1-0ubuntu0.24.04.5",
                 1,
             ),
         )
