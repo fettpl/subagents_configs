@@ -243,9 +243,6 @@ class FullInstallMatrixTests(unittest.TestCase):
             }:
                 self.assertIsNotNone(source.destination)
                 return source.destination.as_posix()
-        for setting in descriptor.managed_settings:
-            if identifier in {setting.identifier, setting.relative_path.as_posix()}:
-                return setting.relative_path.as_posix()
         aliases = {
             "routing-codex": descriptor.global_filename,
             "routing-opencode": descriptor.global_filename,
@@ -356,9 +353,6 @@ class FullInstallMatrixTests(unittest.TestCase):
             and (include_commit_pusher or source.optional_role != "commit-pusher")
         }
         paths.add(".subagents_configs/manifest.json")
-        paths.update(
-            item.relative_path.as_posix() for item in descriptor.managed_settings
-        )
         return paths
 
     def _expected_default_files(self, target: Target) -> set[str]:

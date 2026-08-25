@@ -146,9 +146,9 @@ The safe default is private, target-scoped role/runtime installation with no
 global routing, no Codex multi-agent table, no `commit-pusher`, no network
 access, and no execution of installed prompts. Claude Code additionally
 receives a managed `PreToolUse` Bash hook at
-`.subagents_configs/claude-hooks/code-validator-pretooluse.py` and a
-`settings.json` entry. The hook is a technical gate: it parses the Bash event
-as untrusted JSON and allows only the exact argv shape
+`.subagents_configs/claude-hooks/code-validator-pretooluse.py`, scoped to the
+installed `code-validator` agent frontmatter. The hook is a technical gate: it
+parses the Bash event as untrusted JSON and allows only the exact argv shape
 `python3 <installed-helper> -- <safe-relative-arguments>`. It never executes
 the command, and direct unrestricted Bash remains denied by the role policy.
 

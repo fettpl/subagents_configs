@@ -66,3 +66,55 @@ Commit: planned `fix: gate Claude validator commands technically`
 - Ruff check and format check: passed.
 - Python compileall: passed.
 - `git diff --check`: passed.
+
+## Fix round 1/5 — controller review closure
+
+Status: complete
+Commit: pending `fix: scope Claude command gate to validator agent`
+
+### TDD record
+
+- RED: the new realistic-event and post-`--` attack cases failed against the
+  two-key parser and permissive argv validator; the old settings lifecycle did
+  not prove role scope; and syntax-only command-gate validation accepted a
+  mutated unconditional allow source.
+- GREEN: the revised focused suite passes after moving the hook into validator
+  agent frontmatter, removing global settings ownership, hardening the parser
+  and argv contract, and adding semantic source/catalog checks.
+
+### Review mapping
+
+- Claude `PreToolUse` is now rendered only in `code-validator` frontmatter with
+  the deterministic absolute installed hook path. Global `settings.json`
+  managed-setting models, planning, state, transaction, and lifecycle logic
+  were removed. The installed executable hook file remains managed normally.
+- Hook input requires the realistic common event fields, validates documented
+  optional fields and `agent_type`, rejects duplicate/unknown/type changes,
+  and keeps fixed diagnostics/no execution.
+- Post-helper argv rejects shells, launchers, interpreters, absolute or
+  executable paths, assignments, traversal, glob, and tilde expansion while
+  retaining finite validation command data.
+- Command-gate source validation now checks AST imports/calls, required
+  parser/validator/hook symbols, fixed statuses, policy constants, and the
+  non-executing validation path.
+- YAML duplicate/unknown frontmatter, OpenCode permission maps/order, and
+  Claude role-scoped hook/tool contracts are fail-closed and mutation-tested.
+- README describes role-scoped enforcement; active Ruff/format checks include
+  `claude-code`.
+
+### Fix-round verification
+
+- Focused: 55 tests passed.
+- Full discovery: 407 tests passed, 1 explicit unsupported-host validation
+  smoke skip.
+- `scripts/validate-catalogs.py`: passed.
+- Ruff check and format check over `claude-code subagents_configs scripts tests`:
+  passed.
+- Compileall over `claude-code subagents_configs scripts tests`: passed.
+- `git diff --check`: passed.
+
+### Concerns
+
+- Claude installations on versions without agent-frontmatter hooks must be
+  rejected by future compatibility validation rather than silently falling
+  back to a global hook; no global authority-changing fallback is retained.

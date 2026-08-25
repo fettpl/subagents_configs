@@ -20,14 +20,90 @@ from typing import BinaryIO, TextIO
 
 @dataclass(frozen=True)
 class PreToolUseEvent:
+    session_id: str
+    cwd: str
     tool_name: str
     command: str
+    tool_use_id: str
+    permission_mode: str | None = None
+    agent_id: str | None = None
+    agent_type: str | None = None
 
 
-_TOP_KEYS = {"tool_name", "tool_input"}
+_EVENT_REQUIRED_KEYS = {
+    "session_id",
+    "cwd",
+    "hook_event_name",
+    "tool_name",
+    "tool_input",
+    "tool_use_id",
+}
+_EVENT_OPTIONAL_KEYS = {"transcript_path", "permission_mode", "agent_id", "agent_type"}
+_TOP_KEYS = _EVENT_REQUIRED_KEYS | _EVENT_OPTIONAL_KEYS
 _INPUT_KEYS = {"command"}
-_SHELL_META = frozenset(";&|<>$`(){}[]!#'\"\\")
+_EVENT_NAME = "PreToolUse"
+_TOOL_NAME = "Bash"
+_SHELL_META = frozenset(
+    {
+        ";",
+        "&",
+        "|",
+        "<",
+        ">",
+        "$",
+        "`",
+        "(",
+        ")",
+        "{",
+        "}",
+        "[",
+        "]",
+        "!",
+        "#",
+        "'",
+        '"',
+        "\\",
+    }
+)
+_GLOB_META = frozenset({"*", "?", "~"})
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_BLOCKED_EXECUTABLES = frozenset(
+    {
+        "bash",
+        "sh",
+        "zsh",
+        "dash",
+        "ksh",
+        "csh",
+        "fish",
+        "env",
+        "xargs",
+        "exec",
+        "command",
+        "su" + "do",
+        "doas",
+        "nohup",
+        "setsid",
+        "timeout",
+        "stdbuf",
+        "nice",
+        "python",
+        "python2",
+        "python3",
+        "python3.14",
+        "pypy",
+        "perl",
+        "ruby",
+        "node",
+        "deno",
+        "bun",
+        "java",
+        "go",
+        "cargo",
+        "rustc",
+        "make",
+    }
+)
 
 
 def _reject_duplicate_pairs(pairs: list[tuple[object, object]]) -> dict[object, object]:
@@ -72,8 +148,32 @@ def parse_pretooluse_event(raw: bytes) -> PreToolUseEvent:
         )
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
         raise ValueError("invalid event") from None
-    top = _object(decoded, _TOP_KEYS)
-    if top["tool_name"] != "Bash":
+    if (
+        type(decoded) is not dict
+        or any(type(key) is not str for key in decoded)
+        or not _EVENT_REQUIRED_KEYS <= set(decoded)
+        or not set(decoded) <= _TOP_KEYS
+    ):
+        raise ValueError("invalid event")
+    top = decoded
+    if any(key not in top for key in _EVENT_REQUIRED_KEYS):
+        raise ValueError("invalid event")
+    strings = ("session_id", "cwd", "tool_use_id")
+    if any(
+        type(top[key]) is not str or not top[key] or len(top[key]) > 4096
+        for key in strings
+    ):
+        raise ValueError("invalid event")
+    if top["hook_event_name"] != _EVENT_NAME:
+        raise ValueError("invalid event")
+    if top["tool_name"] != _TOOL_NAME:
+        raise ValueError("invalid event")
+    for key in _EVENT_OPTIONAL_KEYS:
+        if key in top and (
+            type(top[key]) is not str or not top[key] or len(top[key]) > 4096
+        ):
+            raise ValueError("invalid event")
+    if "agent_type" in top and top["agent_type"] != "code-validator":
         raise ValueError("invalid event")
     tool_input = _object(top["tool_input"], _INPUT_KEYS)
     command = tool_input["command"]
@@ -84,11 +184,27 @@ def parse_pretooluse_event(raw: bytes) -> PreToolUseEvent:
         or _contains_command_syntax(command)
     ):
         raise ValueError("invalid event")
-    return PreToolUseEvent("Bash", command)
+    if _contains_command_syntax(command):
+        raise ValueError("invalid event")
+    return PreToolUseEvent(
+        session_id=top["session_id"],
+        cwd=top["cwd"],
+        tool_name=_TOOL_NAME,
+        command=command,
+        tool_use_id=top["tool_use_id"],
+        permission_mode=top.get("permission_mode"),
+        agent_id=top.get("agent_id"),
+        agent_type=top.get("agent_type"),
+    )
 
 
 def _safe_relative_argument(value: str) -> bool:
-    if not value or "\x00" in value or value in {".", ".."}:
+    if (
+        not value
+        or "\x00" in value
+        or value in {".", ".."}
+        or any(character in _GLOB_META or character == "\\" for character in value)
+    ):
         return False
     try:
         path = PurePosixPath(value)
@@ -119,10 +235,15 @@ def validate_validator_command(command: str, helper: str) -> tuple[str, ...]:
         raise ValueError("validation command denied") from None
     if len(argv) < 4 or argv[:3] != ("python3", helper, "--"):
         raise ValueError("validation command denied")
-    for value in argv[3:]:
+    for index, value in enumerate(argv[3:]):
         if not _safe_relative_argument(value):
             raise ValueError("validation command denied")
         if _ASSIGNMENT.match(value):
+            raise ValueError("validation command denied")
+        basename = PurePosixPath(value).name.lower()
+        if value.lower() in _BLOCKED_EXECUTABLES or basename in _BLOCKED_EXECUTABLES:
+            raise ValueError("validation command denied")
+        if index == 0 and ("/" in value or value.startswith("-")):
             raise ValueError("validation command denied")
     return argv
 
@@ -130,7 +251,11 @@ def validate_validator_command(command: str, helper: str) -> tuple[str, ...]:
 def _rendered_helper() -> str:
     # The hook is installed next to the private validation runtime.  Resolving
     # this repository-controlled relative path does not inspect user input.
-    return str(Path(__file__).resolve().parent.parent / "validation" / "run-validation-isolated.py")
+    return str(
+        Path(__file__).resolve().parent.parent
+        / "validation"
+        / "run-validation-isolated.py"
+    )
 
 
 VALIDATION_HELPER = _rendered_helper()

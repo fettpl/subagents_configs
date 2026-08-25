@@ -266,9 +266,6 @@ def _identifier_relative(descriptor, identifier: str) -> str | None:
             source.destination.as_posix() if source.destination else None,
         }:
             return source.destination.as_posix() if source.destination else None
-    for setting in descriptor.managed_settings:
-        if identifier in {setting.identifier, setting.relative_path.as_posix()}:
-            return setting.relative_path.as_posix()
     global_aliases = {
         descriptor.global_filename: descriptor.global_filename,
     }
@@ -527,15 +524,7 @@ def _validate_manifest_linkage(target_plan: TargetPlan) -> None:
                 != entry.relative_path
             ):
                 raise ValueError("manifest block metadata does not match operation")
-            if (
-                entry.managed_setting_id is not None
-                and operation.managed_block_id is not None
-            ):
-                raise ValueError("setting-owned entry cannot also be a block entry")
-        setting_ids = {item.identifier for item in descriptor.managed_settings}
-        if entry.identifier in setting_ids:
-            if entry.managed_setting_id != entry.identifier:
-                raise ValueError("manifest setting metadata does not match operation")
+
         if (
             operation is not None
             and entry.managed_block_id is not None

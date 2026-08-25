@@ -39,16 +39,6 @@ class SourceSpec:
 
 
 @dataclass(frozen=True)
-class ManagedSettingSpec:
-    """A target-owned JSON setting represented as a deterministic path/value."""
-
-    identifier: str
-    relative_path: PurePosixPath
-    key_path: tuple[str, ...]
-    value: object
-
-
-@dataclass(frozen=True)
 class TargetDescriptor:
     target: Target
     environment_variable: str
@@ -56,7 +46,6 @@ class TargetDescriptor:
     global_filename: str
     config_filename: str | None
     sources: tuple[SourceSpec, ...]
-    managed_settings: tuple[ManagedSettingSpec, ...] = ()
 
 
 Ownership = Literal["created", "replaced", "preexisting"]
@@ -75,7 +64,6 @@ class ManifestEntry:
     managed_block_id: str | None
     installed_block_hash: str | None
     unresolved_reason: str | None
-    managed_setting_id: str | None = None
 
 
 @dataclass(frozen=True)

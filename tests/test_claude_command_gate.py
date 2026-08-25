@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from subagents_configs.errors import ValidationBlockedError
 from subagents_configs.formats import validate_source_inventory
 from subagents_configs.models import SourceSpec, Target
 from subagents_configs.planning import preflight_install
@@ -36,12 +37,34 @@ class ClaudeCommandGateTests(unittest.TestCase):
 
     def _event(self, command):
         return json.dumps(
-            {"tool_name": "Bash", "tool_input": {"command": command}}
+            {
+                "session_id": "session-1",
+                "cwd": "/workspace/project",
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "tool_use_id": "tool-1",
+                "agent_type": "code-validator",
+            }
         ).encode()
 
     def test_parser_accepts_only_bash_command_events(self):
         event = self.hook.parse_pretooluse_event(
-            self._event("python3 /abs/helper -- unittest tests/test_x.py")
+            json.dumps(
+                {
+                    "session_id": "session-1",
+                    "cwd": "/workspace/project",
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash",
+                    "tool_input": {
+                        "command": "python3 /abs/helper -- unittest tests/test_x.py"
+                    },
+                    "tool_use_id": "tool-1",
+                    "permission_mode": "default",
+                    "agent_id": "agent-1",
+                    "agent_type": "code-validator",
+                }
+            ).encode()
         )
         self.assertEqual(event.tool_name, "Bash")
         self.assertEqual(
@@ -60,6 +83,29 @@ class ClaudeCommandGateTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 with self.assertRaises(ValueError):
                     self.hook.parse_pretooluse_event(raw)
+        valid = json.loads(self._event("python3 /abs/helper -- unittest").decode())
+        for key, value in (
+            ("session_id", 1),
+            ("cwd", 1),
+            ("hook_event_name", "PostToolUse"),
+            ("tool_use_id", 1),
+            ("permission_mode", 1),
+            ("agent_id", 1),
+            ("agent_type", "implementer"),
+        ):
+            invalid = dict(valid)
+            invalid[key] = value
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError):
+                    self.hook.parse_pretooluse_event(json.dumps(invalid).encode())
+        duplicate = (
+            b'{"session_id":"s","cwd":"/w","hook_event_name":"PreToolUse",'
+            b'"tool_name":"Bash","tool_input":{"command":"python3 /abs/helper -- x"},'
+            b'"tool_use_id":"t","agent_type":"code-validator",'
+            b'"agent_type":"code-validator"}'
+        )
+        with self.assertRaises(ValueError):
+            self.hook.parse_pretooluse_event(duplicate)
 
     def test_validator_command_returns_fixed_argv_for_safe_data(self):
         self.assertEqual(
@@ -79,6 +125,17 @@ class ClaudeCommandGateTests(unittest.TestCase):
             "python3 /abs/helper -- ../../secret",
             "python3 /abs/../helper -- unittest tests/test_x.py",
             "python3 /abs/helper -- $(touch x)",
+            "python3 /abs/helper -- bash -c id",
+            "python3 /abs/helper -- sh -c id",
+            "python3 /abs/helper -- env X=1 unittest tests/test_x.py",
+            "python3 /abs/helper -- python3 -c id",
+            "python3 /abs/helper -- python3.14 -c id",
+            "python3 /abs/helper -- /bin/echo unsafe",
+            "python3 /abs/helper -- ./echo unsafe",
+            "python3 /abs/helper -- unittest *.py",
+            "python3 /abs/helper -- unittest tests/?.py",
+            "python3 /abs/helper -- unittest ~/tests.py",
+            "python3 /abs/helper -- xargs unittest tests/test_x.py",
             "python3 /abs/helper -- unittest\ntests/test_x.py",
         )
         for command in commands:
@@ -118,50 +175,79 @@ class ClaudeCommandGateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_source_inventory(root, Target.CLAUDE_CODE, (spec,))
 
-    def test_claude_install_preserves_unrelated_settings_and_records_ownership(self):
+    def test_catalog_rejects_command_gate_that_allows_unconditionally(self):
+        source = ROOT / "claude-code/hooks/code-validator-pretooluse.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / source.name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(source.read_bytes().replace(b"return 2", b"return 0", 1))
+            spec = SourceSpec(
+                identifier="claude/code-validator-command-gate",
+                source=Path(source.name),
+                destination=Path(".subagents_configs/claude-hooks/hook.py"),
+                kind="command-gate",
+                source_format="python",
+            )
+            with self.assertRaises(ValueError):
+                validate_source_inventory(root, Target.CLAUDE_CODE, (spec,))
+
+    def test_claude_install_scopes_hook_to_validator_agent_only(self):
         with private_tempdir() as temporary:
             root = Path(temporary)
             repository = planning_repository(root)
             home = root / "claude-home"
             home.mkdir(mode=0o700)
-            settings = home / "settings.json"
-            settings.write_text('{"theme":"dark"}\n', encoding="utf-8")
-            settings.chmod(0o600)
             plan = preflight_install(
                 repository,
                 planning_request("install", {Target.CLAUDE_CODE: home}),
             )
             apply_transaction(plan)
-            rendered = json.loads(settings.read_text(encoding="utf-8"))
-            self.assertEqual(rendered["theme"], "dark")
-            self.assertEqual(rendered["hooks"]["PreToolUse"][0]["matcher"], "Bash")
+            validator = (home / "agents/code-validator.md").read_text()
+            self.assertIn("PreToolUse:", validator)
+            self.assertIn(
+                str(
+                    home
+                    / ".subagents_configs/claude-hooks/code-validator-pretooluse.py"
+                ),
+                validator,
+            )
+            self.assertFalse((home / "settings.json").exists())
+            for role in (
+                "code-explorer",
+                "code-reviewer",
+                "quick-implementer",
+                "implementer",
+            ):
+                rendered = (home / f"agents/{role}.md").read_text()
+                self.assertNotIn("PreToolUse:", rendered)
+                if role in {"quick-implementer", "implementer"}:
+                    self.assertIn("tools: Read, Grep, Glob, Edit, Bash", rendered)
+            self.assertTrue(
+                (
+                    home
+                    / ".subagents_configs/claude-hooks/code-validator-pretooluse.py"
+                ).exists()
+            )
             manifest = load_manifest(home, descriptor_for(Target.CLAUDE_CODE))
-            setting = next(
-                item for item in manifest.entries if item.managed_setting_id is not None
-            )
-            self.assertEqual(
-                setting.identifier, "claude/code-validator-command-gate/settings"
-            )
+            self.assertIsNotNone(manifest)
 
-    def test_claude_install_rejects_conflicting_bash_hook_without_writes(self):
+    def test_claude_frontmatter_rejects_conflicting_hook_without_writes(self):
         with private_tempdir() as temporary:
             root = Path(temporary)
             repository = planning_repository(root)
             home = root / "claude-home"
             home.mkdir(mode=0o700)
-            settings = home / "settings.json"
-            settings.write_text(
-                '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[]}]}}\n',
-                encoding="utf-8",
+            source = repository / "claude-code/agents/code-validator.md"
+            source.write_bytes(
+                source.read_bytes().replace(b"type: command", b"type: prompt")
             )
-            settings.chmod(0o600)
-            before = settings.read_bytes()
-            with self.assertRaises(ValueError):
+            with self.assertRaises(ValidationBlockedError):
                 preflight_install(
                     repository,
                     planning_request("install", {Target.CLAUDE_CODE: home}),
                 )
-            self.assertEqual(settings.read_bytes(), before)
+            self.assertFalse(home.joinpath("agents").exists())
 
 
 if __name__ == "__main__":

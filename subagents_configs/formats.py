@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 import stat
@@ -56,13 +57,48 @@ def validate_yaml_agent(path: Path, content: bytes) -> Mapping[str, object]:
         raise ValueError(
             f"invalid YAML agent {path}: missing closing frontmatter"
         ) from exc
+
+    class _StrictLoader(yaml.SafeLoader):
+        pass
+
+    def _mapping(loader, node, deep=False):
+        mapping = {}
+        for key_node, value_node in node.value:
+            key = loader.construct_object(key_node, deep=deep)
+            if key in mapping:
+                raise yaml.constructor.ConstructorError(
+                    None, None, "duplicate YAML frontmatter key", key_node.start_mark
+                )
+            mapping[key] = loader.construct_object(value_node, deep=deep)
+        return mapping
+
+    _StrictLoader.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping
+    )
     try:
-        parsed = yaml.safe_load("\n".join(lines[1:closing]))
+        parsed = yaml.load(
+            "\n".join(lines[1:closing]),
+            Loader=_StrictLoader,  # noqa: S506
+        )
     except yaml.YAMLError as exc:
         raise ValueError(f"invalid YAML agent {path}: {exc}") from exc
     if not isinstance(parsed, Mapping):
         raise ValueError(f"invalid YAML agent {path}: frontmatter must be a mapping")
-    return dict(parsed)
+    parsed = dict(parsed)
+    allowed = {
+        "name",
+        "description",
+        "mode",
+        "model",
+        "permission",
+        "tools",
+        "permissionMode",
+        "hooks",
+    }
+    unknown = set(parsed) - allowed
+    if unknown:
+        raise ValueError(f"invalid YAML agent {path}: unknown frontmatter fields")
+    return parsed
 
 
 def validate_validation_helper(value: str) -> str:
@@ -158,6 +194,109 @@ def _reject_claude_tool_escalation(parsed: Mapping[str, object], role: str) -> N
         raise ValueError(f"unsafe permission declaration in {role}")
 
 
+def _validate_command_gate_source(content: bytes, source: Path) -> None:
+    """Require the command gate's fail-closed AST contract, not syntax only."""
+    try:
+        tree = ast.parse(content.decode("utf-8"), str(source), "exec")
+    except (SyntaxError, UnicodeDecodeError) as exc:
+        raise ValueError(f"malformed command gate source: {source}") from exc
+    imports = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    imports.update(
+        alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    )
+    if imports & {
+        "subprocess",
+        "os",
+        "socket",
+        "urllib",
+        "requests",
+        "http",
+        "shutil",
+    }:
+        raise ValueError("command gate source imports an unsafe module")
+    forbidden_calls = {
+        "eval",
+        "exec",
+        "system",
+        "popen",
+        "run",
+        "Popen",
+        "check_call",
+        "check_output",
+        "create_subprocess_exec",
+        "create_subprocess_shell",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            name = node.func.id if isinstance(node.func, ast.Name) else None
+            if name in forbidden_calls:
+                raise ValueError("command gate source can execute commands")
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    required_functions = {
+        "parse_pretooluse_event",
+        "validate_validator_command",
+        "hook_main",
+        "_safe_relative_argument",
+        "_safe_helper",
+    }
+    if not required_functions <= set(functions):
+        raise ValueError("command gate source is missing required functions")
+    literals = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    required_literals = {
+        "PreToolUse",
+        "Bash",
+        "python3",
+        "--",
+        "validation command denied\n",
+        "bash",
+        "env",
+        "python",
+        "*",
+        "?",
+        "~",
+        ";",
+        "&",
+        "|",
+        "<",
+        ">",
+        "$",
+    }
+    if not required_literals <= literals:
+        raise ValueError("command gate source is missing fixed policy constants")
+    hook = functions["hook_main"]
+    hook_calls = {
+        node.func.id
+        for node in ast.walk(hook)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    returns = {
+        node.value.value
+        for node in ast.walk(hook)
+        if isinstance(node, ast.Return)
+        and isinstance(node.value, ast.Constant)
+        and type(node.value.value) is int
+    }
+    if not {"parse_pretooluse_event", "validate_validator_command"} <= hook_calls:
+        raise ValueError("command gate hook does not validate events")
+    if not {0, 2} <= returns:
+        raise ValueError("command gate hook lacks fixed allow/deny statuses")
+
+
 def validate_agent_semantics(
     target: Target,
     role: str,
@@ -165,6 +304,7 @@ def validate_agent_semantics(
     body: str,
     *,
     validation_helper: str = "{{VALIDATION_HELPER}}",
+    hook_path: str = "{{CLAUDE_HOOK}}",
 ) -> None:
     """Reject unknown roles and authority increases in native definitions."""
     expected_roles = {
@@ -179,6 +319,21 @@ def validate_agent_semantics(
         raise ValueError(f"unknown role: {role}")
     if _text_value(parsed, "name") != role:
         raise ValueError(f"agent name does not match source role: {role}")
+    if target is Target.OPENCODE:
+        allowed_fields = {"name", "description", "mode", "model", "permission"}
+    elif target is Target.CLAUDE_CODE:
+        allowed_fields = {
+            "name",
+            "description",
+            "tools",
+            "model",
+            "permissionMode",
+            "hooks",
+        }
+    else:
+        allowed_fields = set(parsed)
+    if set(parsed) - allowed_fields:
+        raise ValueError(f"unknown {target.value} agent frontmatter field")
 
     if target is Target.CODEX:
         expected_model = {
@@ -232,6 +387,8 @@ def validate_agent_semantics(
             }
             if parsed.get("permission") != expected:
                 raise ValueError(f"OpenCode {role} has unsafe read permissions")
+            if tuple(parsed["permission"]) != tuple(expected):
+                raise ValueError(f"OpenCode {role} has unsafe permission order")
         if role == "code-validator":
             if parsed.get("model") != "openai/gpt-5.6-luna":
                 raise ValueError("OpenCode code-validator must use openai/gpt-5.6-luna")
@@ -253,6 +410,8 @@ def validate_agent_semantics(
             permission = parsed.get("permission")
             if permission != expected or not isinstance(permission, Mapping):
                 raise ValueError("unsafe validator permissions")
+            if tuple(permission) != tuple(expected):
+                raise ValueError("unsafe validator permission order")
             for key, expected_order in (
                 ("external_directory", ("*", validation_helper)),
                 ("bash", ("*", f"python3 {validation_helper} -- *")),
@@ -260,6 +419,11 @@ def validate_agent_semantics(
                 rules = permission.get(key)
                 if not isinstance(rules, Mapping) or tuple(rules) != expected_order:
                     raise ValueError("unsafe validator permissions")
+        elif (
+            role not in {"code-explorer", "code-reviewer"}
+            and parsed.get("permission") is not None
+        ):
+            raise ValueError(f"OpenCode {role} has unexpected permissions")
     elif target is Target.CLAUDE_CODE:
         _reject_claude_tool_escalation(parsed, role)
         expected_model = "inherit"
@@ -286,6 +450,8 @@ def validate_agent_semantics(
             and "permissionMode" in parsed
         ):
             raise ValueError(f"Claude {role} has an unexpected permission mode")
+        if role != "code-validator" and "hooks" in parsed:
+            raise ValueError(f"Claude {role} has an unexpected hook")
 
     unsafe_values = {"workspace-write", "acceptEdits", "bypassPermissions"}
     if any(
@@ -313,6 +479,18 @@ def validate_agent_semantics(
                 body,
                 ("PreToolUse", "technical command gate", "never executes"),
             )
+            expected_hooks = {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {"type": "command", "command": hook_path},
+                        ],
+                    }
+                ]
+            }
+            if parsed.get("hooks") != expected_hooks:
+                raise ValueError("Claude validator hook contract is not exact")
     if role == "code-reviewer":
         _require_body_concepts(
             role,
@@ -344,6 +522,7 @@ def validate_rendered_agent(
     path: Path,
     content: bytes,
     validation_helper: str,
+    hook_path: str = "{{CLAUDE_HOOK}}",
 ) -> Mapping[str, object]:
     """Parse and semantically validate an agent after helper substitution."""
     helper = validate_validation_helper(validation_helper)
@@ -363,6 +542,7 @@ def validate_rendered_agent(
         parsed,
         body,
         validation_helper=helper,
+        hook_path=hook_path,
     )
     return parsed
 
@@ -458,15 +638,20 @@ def validate_source_inventory(
         if not content.strip():
             raise ValueError(f"empty source: {spec.source}")
         placeholder = b"{{VALIDATION_HELPER}}"
-        if placeholder in content and spec.identifier != "code-validator":
+        hook_placeholder = b"{{CLAUDE_HOOK}}"
+        if (
+            placeholder in content or hook_placeholder in content
+        ) and spec.identifier != "code-validator":
             raise ValueError(
-                f"validation placeholder is restricted to code-validator: {spec.source}"
+                f"agent placeholder is restricted to code-validator: {spec.source}"
             )
         if spec.kind == "agent" and spec.identifier == "code-validator":
             if placeholder not in content:
                 raise ValueError(
                     "code-validator source is missing validation placeholder"
                 )
+            if target is Target.CLAUDE_CODE and hook_placeholder not in content:
+                raise ValueError("Claude validator source is missing hook placeholder")
         parsed: Mapping[str, object] | None = None
         try:
             body = content.decode("utf-8")
@@ -494,10 +679,13 @@ def validate_source_inventory(
         elif spec.kind in {"validation-runtime", "command-gate"}:
             if spec.source_format != "python":
                 raise ValueError(f"invalid Python source format: {spec.source}")
-            try:
-                compile(body, str(spec.source), "exec")
-            except SyntaxError as exc:
-                raise ValueError(f"malformed Python source: {spec.source}") from exc
+            if spec.kind == "command-gate":
+                _validate_command_gate_source(content, Path(spec.source))
+            else:
+                try:
+                    compile(body, str(spec.source), "exec")
+                except SyntaxError as exc:
+                    raise ValueError(f"malformed Python source: {spec.source}") from exc
         else:
             raise ValueError(f"unsupported source kind: {spec.kind}")
         result.append(

@@ -3,6 +3,12 @@ name: code-validator
 description: Read-only focused verification runner using the isolated validation helper.
 tools: Read, Grep, Glob, Bash
 model: inherit
+hooks:
+  PreToolUse:
+    - matcher: Bash
+      hooks:
+        - type: command
+          command: "{{CLAUDE_HOOK}}"
 ---
 # Code Validator (Read-Only Verification Runner)
 

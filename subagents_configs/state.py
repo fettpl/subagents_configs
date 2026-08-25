@@ -69,7 +69,6 @@ _ENTRY_KEYS = {
     "managed_block_id",
     "installed_block_hash",
     "unresolved_reason",
-    "managed_setting_id",
 }
 _JOURNAL_KEYS = {
     "schema_version",
@@ -250,10 +249,6 @@ def _supported_identifiers(descriptor: TargetDescriptor) -> dict[str, str]:
             destination = descriptor.config_filename
         add(block_id, destination, block_id)
         add(destination, destination, block_id)
-    for setting in descriptor.managed_settings:
-        destination = setting.relative_path.as_posix()
-        add(setting.identifier, destination, setting.identifier)
-        add(destination, destination, setting.identifier)
     return identifiers
 
 
@@ -327,19 +322,7 @@ def _entry(
     *,
     verify_backups: bool = True,
 ) -> ManifestEntry:
-    # Existing schema-v2 entries predate the optional setting-owner marker;
-    # accept that one omitted field while remaining strict about every other
-    # key.  New setting-owned entries always carry the marker.
-    expected_entry_keys = _ENTRY_KEYS - {"managed_setting_id"}
-    if type(raw) is not dict:
-        raise ValueError("manifest entry must be an object")
-    actual_entry_keys = set(raw)
-    if actual_entry_keys not in (
-        expected_entry_keys,
-        expected_entry_keys | {"managed_setting_id"},
-    ):
-        raise ValueError("invalid manifest entry fields")
-    value = raw
+    value = _dict(raw, _ENTRY_KEYS, "manifest entry")
     identifiers = _supported_identifiers(descriptor)
     identifier = _string(value["identifier"], "identifier")
     if identifier not in identifiers:
@@ -363,22 +346,6 @@ def _entry(
             raise ValueError("unsupported managed block id")
         if identifier != managed_block_id:
             raise ValueError("managed block id does not match identifier")
-    managed_setting_id = value.get("managed_setting_id")
-    setting_identifiers = {item.identifier for item in descriptor.managed_settings}
-    setting_paths = {
-        item.relative_path.as_posix() for item in descriptor.managed_settings
-    }
-    if identifier in setting_paths and identifier not in setting_identifiers:
-        raise ValueError("settings path is not a managed setting identifier")
-    if identifier in setting_identifiers and managed_setting_id != identifier:
-        raise ValueError("setting-owned entry is missing managed setting id")
-    if managed_setting_id is not None:
-        managed_setting_id = _string(managed_setting_id, "managed_setting_id")
-        settings = {item.identifier for item in descriptor.managed_settings}
-        if managed_setting_id not in settings or identifier != managed_setting_id:
-            raise ValueError("managed setting id does not match identifier")
-        if managed_block_id is not None:
-            raise ValueError("entry cannot be both block and setting owned")
     backup_path, backup_hash = _backup(
         home,
         value["backup_path"],
@@ -420,7 +387,6 @@ def _entry(
         managed_block_id=managed_block_id,
         installed_block_hash=installed_block_hash,
         unresolved_reason=unresolved_reason,
-        managed_setting_id=managed_setting_id,
     )
 
 
@@ -477,12 +443,6 @@ def _operation(
     allowed = _supported_identifiers(descriptor)
     if identifier != "state/manifest" and identifier not in allowed:
         raise ValueError("journal identifier is not managed")
-    setting_paths = {
-        item.relative_path.as_posix() for item in descriptor.managed_settings
-    }
-    setting_identifiers = {item.identifier for item in descriptor.managed_settings}
-    if identifier in setting_paths and identifier not in setting_identifiers:
-        raise ValueError("settings path is not a managed setting identifier")
     action = value["action"]
     if type(action) is not str or action not in _ACTIONS:
         raise ValueError("invalid journal action")
@@ -692,7 +652,7 @@ def _decode_journal(
 
 
 def _entry_json(entry: ManifestEntry) -> dict[str, object]:
-    value = {
+    return {
         "identifier": entry.identifier,
         "relative_path": entry.relative_path,
         "installed_hash": entry.installed_hash,
@@ -705,9 +665,6 @@ def _entry_json(entry: ManifestEntry) -> dict[str, object]:
         "installed_block_hash": entry.installed_block_hash,
         "unresolved_reason": entry.unresolved_reason,
     }
-    if entry.managed_setting_id is not None:
-        value["managed_setting_id"] = entry.managed_setting_id
-    return value
 
 
 def encode_manifest(manifest: Manifest) -> bytes:

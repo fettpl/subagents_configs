@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import stat
 import tomllib
@@ -139,7 +138,6 @@ def _entry_for_file(
     backup_hash: str | None = None,
     original_mode: int | None = None,
     unresolved_reason: str | None = None,
-    managed_setting_id: str | None = None,
 ) -> ManifestEntry:
     return ManifestEntry(
         identifier=identifier,
@@ -153,7 +151,6 @@ def _entry_for_file(
         managed_block_id=None,
         installed_block_hash=None,
         unresolved_reason=unresolved_reason,
-        managed_setting_id=managed_setting_id,
     )
 
 
@@ -182,7 +179,6 @@ def _entry_for_block(
         managed_block_id=identifier,
         installed_block_hash=block_hash,
         unresolved_reason=unresolved_reason,
-        managed_setting_id=None,
     )
 
 
@@ -199,135 +195,6 @@ def _block_from_file(content: bytes, block_id: str) -> ManagedBlock | None:
         raise ValueError("malformed managed block")
     body = rendered[len(prefix) : -len(suffix)]
     return ManagedBlock(block_id, begin, end, body, _digest(rendered))
-
-
-def _json_pairs(pairs: list[tuple[object, object]]) -> dict[object, object]:
-    result: dict[object, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("unsafe Claude settings")
-        result[key] = value
-    return result
-
-
-def _read_json_settings(
-    path: Path,
-) -> tuple[bytes | None, int | None, dict[str, object]]:
-    try:
-        content, mode = _read_regular(path, "Claude settings")
-    except FileNotFoundError:
-        return None, None, {}
-    try:
-        parsed = json.loads(content.decode("utf-8"), object_pairs_hook=_json_pairs)
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
-        raise ValueError("unsafe Claude settings") from None
-    if type(parsed) is not dict or any(type(key) is not str for key in parsed):
-        raise ValueError("unsafe Claude settings")
-    return content, mode, parsed
-
-
-def _setting_value(setting, home: Path) -> dict[str, object]:
-    value = setting.value
-    if not isinstance(value, dict):
-        raise ValueError("unsafe Claude settings")
-    hook = normalized_absolute(
-        home / ".subagents_configs/claude-hooks/code-validator-pretooluse.py"
-    )
-    rendered = json.loads(
-        json.dumps(value, separators=(",", ":"), ensure_ascii=False).replace(
-            "{{CLAUDE_HOOK}}", str(hook)
-        )
-    )
-    if type(rendered) is not dict:
-        raise ValueError("unsafe Claude settings")
-    return rendered
-
-
-def _plan_claude_command_gate(
-    home: Path,
-    prior: ManifestEntry | None,
-) -> tuple[PlannedOperation | None, ManifestEntry | None]:
-    descriptor = descriptor_for(Target.CLAUDE_CODE)
-    if len(descriptor.managed_settings) != 1:
-        raise ValueError("Claude command gate settings are unavailable")
-    setting = descriptor.managed_settings[0]
-    relative = setting.relative_path.as_posix()
-    destination = _safe_destination(home, relative, setting.identifier)
-    current, current_mode, parsed = _read_json_settings(destination)
-    desired_entry = _setting_value(setting, home)
-    hooks = parsed.get("hooks")
-    if hooks is None:
-        hooks = {}
-        parsed["hooks"] = hooks
-    if type(hooks) is not dict:
-        raise ValueError("unsafe Claude settings")
-    pretool = hooks.get("PreToolUse")
-    if pretool is None:
-        pretool = []
-        hooks["PreToolUse"] = pretool
-    if type(pretool) is not list:
-        raise ValueError("unsafe Claude settings")
-    bash_entries = [
-        item for item in pretool if type(item) is dict and item.get("matcher") == "Bash"
-    ]
-    exact = [item for item in bash_entries if item == desired_entry]
-    if len(bash_entries) != len(exact) or len(exact) > 1:
-        raise ValueError("conflicting Claude command gate setting")
-    if exact:
-        if current is None or current_mode is None:
-            raise ValueError("unsafe Claude settings")
-        if prior is not None and (
-            _digest(current) != prior.installed_hash
-            or current_mode != prior.installed_mode
-        ):
-            raise ValueError("Claude settings changed after install")
-        ownership = prior.ownership if prior is not None else "preexisting"
-        return None, _entry_for_file(
-            setting.identifier,
-            relative,
-            current,
-            current_mode,
-            ownership,
-            managed_setting_id=setting.identifier,
-        )
-    if prior is not None:
-        if current is None:
-            raise ValueError("Claude settings are missing")
-        if (
-            _digest(current) != prior.installed_hash
-            or current_mode != prior.installed_mode
-        ):
-            raise ValueError("Claude settings changed after install")
-        if prior.ownership == "preexisting":
-            raise ValueError("Claude settings conflict with preexisting state")
-    pretool.append(desired_entry)
-    after = (json.dumps(parsed, sort_keys=True, separators=(",", ":")) + "\n").encode()
-    before_hash = _digest(current) if current is not None else None
-    ownership = "created" if current is None else "replaced"
-    operation = _make_file_operation(
-        Target.CLAUDE_CODE,
-        setting.identifier,
-        relative,
-        current,
-        current_mode,
-        after,
-        ownership,
-        backup_required=current is not None,
-    )
-    entry = _entry_for_file(
-        setting.identifier,
-        relative,
-        after,
-        0o600,
-        ownership,
-        backup_path=_backup_name(setting.identifier, before_hash)
-        if current is not None and before_hash is not None
-        else None,
-        backup_hash=before_hash,
-        original_mode=current_mode,
-        managed_setting_id=setting.identifier,
-    )
-    return operation, entry
 
 
 def _selected_sources(
@@ -366,11 +233,16 @@ def _source_bytes(target: Target, source: ValidatedSource, home: Path) -> bytes:
     if source.spec.kind != "agent":
         return source.content
     if source.spec.identifier != "code-validator":
-        if b"{{VALIDATION_HELPER}}" in source.content:
-            raise ValueError("validation placeholder is restricted to code-validator")
+        if (
+            b"{{VALIDATION_HELPER}}" in source.content
+            or b"{{CLAUDE_HOOK}}" in source.content
+        ):
+            raise ValueError("agent placeholders are restricted to code-validator")
         return source.content
     if b"{{VALIDATION_HELPER}}" not in source.content:
         raise ValueError("code-validator source is missing validation placeholder")
+    if target is Target.CLAUDE_CODE and b"{{CLAUDE_HOOK}}" not in source.content:
+        raise ValueError("Claude validator source is missing hook placeholder")
     helper = normalized_absolute(
         home / ".subagents_configs/validation/run-validation-isolated.py"
     )
@@ -378,14 +250,31 @@ def _source_bytes(target: Target, source: ValidatedSource, home: Path) -> bytes:
     rendered = source.content.replace(
         b"{{VALIDATION_HELPER}}", helper_text.encode("utf-8")
     )
+    if target is Target.CLAUDE_CODE:
+        hook = normalized_absolute(
+            home / ".subagents_configs/claude-hooks/code-validator-pretooluse.py"
+        )
+        rendered = rendered.replace(b"{{CLAUDE_HOOK}}", str(hook).encode("utf-8"))
     if b"{{VALIDATION_HELPER}}" in rendered:
         raise ValueError("validation placeholder remained unresolved")
+    if b"{{CLAUDE_HOOK}}" in rendered:
+        raise ValueError("Claude hook placeholder remained unresolved")
     validate_rendered_agent(
         target,
         source.spec.identifier,
         Path(source.spec.destination or source.spec.source),
         rendered,
         helper_text,
+        hook_path=(
+            str(
+                normalized_absolute(
+                    home
+                    / ".subagents_configs/claude-hooks/code-validator-pretooluse.py"
+                )
+            )
+            if target is Target.CLAUDE_CODE
+            else "{{CLAUDE_HOOK}}"
+        ),
     )
     return rendered
 
@@ -930,26 +819,6 @@ def _target_install(
             operations.append(operation)
         if entry is not None:
             entries[entry.relative_path] = entry
-
-    if target is Target.CLAUDE_CODE:
-        setting_operation, setting_entry = _plan_claude_command_gate(
-            home,
-            next(
-                (
-                    item
-                    for item in prior_manifest.entries
-                    if item.managed_setting_id
-                    == "claude/code-validator-command-gate/settings"
-                ),
-                None,
-            )
-            if prior_manifest is not None
-            else None,
-        )
-        if setting_operation is not None:
-            operations.append(setting_operation)
-        if setting_entry is not None:
-            entries[setting_entry.relative_path] = setting_entry
 
     instruction = _safe_destination(home, descriptor.global_filename, "instructions")
     try:
