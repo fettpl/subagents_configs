@@ -313,7 +313,7 @@ class CanonicalValidatorTests(unittest.TestCase):
     def test_fixed_tools_reject_symlinked_executable(self):
         validator = _load_validator()
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             target = root / "target"
             target.write_text("#!/bin/sh\n", encoding="utf-8")
             target.chmod(0o700)
@@ -321,6 +321,41 @@ class CanonicalValidatorTests(unittest.TestCase):
             link.symlink_to(target)
             with self.assertRaises(OSError):
                 validator._fixed_executable(link, label="test", root_owned=False)
+
+    def test_fixed_candidate_skips_unsafe_first_and_fails_without_safe_fallback(self):
+        validator = _load_validator()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            target = root / "target"
+            target.write_text("#!/bin/sh\n", encoding="utf-8")
+            target.chmod(0o700)
+            link = root / "link"
+            link.symlink_to(target)
+            selected = validator._fixed_candidate(
+                (link, target), label="test", root_owned=False
+            )
+            self.assertEqual(selected, target)
+            with self.assertRaises(OSError):
+                validator._fixed_candidate((link,), label="test", root_owned=False)
+            directory = root / "directory"
+            directory.mkdir()
+            with self.assertRaises(OSError):
+                validator._fixed_candidate((directory,), label="test", root_owned=False)
+
+    def test_fixed_tool_failure_has_safe_diagnostic_label(self):
+        validator = _load_validator()
+        with (
+            patch.object(
+                validator, "_fixed_tools", side_effect=OSError("private secret")
+            ),
+            patch("builtins.print") as printed,
+        ):
+            self.assertEqual(validator.main([]), 1)
+        message = str(printed.call_args)
+        self.assertIn("fixed tool gate", message)
+        self.assertIn("status=blocked", message)
+        self.assertNotIn("private secret", message)
+        self.assertNotIn("private validation environment", message)
 
     def test_failed_check_diagnostics_are_bounded_and_secret_free(self):
         validator = _load_validator()

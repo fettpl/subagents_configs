@@ -122,6 +122,19 @@ def _fixed_executable(path: Path, *, label: str, root_owned: bool) -> Path:
     return path
 
 
+def _fixed_candidate(
+    candidates: Sequence[Path], *, label: str, root_owned: bool
+) -> Path:
+    """Select the first reviewed candidate that passes all trust checks."""
+
+    for candidate in candidates:
+        try:
+            return _fixed_executable(candidate, label=label, root_owned=root_owned)
+        except OSError:
+            continue
+    raise OSError(f"no reviewed {label} executable")
+
+
 def _fixed_tools() -> tuple[Path, Path, Path, Path]:
     """Resolve tools from reviewed absolute locations, never from PATH."""
 
@@ -131,16 +144,16 @@ def _fixed_tools() -> tuple[Path, Path, Path, Path]:
     ruff = _fixed_executable(
         python.parent / "ruff", label="Ruff executable", root_owned=False
     )
-    shell = _fixed_executable(Path("/bin/sh"), label="shell", root_owned=True)
-    git = None
-    for candidate in (Path("/usr/bin/git"), Path("/bin/git")):
-        try:
-            git = _fixed_executable(candidate, label="git", root_owned=True)
-        except OSError:
-            continue
-        break
-    if git is None:
-        raise OSError("no reviewed git executable")
+    shell = _fixed_candidate(
+        (Path("/usr/bin/dash"), Path("/bin/sh")),
+        label="shell",
+        root_owned=True,
+    )
+    git = _fixed_candidate(
+        (Path("/usr/bin/git"), Path("/bin/git")),
+        label="git",
+        root_owned=True,
+    )
     return python, ruff, shell, git
 
 
@@ -360,6 +373,13 @@ def main(argv: Sequence[str] = ()) -> int:
     repo_root = SCRIPT_PATH.resolve().parents[1]
     try:
         tools = _fixed_tools()
+    except (OSError, RuntimeError):
+        print(
+            _diagnostic("fixed tool gate", "blocked", _result(1)),
+            file=sys.stderr,
+        )
+        return 1
+    try:
         temporary_parent = "/private/tmp" if Path("/private/tmp").is_dir() else None
         with tempfile.TemporaryDirectory(
             prefix="subagents-validation-", dir=temporary_parent
