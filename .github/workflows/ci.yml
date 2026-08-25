@@ -19,6 +19,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Provision private CI paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          ci_root="$RUNNER_TEMP/subagents-configs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if test -e "$ci_root" || test -L "$ci_root"; then
+            echo "private CI root already exists"
+            exit 1
+          fi
+          mkdir -p "$ci_root/home" "$ci_root/xdg-cache" "$ci_root/xdg-config" "$ci_root/tmp" "$ci_root/pycache" "$ci_root/ruff-cache"
+          chmod 700 "$ci_root" "$ci_root/home" "$ci_root/xdg-cache" "$ci_root/xdg-config" "$ci_root/tmp" "$ci_root/pycache" "$ci_root/ruff-cache"
+          {
+            echo "HOME=$ci_root/home"
+            echo "XDG_CACHE_HOME=$ci_root/xdg-cache"
+            echo "XDG_CONFIG_HOME=$ci_root/xdg-config"
+            echo "TMPDIR=$ci_root/tmp"
+            echo "PYTHONDONTWRITEBYTECODE=1"
+            echo "PYTHONPYCACHEPREFIX=$ci_root/pycache"
+            echo "RUFF_CACHE_DIR=$ci_root/ruff-cache"
+          } >> "$GITHUB_ENV"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}

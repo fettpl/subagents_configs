@@ -149,6 +149,28 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("mktemp -d", self.text)
         self.assertIn("umask 077", self.text)
 
+    def test_private_cache_environment_is_provisioned_before_setup_and_install(self):
+        names = [step.get("name", "") for step in self.steps]
+        private_index = names.index("Provision private CI paths")
+        setup_index = next(
+            index
+            for index, step in enumerate(self.steps)
+            if step.get("uses", "").startswith("actions/setup-python@")
+        )
+        install_index = names.index("Install pinned developer requirements")
+        self.assertLess(private_index, setup_index)
+        self.assertLess(private_index, install_index)
+        private_step = self.steps[private_index]["run"]
+        for path in (
+            "HOME=",
+            "XDG_CACHE_HOME=",
+            "XDG_CONFIG_HOME=",
+            "PYTHONPYCACHEPREFIX=",
+            "RUFF_CACHE_DIR=",
+        ):
+            self.assertIn(path, private_step)
+        self.assertIn('chmod 700 "$ci_root"', private_step)
+
     def test_runner_matrix_is_pinned_to_supported_images(self):
         matrix = next(
             job["strategy"]["matrix"]
@@ -382,16 +404,16 @@ class CiContractTests(unittest.TestCase):
         validator = (ROOT / "scripts" / "validate-repository.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('("git", "status", "--short")', validator)
-        self.assertIn("if output:", validator)
-        self.assertIn("checkout is not clean", validator)
+        self.assertIn('(git, "status", "--short")', validator)
+        self.assertIn('label == "clean checkout" and output', validator)
+        self.assertIn("clean checkout; status=dirty", validator)
 
     def test_checkout_status_errors_fail_closed(self):
         validator = (ROOT / "scripts" / "validate-repository.py").read_text(
             encoding="utf-8"
         )
         self.assertIn("except OSError:", validator)
-        self.assertIn("validation failed: checkout is not clean", validator)
+        self.assertIn("validation failed: clean checkout; status=dirty", validator)
 
     def test_negative_ci_mutations_trigger_contract_guards(self):
         mutations = (

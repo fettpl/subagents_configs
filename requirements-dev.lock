@@ -2,11 +2,8 @@
 # Install only with: python -m pip install --require-hashes --requirement requirements-dev.lock
 -r requirements-runtime.lock
 # artifact: ruff-0.16.3-py3-none-macosx_11_0_arm64.whl sha256:e2ed719e14aa64d895c2ee922594a90a43c861a93f0575a95ff8c47cdbd13eb9
-ruff==0.16.3 ; sys_platform == "darwin" and platform_machine == "arm64" \
+ruff==0.16.3 ; implementation_name == "cpython" and python_version >= "3.11" and python_version < "3.15" and platform_system == "Darwin" and platform_machine == "arm64" \
     --hash=sha256:e2ed719e14aa64d895c2ee922594a90a43c861a93f0575a95ff8c47cdbd13eb9
 # artifact: ruff-0.16.3-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl sha256:294b95c4ae0cda9388525c2047778aa758d6b8d4bb876fd4e9eaa3ebc92343eb
-ruff==0.16.3 ; sys_platform == "linux" and platform_machine == "x86_64" \
+ruff==0.16.3 ; implementation_name == "cpython" and python_version >= "3.11" and python_version < "3.15" and platform_system == "Linux" and platform_machine == "x86_64" \
     --hash=sha256:294b95c4ae0cda9388525c2047778aa758d6b8d4bb876fd4e9eaa3ebc92343eb
-# artifact: ruff-0.16.3.tar.gz sha256:e76d33a347661a84b5be6d043d0347fdc745dfdcf825a8f4fed64b5e26eebdf2
-ruff==0.16.3 ; python_version >= "3.11" and python_version < "3.15" and ((sys_platform == "linux" and platform_machine == "x86_64") or (sys_platform == "darwin" and platform_machine == "arm64")) \
-    --hash=sha256:e76d33a347661a84b5be6d043d0347fdc745dfdcf825a8f4fed64b5e26eebdf2
