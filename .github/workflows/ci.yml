@@ -45,6 +45,7 @@ jobs:
           export PYTHONDONTWRITEBYTECODE=1
           export PYTHONPYCACHEPREFIX="$ci_root/pycache"
           export RUFF_CACHE_DIR="$ci_root/ruff-cache"
+          export VALIDATION_SMOKE_MODE=required
 
           bwrap=""
           sandbox_exec=""

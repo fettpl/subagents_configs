@@ -38,3 +38,28 @@ Commit: final `HEAD` (`fix: enforce casefolded validation isolation policy`)
 - `ruff format --check scripts tests`: passed.
 - `sh -n ./*.sh`: passed.
 - `git diff --check`: passed.
+
+## Fix round 1/5
+
+Status: complete (review findings addressed)
+
+### TDD record
+
+- RED: the new cleanup-precedence tests failed because cleanup replaced successful/nonzero child results and probe failures; cleanup results lacked a stable primary-presence flag; the real smoke broadly skipped a present-but-denied backend.
+- GREEN: focused validation suite passed with cleanup status evidence, fixed probe diagnostics, child nonzero `23` preservation, and required/optional smoke modes.
+
+### Changes and review mapping
+
+- `run_isolated` now establishes the primary exception/result before cleanup. Backend/probe failures are fixed bounded diagnostics and win over cleanup; successful and nonzero child results remain observable with `cleanup=<code>` evidence.
+- `CleanupResult` exposes only `code` and `primary_present`; arbitrary primary messages are not a public cleanup field.
+- Local smoke mode defaults to optional for hosts that cannot apply Seatbelt; CI exports `VALIDATION_SMOKE_MODE=required`, so a present-but-unusable fixed backend fails the job rather than skipping.
+- The benign tracked smoke fixture is added only after asserting `.gitignore` matches it, using force-add to retain it as tracked source.
+
+### Fix-round verification
+
+- Focused: 76 tests passed, 1 explicit local optional smoke skip.
+- Full discovery: 395 tests passed, 1 explicit local optional smoke skip.
+- `ruff check scripts tests`: passed.
+- `ruff format --check scripts tests`: passed.
+- `sh -n ./*.sh`: passed.
+- `git diff --check`: passed.

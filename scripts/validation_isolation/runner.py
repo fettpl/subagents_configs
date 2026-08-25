@@ -48,11 +48,13 @@ class CleanupResult:
     """Stable cleanup outcome; no filesystem or exception details are exposed."""
 
     code: str
-    primary: ValidationFailure | None
+    primary_present: bool
 
     def __repr__(self) -> str:
-        primary_code = None if self.primary is None else self.primary.code
-        return f"CleanupResult(code={self.code!r}, primary_code={primary_code!r})"
+        return (
+            f"CleanupResult(code={self.code!r}, "
+            f"primary_present={self.primary_present!r})"
+        )
 
 
 def _failure_for(exc: BaseException) -> ValidationFailure:
@@ -71,8 +73,8 @@ def cleanup_validation_root(
     try:
         shutil.rmtree(root, ignore_errors=False)
     except BaseException:
-        return CleanupResult("cleanup_failed", primary)
-    return CleanupResult("cleaned", primary)
+        return CleanupResult("cleanup_failed", primary is not None)
+    return CleanupResult("cleaned", primary is not None)
 
 
 ProcessRunner: TypeAlias = Callable[
@@ -150,6 +152,10 @@ def run_isolated(
             raise ValidationIsolationError(
                 "validation isolation probe timed out"
             ) from exc
+        except (OSError, ValueError, RuntimeError):
+            raise ValidationIsolationError(
+                "validation isolation probe failed"
+            ) from None
         verify_backend(backend)
         private_roots = (
             _private_directory(snapshot.snapshot_root, "snapshot"),
@@ -190,10 +196,9 @@ def run_isolated(
         except BaseException as exc:
             mutation_error = exc
 
+    primary_exception = mutation_error or primary_error
     primary_for_cleanup = (
-        _failure_for(mutation_error or primary_error)
-        if (mutation_error is not None or primary_error is not None)
-        else None
+        _failure_for(primary_exception) if primary_exception is not None else None
     )
     cleanup_result = cleanup_validation_root(
         isolation_root,
@@ -202,10 +207,13 @@ def run_isolated(
 
     if mutation_error is not None:
         raise mutation_error
-    if cleanup_result.code == "cleanup_failed":
-        raise ValidationIsolationError("validation temporary cleanup failed")
     if primary_error is not None:
         raise primary_error
     if result is None:
         raise ValidationIsolationError("validation did not produce a result")
-    return result
+    return ValidationResult(
+        result.returncode,
+        result.stdout,
+        result.stderr,
+        (*result.evidence, f"cleanup={cleanup_result.code}"),
+    )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,6 +15,13 @@ class ValidationInventorySmokeTests(unittest.TestCase):
     def test_casefolded_policy_excludes_mixed_case_secrets_and_caches(self):
         with tempfile.TemporaryDirectory() as temporary:
             repository = make_repository(Path(temporary))
+            gitignore = repository / ".gitignore"
+            gitignore.write_text(
+                gitignore.read_text(encoding="utf-8") + "ignored-source.py\n",
+                encoding="utf-8",
+            )
+            git(repository, "add", ".gitignore")
+            git(repository, "commit", "--quiet", "-m", "ignore benign fixture")
             tracked = (
                 "CrEdEnTiAlS.JSON",
                 ".ENV.PROD",
@@ -27,6 +36,12 @@ class ValidationInventorySmokeTests(unittest.TestCase):
                 path.write_text("secret\n", encoding="utf-8")
             benign = repository / "ignored-source.py"
             benign.write_text("print('tracked')\n", encoding="utf-8")
+            self.assertEqual(
+                git(
+                    repository, "check-ignore", "--quiet", "ignored-source.py"
+                ).returncode,
+                0,
+            )
             git(
                 repository,
                 "add",
@@ -71,7 +86,7 @@ class ValidationCleanupContractTests(unittest.TestCase):
 
             self.assertIsInstance(result, CleanupResult)
             self.assertEqual(result.code, "cleanup_failed")
-            self.assertIs(result.primary, primary)
+            self.assertTrue(result.primary_present)
             self.assertNotIn("secret", repr(result).lower())
             self.assertNotIn("credentials", repr(result).lower())
 
@@ -83,7 +98,85 @@ class ValidationCleanupContractTests(unittest.TestCase):
             root.mkdir(mode=0o700)
             result = cleanup_validation_root(root, primary=None)
             self.assertEqual(result.code, "cleaned")
-            self.assertIsNone(result.primary)
+            self.assertFalse(result.primary_present)
+
+
+class RunnerCleanupPrecedenceTests(unittest.TestCase):
+    @staticmethod
+    def _backend():
+        return type(
+            "Backend",
+            (),
+            {
+                "name": "macos",
+                "launcher": Path("/usr/bin/true"),
+                "python_executable": Path("/usr/bin/python3"),
+            },
+        )()
+
+    def _run_with_cleanup_failure(self, child_returncode, *, probe_error=None):
+        from scripts.validation_isolation import runner
+
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = make_repository(Path(temporary))
+            process_calls = []
+
+            def process_runner(argv, cwd, env, timeout):
+                del cwd, env, timeout
+                process_calls.append(tuple(argv))
+                return subprocess.CompletedProcess(argv, child_returncode, "", "")
+
+            cleanup = runner.CleanupResult("cleanup_failed", False)
+            with (
+                patch.object(runner, "select_backend", return_value=self._backend()),
+                patch.object(runner, "verify_backend"),
+                patch.object(runner, "probe_backend", side_effect=probe_error),
+                patch.object(runner, "build_backend_argv", return_value=("sandbox",)),
+                patch.object(
+                    runner,
+                    "run_verified_process",
+                    side_effect=lambda *args, **kwargs: process_runner(
+                        args[1], args[2], args[3], args[4]
+                    ),
+                ),
+                patch.object(runner, "cleanup_validation_root", return_value=cleanup),
+            ):
+                if probe_error is None:
+                    result = runner.run_isolated(
+                        ("false",), repository, "darwin", process_runner
+                    )
+                else:
+                    with self.assertRaisesRegex(
+                        ValueError, "validation isolation probe failed"
+                    ):
+                        runner.run_isolated(
+                            ("false",), repository, "darwin", process_runner
+                        )
+                    result = None
+            return result, process_calls
+
+    def test_successful_child_reports_typed_cleanup_failure(self):
+        result, process_calls = self._run_with_cleanup_failure(0)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("cleanup=cleanup_failed", result.evidence)
+        self.assertEqual(len(process_calls), 1)
+
+    def test_nonzero_child_result_wins_over_cleanup_failure(self):
+        result, process_calls = self._run_with_cleanup_failure(23)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.returncode, 23)
+        self.assertIn("cleanup=cleanup_failed", result.evidence)
+        self.assertEqual(len(process_calls), 1)
+
+    def test_backend_failure_wins_over_cleanup_failure_and_child_never_starts(self):
+        result, process_calls = self._run_with_cleanup_failure(
+            0, probe_error=ValueError("backend credentials and raw diagnostics")
+        )
+        self.assertIsNone(result)
+        self.assertEqual(process_calls, [])
 
 
 class RealValidationSmokeTests(unittest.TestCase):
@@ -127,7 +220,9 @@ class RealValidationSmokeTests(unittest.TestCase):
                         ("python3", "-c", child), repository, sys.platform
                     )
             except (OSError, RuntimeError, ValueError) as exc:
-                self.skipTest(f"fixed backend cannot execute in this host: {exc}")
+                if os.environ.get("VALIDATION_SMOKE_MODE", "optional") == "optional":
+                    self.skipTest(f"fixed backend cannot execute in this host: {exc}")
+                raise
             self.assertEqual(result.returncode, 23)
             self.assertLessEqual(len(result.stdout), 8192)
             self.assertLessEqual(len(result.stderr), 8192)
