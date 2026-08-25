@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 from .errors import CliError
-from .models import Request, Target
+from .models import DryRunFormat, Request, Target
 from .targets import descriptor_for, targets_for_request
 
 
@@ -22,6 +22,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-codex-multi-agent", action="store_true")
     parser.add_argument("--include-commit-pusher", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--format", choices=("text", "json"), default="text")
     return parser
 
 
@@ -72,6 +73,9 @@ def parse_request(
     args, unknown = parser.parse_known_args(list(argv))
     if unknown:
         raise CliError(f"unknown option: {unknown[0]}")
+    dry_run_format: DryRunFormat = args.format
+    if dry_run_format == "json" and not args.dry_run:
+        raise CliError("--format json requires --dry-run")
 
     raw_targets = args.target or []
     if args.all and raw_targets:
@@ -129,4 +133,5 @@ def parse_request(
         enable_codex_multi_agent=args.enable_codex_multi_agent,
         include_commit_pusher=args.include_commit_pusher,
         dry_run=args.dry_run,
+        dry_run_format=dry_run_format,
     )

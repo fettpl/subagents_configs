@@ -441,6 +441,9 @@ def decode_lifecycle_action(raw: Mapping[str, object]) -> LifecycleAction:
     raise ValueError("unsupported lifecycle action")
 
 
+DryRunFormat = Literal["text", "json"]
+
+
 class Target(enum.StrEnum):
     CODEX = "codex"
     OPENCODE = "opencode"
@@ -456,6 +459,7 @@ class Request:
     enable_codex_multi_agent: bool
     include_commit_pusher: bool
     dry_run: bool
+    dry_run_format: DryRunFormat = "text"
 
 
 @dataclass(frozen=True)
