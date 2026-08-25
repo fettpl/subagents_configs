@@ -15,6 +15,10 @@ from tests.validation_isolated_test_support import (
 )
 
 MACOS_SANDBOX = Path("/usr/bin/sandbox-exec")
+CLT_PYTHON = Path(
+    "/Library/Developer/CommandLineTools/Library/Frameworks/"
+    "Python3.framework/Versions/3.9/bin/python3.9"
+)
 
 
 def _system_launcher() -> Path:
@@ -63,6 +67,14 @@ class BackendSelectionTests(unittest.TestCase):
         backend = select_backend("darwin", MACOS_SANDBOX, None, _system_python())
         self.assertEqual(backend.name, "macos")
         self.assertEqual(backend.launcher, MACOS_SANDBOX)
+
+    def test_selects_exact_command_line_tools_python(self):
+        from scripts.validation_isolation.backend import select_backend
+
+        if not CLT_PYTHON.exists():
+            self.skipTest("CommandLineTools Python is unavailable")
+        backend = select_backend("darwin", MACOS_SANDBOX, None, CLT_PYTHON)
+        self.assertEqual(backend.python_executable, CLT_PYTHON)
 
     def test_selects_only_fixed_linux_launcher(self):
         from scripts.validation_isolation.backend import select_backend
@@ -163,6 +175,11 @@ class BackendArgumentTests(unittest.TestCase):
                                 )
 
             validate_command_argv((str(_system_python()), "/dev/null"), worktree, home)
+            if CLT_PYTHON.exists():
+                self.assertEqual(
+                    validate_command_argv((str(CLT_PYTHON),), worktree, home),
+                    (str(CLT_PYTHON),),
+                )
             build_backend_argv(
                 backend,
                 (str(worktree / "guest.py"),),
@@ -232,6 +249,39 @@ class BackendArgumentTests(unittest.TestCase):
             'Library/Frameworks/Python3.framework"))',
             profile,
         )
+
+    def test_macos_profile_allows_only_fixed_command_line_tools_runtime_literals(self):
+        from scripts.validation_isolation.backend import render_macos_profile
+
+        if not CLT_PYTHON.exists():
+            self.skipTest("CommandLineTools Python is unavailable")
+        profile = render_macos_profile(
+            Path("/private/tmp/snapshot"),
+            Path("/private/tmp/temp"),
+            CLT_PYTHON,
+        )
+        for literal in (
+            "/",
+            "/Library",
+            "/Library/Developer",
+            "/Library/Developer/CommandLineTools",
+            "/Library/Developer/CommandLineTools/Library",
+            "/Library/Developer/CommandLineTools/Library/Frameworks",
+            "/dev",
+            "/dev/urandom",
+        ):
+            self.assertIn(f'(allow file-read* (literal "{literal}"))', profile)
+        self.assertIn(
+            '(allow file-read* (subpath "/Library/Developer/CommandLineTools/'
+            'Library/Frameworks/Python3.framework"))',
+            profile,
+        )
+        self.assertNotIn('(allow file-read* (subpath "/Library"))', profile)
+        self.assertNotIn(
+            '(allow file-read* (subpath "/Library/Developer/CommandLineTools"))',
+            profile,
+        )
+        self.assertNotIn("/var/select/developer_dir", profile)
 
     def test_macos_profile_does_not_grant_command_line_tools_root_to_other_interpreters(
         self,

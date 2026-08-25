@@ -228,12 +228,18 @@ class CiContractTests(unittest.TestCase):
 
     def test_validation_smoke_uses_exact_system_interpreters_per_os(self):
         self.assertIn("export VALIDATION_SYSTEM_PYTHON=/usr/bin/python3.12", self.text)
-        self.assertIn("export VALIDATION_SYSTEM_PYTHON=/usr/bin/python3\n", self.text)
+        self.assertIn(
+            "export VALIDATION_SYSTEM_PYTHON=/Library/Developer/CommandLineTools/"
+            "Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9\n",
+            self.text,
+        )
         self.assertIn(
             'if test "${{ matrix.os }}" = "ubuntu-24.04"; then\n'
             "            export VALIDATION_SYSTEM_PYTHON=/usr/bin/python3.12\n"
             "          else\n"
-            "            export VALIDATION_SYSTEM_PYTHON=/usr/bin/python3\n"
+            "            export VALIDATION_SYSTEM_PYTHON=/Library/Developer/"
+            "CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/"
+            "bin/python3.9\n"
             "          fi",
             self.text,
         )

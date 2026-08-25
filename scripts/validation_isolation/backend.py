@@ -37,6 +37,21 @@ _TRUSTED_SYSTEM_PREFIXES = (
     Path("/lib"),
     Path("/lib64"),
 )
+_COMMAND_LINE_TOOLS_PYTHON_FRAMEWORK = Path(
+    "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework"
+)
+_COMMAND_LINE_TOOLS_PYTHON_EXECUTABLE = Path(
+    "/Library/Developer/CommandLineTools/Library/Frameworks/"
+    "Python3.framework/Versions/3.9/bin/python3.9"
+)
+_COMMAND_LINE_TOOLS_READ_ANCESTORS = (
+    Path("/"),
+    Path("/Library"),
+    Path("/Library/Developer"),
+    Path("/Library/Developer/CommandLineTools"),
+    Path("/Library/Developer/CommandLineTools/Library"),
+    Path("/Library/Developer/CommandLineTools/Library/Frameworks"),
+)
 _SECRET_COMPONENTS = frozenset(
     {
         ".aws",
@@ -258,6 +273,7 @@ def _validate_trusted_interpreter(path: Path, platform_name: str) -> None:
         allowed = (
             Path("/usr/bin"),
             Path("/System/Library/Frameworks/Python.framework"),
+            _COMMAND_LINE_TOOLS_PYTHON_FRAMEWORK,
         )
     else:
         allowed = (Path("/usr/bin"), Path("/bin"), Path("/sbin"))
@@ -466,7 +482,12 @@ def _approved_absolute_argument(
         for part in path.parts
     ):
         raise ValidationIsolationError("validation command references protected data")
-    if path in {Path("/dev/null"), Path("/dev/urandom"), Path("/dev/random")}:
+    if path in {
+        Path("/dev/null"),
+        Path("/dev/urandom"),
+        Path("/dev/random"),
+        _COMMAND_LINE_TOOLS_PYTHON_EXECUTABLE,
+    }:
         return
     if not any(_is_within(path, prefix) for prefix in _TRUSTED_SYSTEM_PREFIXES):
         raise ValidationIsolationError(
@@ -543,16 +564,43 @@ def render_macos_profile(
     framework = Path("/System/Library/Frameworks/Python.framework")
     if _is_within(python_executable, framework) and framework.exists():
         read_roots.add(_validate_system_directory(framework, "macOS Python framework"))
-    command_line_tools_framework = Path(
-        "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework"
-    )
+    read_literals: tuple[Path, ...] = ()
     if python_executable == Path("/usr/bin/python3"):
         read_roots.add(
             _validate_system_directory(
-                command_line_tools_framework,
+                _COMMAND_LINE_TOOLS_PYTHON_FRAMEWORK,
                 "macOS CommandLineTools Python framework",
             )
         )
+    elif _is_within(python_executable, _COMMAND_LINE_TOOLS_PYTHON_FRAMEWORK):
+        for ancestor in _COMMAND_LINE_TOOLS_READ_ANCESTORS[1:]:
+            _validate_system_directory(
+                ancestor, "macOS CommandLineTools Python runtime"
+            )
+        urandom = Path("/dev/urandom")
+        try:
+            canonical = urandom.resolve(strict=True)
+            item = os.lstat(urandom)
+        except (OSError, RuntimeError) as exc:
+            raise ValidationIsolationError(
+                "macOS CommandLineTools random source is unavailable"
+            ) from exc
+        if (
+            canonical != urandom
+            or stat.S_ISLNK(item.st_mode)
+            or not stat.S_ISCHR(item.st_mode)
+            or item.st_uid != 0
+        ):
+            raise ValidationIsolationError(
+                "macOS CommandLineTools random source is unsafe"
+            )
+        read_roots.add(
+            _validate_system_directory(
+                _COMMAND_LINE_TOOLS_PYTHON_FRAMEWORK,
+                "macOS CommandLineTools Python framework",
+            )
+        )
+        read_literals = (*_COMMAND_LINE_TOOLS_READ_ANCESTORS, Path("/dev"), urandom)
     lines = [
         "(version 1)",
         "(deny default)",
@@ -565,6 +613,8 @@ def render_macos_profile(
     ]
     for root in sorted(read_roots):
         lines.append(f'(allow file-read* (subpath "{_profile_path(Path(root))}"))')
+    for literal in read_literals:
+        lines.append(f'(allow file-read* (literal "{_profile_path(literal)}"))')
     lines.extend(
         [
             f'(allow file-read* (subpath "{snapshot}"))',
