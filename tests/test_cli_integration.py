@@ -160,7 +160,7 @@ class CliIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(status, EXIT_CLI_ERROR)
             self.assertEqual(out.getvalue(), "")
-            self.assertTrue(err.getvalue().startswith("error: invalid command line:"))
+            self.assertTrue(err.getvalue().startswith("error: code=CLI_INVALID"))
 
     def test_malformed_source_is_blocked_validation(self):
         with private_tempdir() as directory:
@@ -179,7 +179,7 @@ class CliIntegrationTests(unittest.TestCase):
                 stderr=err,
             )
             self.assertEqual(status, EXIT_BLOCKED_VALIDATION)
-            self.assertTrue(err.getvalue().startswith("error: validation blocked:"))
+            self.assertTrue(err.getvalue().startswith("error: code=VALIDATION_BLOCKED"))
 
     def test_diagnostics_redact_sensitive_and_payload_values(self):
         out, err = io.StringIO(), io.StringIO()
@@ -261,7 +261,9 @@ class CliIntegrationTests(unittest.TestCase):
                 )
             self.assertEqual(status, EXIT_PREFLIGHT_ERROR)
             self.assertEqual(
-                err.getvalue(), "error: preflight rejected: unexpected failure\n"
+                err.getvalue(),
+                "error: code=PREFLIGHT_REJECTED targets=codex homes=home-1 "
+                "operation=install phase=preflight status=rejected\n",
             )
             self.assertNotIn("SYNTHETIC_YAML_SECRET", err.getvalue())
 
@@ -292,7 +294,8 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertEqual(status, EXIT_INCOMPLETE_ROLLBACK)
             self.assertEqual(
                 err.getvalue(),
-                "error: recovery failed; rollback status is unknown\n",
+                "error: code=APPLY_AMBIGUOUS targets=codex homes=home-1 "
+                "operation=install phase=recovery status=ambiguous\n",
             )
             self.assertNotIn("YAML_SECRET", err.getvalue())
 
@@ -540,7 +543,7 @@ class CliIntegrationTests(unittest.TestCase):
                 status,
             )
 
-        for journal_status, operation_status, action in (
+        for journal_status, operation_status, _action in (
             ("complete", "applied", "cleanup"),
             ("in-progress", "applying", "rollback"),
         ):
@@ -572,7 +575,7 @@ class CliIntegrationTests(unittest.TestCase):
                     stderr=err,
                 )
             self.assertEqual(status, EXIT_SUCCESS)
-            self.assertIn(f"action={action}", out.getvalue())
+            self.assertIn("code=RECOVERY_REQUIRED", out.getvalue())
             self.assertNotIn("rollback-or-cleanup", out.getvalue())
             recover.assert_not_called()
             preflight.assert_not_called()

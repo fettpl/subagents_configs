@@ -327,6 +327,39 @@ class ReadmeContractTests(unittest.TestCase):
         self.assertIn("multi-agent", self.lower)
         self.assertIn("commit-pusher", self.lower)
 
+    def test_recovery_replay_and_safe_diagnostics_contract_is_present(self):
+        self.assertIn(
+            "./uninstall.sh --all --home codex=/srv/example/codex-home "
+            "--home opencode=/srv/example/opencode-home "
+            "--home claude-code=/srv/example/claude-home",
+            self.text,
+        )
+        for phrase in (
+            "exact participant",
+            "journal",
+            "backup",
+            "manual resolution",
+            "dry-run",
+            "code=",
+            "Python 3.11",
+            "Python 3.14",
+            "POSIX shell",
+            "Bubblewrap",
+            "/usr/bin/sandbox-exec",
+            "client version",
+            "compatibility check",
+            "exit code 0",
+            "exit code 2",
+            "exit code 3",
+            "exit code 4",
+            "exit code 5",
+            "exit code 6",
+            "exit code 7",
+            "exit code 8",
+        ):
+            self.assertIn(phrase.lower(), self.lower)
+        self.assertRegex(self.lower, r"manual.{0,100}(?:journal|backup|unresolved)")
+
 
 if __name__ == "__main__":
     unittest.main()

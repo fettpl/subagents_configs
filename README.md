@@ -231,6 +231,85 @@ entries are preserved as unresolved state and reported. It never removes
 unrelated files. Inspect the plan and resolve unresolved state manually before
 retrying.
 
+Manual journal and backup resolution is required before retrying any blocked
+recovery.
+
+### Recovery replay and diagnostics
+
+Recovery must replay the exact participant set and the exact homes recorded by
+the transaction request. For a transaction involving all supported clients,
+re-run the request with the same explicit homes:
+
+```sh
+./uninstall.sh --all --home codex=/srv/example/codex-home --home opencode=/srv/example/opencode-home --home claude-code=/srv/example/claude-home
+```
+
+The journal and ownership backups retain only the identifiers, hashes,
+ownership evidence, and rollback status needed for validated replay; they do
+not retain private prior file contents. A journal with missing participants,
+changed identity evidence, unsafe containment, or an ambiguous rollback is
+retained and fails closed. Resolve that state manually, preserve the evidence
+for review, and retry with the exact participant homes. Manual resolution is
+required when a managed entry was changed, removed, replaced by a link, or
+cannot be proven to belong to this installation.
+
+Diagnostics are typed and stable. They use canonical target names and fixed
+home labels, never exception text, package output, raw source paths, secrets,
+environment values, prompts, or transcripts. A text dry-run prints the
+normalized plan and safe recovery status, for example:
+
+```text
+error: code=RECOVERY_REQUIRED targets=codex,opencode homes=home-1,home-2 operation=uninstall phase=recovery status=required
+```
+
+The structured JSON example below is documentation for a future compatibility
+surface, not an implemented option in this scope; current `--dry-run` output
+is text and has no JSON flag:
+
+```json
+{"code":"RECOVERY_REQUIRED","targets":["codex"],"homes":["home-1"],"operation":"uninstall","phase":"recovery","status":"required"}
+```
+
+Both examples intentionally omit file contents, transaction identifiers,
+absolute homes, exception messages, and environment values. A dry-run creates
+no homes, journals, backups, temporary files, or managed blocks.
+
+### Exit status
+
+The executable exit-code contract is:
+
+| Exit code | Meaning |
+| ---: | --- |
+| 0 | Success, including a read-only dry-run. |
+| 2 | Invalid command line or unsupported operation. |
+| 3 | Preflight rejection or safe diagnostic output failure. |
+| 4 | Managed conflict during install preflight. |
+| 5 | Apply failed after rollback completed. |
+| 6 | Recovery or apply is incomplete/ambiguous and needs manual resolution. |
+| 7 | Uninstall completed with unresolved entries retained. |
+| 8 | Validation or recovery was blocked before a write. |
+
+The primary failure code is preserved if cleanup or diagnostic output also
+fails. Code 7 means the safe uninstall operation ran and retained unresolved
+entries; code 6 means the journal/evidence must be resolved manually before a
+retry.
+
+In short: exit code 0 is success; exit code 2 is CLI invalid; exit code 3 is
+preflight rejected; exit code 4 is managed conflict; exit code 5 is rolled
+back apply failure; exit code 6 is incomplete or ambiguous recovery; exit code
+7 is unresolved uninstall; and exit code 8 is blocked validation.
+Exit code 7 specifically retains unresolved uninstall entries for manual
+resolution.
+
+### Maintained compatibility prerequisites
+
+The maintained prerequisite matrix currently tests Python 3.11, Python 3.12,
+Python 3.13, and Python 3.14, a POSIX shell, and either Linux with the fixed
+Bubblewrap backend or macOS with `/usr/bin/sandbox-exec`. Client version values are recorded by the
+maintained compatibility check when that check supplies them; this repository
+does not invent client versions or claim that future compatibility artifacts
+already exist.
+
 ## Reinstall and drift
 
 Reinstall means running the same install request again. When managed bytes,

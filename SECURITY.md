@@ -72,12 +72,13 @@ request and independent review.
 
 ## Reporting a concern
 
-No private vulnerability-reporting channel is configured today. Do not include
-secrets, private paths, credentials, or sensitive exploit details in a public
-issue. If a report must be coordinated, open a minimal public issue containing
-only a high-level description and request owner coordination; use the
-repository's normal trusted collaboration process if the owner later provides
-a private channel. There is no promised response time or security SLA.
+Report vulnerabilities through the private GitHub Security Advisory channel:
+https://github.com/fettpl/subagents_configs/security/advisories/new
+
+Reports must contain no secrets and no transcripts; do not include credentials,
+private paths, or sensitive exploit payloads. Provide only the minimum safe reproduction,
+affected revision, target/client, platform, and threat boundary. There is no
+promised response time or security SLA.
 
 Include the affected revision, target/client, platform, threat boundary, and a
 minimal reproducible description only when it is safe to do so. Redact command
