@@ -1,5 +1,11 @@
 """Secure multi-client subagent distribution models and orchestration."""
 
+from .compatibility import (
+    ClientCompatibility,
+    CompatibilityResult,
+    load_compatibility_matrix,
+    validate_client_compatibility,
+)
 from .models import (
     BackupSpec,
     BlockAction,
@@ -29,6 +35,8 @@ __all__ = [
     "CAPABILITIES",
     "BackupSpec",
     "BlockAction",
+    "ClientCompatibility",
+    "CompatibilityResult",
     "DesiredFile",
     "FileAction",
     "GlobalInstructionSpec",
@@ -42,8 +50,10 @@ __all__ = [
     "TargetDescriptor",
     "capability_for",
     "decode_lifecycle_action",
+    "load_compatibility_matrix",
     "parser_for",
     "runtime_sources_for",
     "semantic_validator_for",
     "targets_for_request",
+    "validate_client_compatibility",
 ]

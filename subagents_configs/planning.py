@@ -19,6 +19,7 @@ from .blocks import (
     remove_exact_block,
     validate_managed_content,
 )
+from .compatibility import validate_client_version, validate_request_compatibility
 from .errors import ValidationBlockedError
 from .formats import (
     ValidatedSource,
@@ -1235,6 +1236,18 @@ def _validate_request(request: Request, operation: str) -> None:
             raise ValueError(f"{option} must be a bool")
     if request.dry_run_format not in ("text", "json"):
         raise ValueError("dry_run_format must be text or json")
+    if not isinstance(request.client_versions, Mapping):
+        raise ValueError("client_versions must be a mapping")
+    selected_names = {target.value for target in request.targets}
+    if set(request.client_versions) - selected_names:
+        raise ValueError("client versions must target selected clients")
+    for target_name, version in request.client_versions.items():
+        if type(target_name) is not str:
+            raise ValueError("client version target names must be strings")
+        try:
+            validate_client_version(version)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("client version is invalid") from exc
     if not request.targets:
         raise ValueError("at least one target is required")
     if any(type(target) is not Target for target in request.targets):
@@ -1281,6 +1294,7 @@ def validate_lifecycle(request: Request, descriptor) -> None:
 
 def preflight_install(repo_root: Path, request: Request) -> TransactionPlan:
     _validate_request(request, "install")
+    validate_request_compatibility(request)
     root = normalized_absolute(repo_root)
     with filesystem.CommandCache() as cache:
         inventories = _selected_sources(root, request, cache)
@@ -1303,6 +1317,7 @@ def preflight_install(repo_root: Path, request: Request) -> TransactionPlan:
 
 def preflight_uninstall(repo_root: Path, request: Request) -> TransactionPlan:
     _validate_request(request, "uninstall")
+    validate_request_compatibility(request)
     root = normalized_absolute(repo_root)
     with filesystem.CommandCache() as cache:
         inventories = _selected_sources(root, request, cache)

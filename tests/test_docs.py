@@ -7,6 +7,29 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DocumentationContractTests(unittest.TestCase):
+    def test_client_compatibility_guidance_is_read_only_and_pi_fail_closed(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8").lower()
+        security = (ROOT / "SECURITY.md").read_text(encoding="utf-8").lower()
+        releasing = (ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8").lower()
+        for text in (readme, security, releasing):
+            self.assertIn("client compatibility", text)
+            self.assertIn("read-only", text)
+            self.assertIn("maintained", text)
+        for phrase in (
+            "client-version target=version",
+            "target_unsupported",
+            "format_unsupported",
+            "feature_unsupported",
+            "platform_unsupported",
+            "scope_unsupported",
+            "package_unsupported",
+            "client_version_too_old",
+            "compatibility-only `pi` row",
+            "without probing",
+        ):
+            self.assertIn(phrase, readme)
+        self.assertIn("without platform, package, or version claims", releasing)
+
     def test_security_guidance_is_honest_and_covers_threat_model(self):
         text = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
         lower = text.lower()

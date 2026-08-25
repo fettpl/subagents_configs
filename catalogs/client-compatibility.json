@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "rows": [
+    {
+      "target": "codex",
+      "supported": true,
+      "format_version": "toml",
+      "features": ["agents", "managed-blocks", "validation-runtime", "routing-codex", "codex-multi-agent-v2", "commit-pusher"],
+      "minimum_client_version": "1.0.0",
+      "tested_client_version": "1.0.0",
+      "tested_python": ["3.11", "3.12", "3.13", "3.14"],
+      "supported_platforms": ["linux", "macos"],
+      "tested_os_backends": ["bwrap", "sandbox-exec"],
+      "package_source": null,
+      "scope": "user"
+    },
+    {
+      "target": "opencode",
+      "supported": true,
+      "format_version": "yaml-frontmatter",
+      "features": ["agents", "managed-blocks", "validation-runtime", "routing-opencode", "commit-pusher"],
+      "minimum_client_version": "1.0.0",
+      "tested_client_version": "1.0.0",
+      "tested_python": ["3.11", "3.12", "3.13", "3.14"],
+      "supported_platforms": ["linux", "macos"],
+      "tested_os_backends": ["bwrap", "sandbox-exec"],
+      "package_source": null,
+      "scope": "user"
+    },
+    {
+      "target": "claude-code",
+      "supported": true,
+      "format_version": "yaml-frontmatter",
+      "features": ["agents", "managed-blocks", "validation-runtime", "command-gate", "routing-claude-code", "commit-pusher"],
+      "minimum_client_version": "1.0.0",
+      "tested_client_version": "1.0.0",
+      "tested_python": ["3.11", "3.12", "3.13", "3.14"],
+      "supported_platforms": ["linux", "macos"],
+      "tested_os_backends": ["bwrap", "sandbox-exec"],
+      "package_source": null,
+      "scope": "user"
+    },
+    {
+      "target": "pi",
+      "supported": false,
+      "format_version": "markdown",
+      "features": ["agents", "managed-blocks", "validation-runtime"],
+      "minimum_client_version": null,
+      "tested_client_version": null,
+      "tested_python": ["3.11", "3.12", "3.13", "3.14"],
+      "supported_platforms": [],
+      "tested_os_backends": [],
+      "package_source": null,
+      "scope": null
+    }
+  ]
+}

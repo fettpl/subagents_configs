@@ -44,6 +44,17 @@ _STATUSES = frozenset(
         "failed",
     )
 )
+_COMPATIBILITY_REASONS = frozenset(
+    {
+        "target_unsupported",
+        "format_unsupported",
+        "feature_unsupported",
+        "platform_unsupported",
+        "scope_unsupported",
+        "package_unsupported",
+        "client_version_too_old",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -122,6 +133,7 @@ def emit_diagnostic(
     operation: str,
     phase: str,
     status: str,
+    reasons: tuple[str, ...] = (),
 ) -> bool:
     """Render and write a diagnostic without accepting exception data."""
 
@@ -136,7 +148,12 @@ def emit_diagnostic(
                 status=status,
             ),
         )
-        stderr.write(render_diagnostic(diagnostic))
+        if any(reason not in _COMPATIBILITY_REASONS for reason in reasons):
+            return False
+        rendered = render_diagnostic(diagnostic)
+        if reasons:
+            rendered = rendered[:-1] + f" reasons={','.join(reasons)}\n"
+        stderr.write(rendered)
     except Exception:
         return False
     return True

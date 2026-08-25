@@ -19,6 +19,22 @@ to hosting settings.
 - Decide the version and write release notes that identify supported clients,
   limitations, migration concerns, and verification evidence.
 
+## Client compatibility matrix maintenance
+
+Updating `catalogs/client-compatibility.json` is a separately authorized,
+read-only release-owner action. Record client version evidence obtained from a
+reviewed `client --version` invocation outside the installer; do not add a
+runtime probe or package-manager check. For each supported Codex, OpenCode, or
+Claude Code row, independently review the exact native format, required and
+optional features, Linux/macOS platform evidence, user scope, and package
+identity (currently none). Keep the compatibility-only Pi row unsupported and
+without platform, package, or version claims until a separate Pi task is
+authorized. Update the matrix and README/SECURITY wording together, then run
+the focused compatibility tests, full unittest discovery, catalog validation,
+Ruff, compile checks, shell/YAML checks, and `git diff --check`. Release notes
+must state whether a client version was caller-supplied or derived from the
+maintained tested row; they must never imply that installation probed a client.
+
 Branch protection, required checks, review rules, signing policy, and security
 channel setup are hosting/owner decisions. Do not attempt to configure them
 from this task.
