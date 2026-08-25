@@ -59,7 +59,7 @@ boundary tests pass, and no package/network/client execution code was added.
 
 ## Commit and concerns
 
-- Implementation commit SHA: pending final commit.
+- Implementation commit SHA: `8ced302` (`feat: add read-only client compatibility contract`).
 - Concern: canonical repository validation remains unavailable on this host due
   to the fixed backend gate (`exit-125`); rerun on a host with the reviewed
   Bubblewrap or Seatbelt backend before publication.
