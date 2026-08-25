@@ -31,8 +31,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except subprocess.TimeoutExpired:
         print("validation blocked: validation command timed out", file=sys.stderr)
         return 1
-    except (OSError, ValueError, RuntimeError) as exc:
-        print(f"validation blocked: {exc}", file=sys.stderr)
+    except (OSError, ValueError, RuntimeError):
+        # Exception text can contain hostile paths, environment values, or
+        # backend diagnostics.  The runner already records typed evidence;
+        # the command-line boundary emits only this bounded stable outcome.
+        print("validation blocked: validation failed", file=sys.stderr)
         return 1
     if result.stdout:
         print(result.stdout, end="")

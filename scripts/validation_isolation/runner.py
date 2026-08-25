@@ -35,6 +35,46 @@ class ValidationResult:
     evidence: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ValidationFailure:
+    """Bounded primary-failure evidence suitable for cleanup precedence."""
+
+    code: str
+    message: str
+
+
+@dataclass(frozen=True)
+class CleanupResult:
+    """Stable cleanup outcome; no filesystem or exception details are exposed."""
+
+    code: str
+    primary: ValidationFailure | None
+
+    def __repr__(self) -> str:
+        primary_code = None if self.primary is None else self.primary.code
+        return f"CleanupResult(code={self.code!r}, primary_code={primary_code!r})"
+
+
+def _failure_for(exc: BaseException) -> ValidationFailure:
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return ValidationFailure("timeout", "validation command timed out")
+    if isinstance(exc, OSError):
+        return ValidationFailure("launch_failed", "validation command failed to launch")
+    return ValidationFailure("validation_failed", "validation was blocked")
+
+
+def cleanup_validation_root(
+    root: Path, *, primary: ValidationFailure | None
+) -> CleanupResult:
+    """Remove a private validation root and return only stable typed evidence."""
+
+    try:
+        shutil.rmtree(root, ignore_errors=False)
+    except BaseException:
+        return CleanupResult("cleanup_failed", primary)
+    return CleanupResult("cleaned", primary)
+
+
 ProcessRunner: TypeAlias = Callable[
     [Sequence[str], Path, Mapping[str, str], float | None],
     subprocess.CompletedProcess[str],
@@ -70,7 +110,7 @@ def run_isolated(
     command: Sequence[str],
     start_dir: Path,
     platform_name: str,
-    process_runner=run_process,
+    process_runner: ProcessRunner = run_process,
 ) -> ValidationResult:
     if not command:
         raise ValidationIsolationError("validation command is empty")
@@ -150,18 +190,20 @@ def run_isolated(
         except BaseException as exc:
             mutation_error = exc
 
-    cleanup_error = None
-    try:
-        shutil.rmtree(isolation_root, ignore_errors=False)
-    except BaseException as exc:
-        cleanup_error = exc
+    primary_for_cleanup = (
+        _failure_for(mutation_error or primary_error)
+        if (mutation_error is not None or primary_error is not None)
+        else None
+    )
+    cleanup_result = cleanup_validation_root(
+        isolation_root,
+        primary=primary_for_cleanup,
+    )
 
     if mutation_error is not None:
         raise mutation_error
-    if cleanup_error is not None:
-        raise ValidationIsolationError(
-            "validation temporary cleanup failed"
-        ) from cleanup_error
+    if cleanup_result.code == "cleanup_failed":
+        raise ValidationIsolationError("validation temporary cleanup failed")
     if primary_error is not None:
         raise primary_error
     if result is None:

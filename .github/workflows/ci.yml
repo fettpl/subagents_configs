@@ -9,11 +9,12 @@ permissions:
 
 jobs:
   quality:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.14"]
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -46,18 +47,26 @@ jobs:
           export RUFF_CACHE_DIR="$ci_root/ruff-cache"
 
           bwrap=""
-          for candidate in /usr/bin/bwrap /bin/bwrap; do
-            if test -x "$candidate"; then bwrap="$candidate"; break; fi
-          done
-          shellcheck=""
-          for candidate in /usr/bin/shellcheck /opt/homebrew/bin/shellcheck; do
-            if test -x "$candidate"; then shellcheck="$candidate"; break; fi
-          done
-          if test -n "$bwrap"; then
+          sandbox_exec=""
+          if test "${{ matrix.os }}" = "ubuntu-latest"; then
+            for candidate in /usr/bin/bwrap /bin/bwrap; do
+              if test -x "$candidate"; then bwrap="$candidate"; break; fi
+            done
+            if test -z "$bwrap"; then
+              echo "no usable fixed bwrap; refusing an unsandboxed fallback"
+              exit 1
+            fi
             echo "trusted fixed bwrap: $bwrap"
           else
-            echo "no usable fixed bwrap; fail-closed backend branch is required"
+            if test -x /usr/bin/sandbox-exec; then sandbox_exec=/usr/bin/sandbox-exec; fi
+            if test -z "$sandbox_exec"; then
+              echo "no usable fixed sandbox-exec; refusing an unsandboxed fallback"
+              exit 1
+            fi
+            echo "trusted fixed sandbox-exec: $sandbox_exec"
           fi
+          shellcheck=""
+          if test -x /usr/bin/shellcheck; then shellcheck=/usr/bin/shellcheck; fi
           if test -z "$shellcheck"; then
             echo "ShellCheck is unavailable; refusing to claim shell validation"
             exit 1
@@ -67,11 +76,8 @@ jobs:
           python -m unittest discover -s tests -p 'test_*.py' -q
           python -m unittest tests.test_readme_contract tests.test_docs tests.test_ci -q
           python -m unittest tests.test_security_static -q
-          if test -n "$bwrap"; then
-            python -m unittest tests.test_validation_backend.BackendIntegrationTests -v
-          else
-            python -m unittest tests.test_validation_backend.BackendIntegrationTests.test_real_backend_or_explicit_fail_closed_without_fallback -v
-          fi
+          python -m unittest tests.test_validation_backend.BackendIntegrationTests -v
+          python -m unittest tests.test_validation_smoke -v
           ruff check subagents_configs scripts tests
           ruff format --check subagents_configs scripts tests
           sh -n ./*.sh

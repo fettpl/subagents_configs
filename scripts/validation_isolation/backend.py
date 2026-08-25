@@ -497,6 +497,8 @@ def _validate_backend_command(
     snapshot_root: Path,
     temp_root: Path,
     approved_executable: Path | None = None,
+    *,
+    allow_probe_paths: bool = False,
 ) -> tuple[str, ...]:
     values = tuple(command)
     if not values:
@@ -516,7 +518,10 @@ def _validate_backend_command(
                 continue
             if approved_executable is not None and path == approved_executable:
                 continue
-            if token == _probe_script() and path == Path("/proc/self/ns/net"):
+            if allow_probe_paths and path in {
+                Path("/etc/hosts"),
+                Path("/proc/self/ns/net"),
+            }:
                 continue
             _approved_absolute_argument(path, raw=candidate)
     return values
@@ -595,9 +600,15 @@ def build_backend_argv(
     snapshot_root: Path,
     temp_root: Path,
     env: Mapping[str, str],
+    *,
+    allow_probe_paths: bool = False,
 ) -> tuple[str, ...]:
     command = _validate_backend_command(
-        command, snapshot_root, temp_root, backend.python_executable
+        command,
+        snapshot_root,
+        temp_root,
+        backend.python_executable,
+        allow_probe_paths=allow_probe_paths,
     )
     _validate_child_environment(env, temp_root)
     if backend.name == "macos":
@@ -681,13 +692,24 @@ def _private_directory(path: Path, label: str) -> PrivateRootIdentity:
 def _probe_script() -> str:
     return (
         "import os,socket,sys\n"
-        "marker,port,parent_ns=sys.argv[1:]\n"
+        "marker,port,parent_ns,snapshot_file=sys.argv[1:]\n"
         "try:\n"
         " socket.create_connection(('127.0.0.1',int(port)),timeout=0.5)\n"
         "except OSError:\n"
         " pass\n"
         "else:\n"
         " raise SystemExit(17)\n"
+        "try:\n"
+        " open('/etc/hosts','rb').read(1)\n"
+        "except OSError:\n"
+        " pass\n"
+        "else:\n"
+        " raise SystemExit(19)\n"
+        "if snapshot_file:\n"
+        " try:\n"
+        "  open(snapshot_file,'rb').read(1)\n"
+        " except OSError:\n"
+        "  raise SystemExit(20)\n"
         "if parent_ns and os.readlink('/proc/self/ns/net') == parent_ns:\n"
         " raise SystemExit(18)\n"
         "with open(marker,'x',encoding='ascii') as output:\n"
@@ -778,6 +800,17 @@ def probe_backend(
             raise ValidationIsolationError(
                 "loopback probe listener is unavailable"
             ) from exc
+        snapshot_file_argument = ""
+        for candidate in sorted(snapshot_root.rglob("*"), key=lambda path: str(path)):
+            try:
+                item = os.lstat(candidate)
+            except OSError as exc:
+                raise ValidationIsolationError(
+                    "validation snapshot probe file is unsafe"
+                ) from exc
+            if stat.S_ISREG(item.st_mode):
+                snapshot_file_argument = str(candidate)
+                break
         probe_command = (
             str(backend.python_executable),
             "-c",
@@ -785,8 +818,16 @@ def probe_backend(
             str(marker),
             str(listener.getsockname()[1]),
             parent_namespace,
+            snapshot_file_argument,
         )
-        argv = build_backend_argv(backend, probe_command, snapshot_root, temp_root, env)
+        argv = build_backend_argv(
+            backend,
+            probe_command,
+            snapshot_root,
+            temp_root,
+            env,
+            allow_probe_paths=True,
+        )
         try:
             completed = run_verified_process(
                 backend,
