@@ -136,7 +136,62 @@ jobs:
 
           # The canonical validator owns this fixed discovery argv.
           # python -m unittest discover -s tests -p 'test_*.py'
-          .venv/bin/python scripts/validate-repository.py
+          validator_status=0
+          .venv/bin/python scripts/validate-repository.py || validator_status=$?
+          if test "$validator_status" -ne 0; then
+            run_validation_diagnostic() {
+              label="$1"
+              shift
+              if VALIDATION_SMOKE_MODE=optional "$@" >/dev/null 2>&1; then
+                echo "validation diagnostic: $label=pass"
+              else
+                echo "validation diagnostic: $label=fail"
+              fi
+            }
+            run_validation_diagnostic "repository-validation" \
+              .venv/bin/python -m unittest tests.test_repository_validation
+            run_validation_diagnostic "validation-runner" \
+              .venv/bin/python -m unittest tests.test_validation_runner
+            run_validation_diagnostic "validation-smoke" \
+              .venv/bin/python -m unittest tests.test_validation_smoke
+            run_validation_diagnostic "validation-backend" \
+              .venv/bin/python -m unittest tests.test_validation_backend
+            run_validation_diagnostic "ci-contract" \
+              .venv/bin/python -m unittest tests.test_ci
+            run_validation_diagnostic "validation-docs" \
+              .venv/bin/python -m unittest tests.test_docs
+            run_validation_diagnostic "legacy-wrappers" \
+              .venv/bin/python -m unittest tests.test_wrappers
+            run_validation_diagnostic "legacy-install" \
+              .venv/bin/python -m unittest tests.test_full_install_matrix
+            run_validation_diagnostic "other-suite" \
+              .venv/bin/python -m unittest \
+              tests.test_blocks \
+              tests.test_capabilities \
+              tests.test_catalogs \
+              tests.test_claude_command_gate \
+              tests.test_cli \
+              tests.test_cli_integration \
+              tests.test_diagnostics \
+              tests.test_filesystem \
+              tests.test_locks \
+              tests.test_paths \
+              tests.test_performance_contracts \
+              tests.test_planning \
+              tests.test_readme_contract \
+              tests.test_routing_policy \
+              tests.test_security_static \
+              tests.test_state \
+              tests.test_state_migrations \
+              tests.test_targets \
+              tests.test_transaction_install \
+              tests.test_transaction_preparation \
+              tests.test_transaction_uninstall \
+              tests.test_validation_cli \
+              tests.test_validation_environment \
+              tests.test_validation_git_snapshot
+            exit "$validator_status"
+          fi
           if test "${{ matrix.os }}" = "ubuntu-24.04"; then
             shellcheck=""
             if test -f /usr/bin/shellcheck && test -x /usr/bin/shellcheck && test "$(realpath /usr/bin/shellcheck)" = /usr/bin/shellcheck && test "$(stat -c '%u' /usr/bin/shellcheck)" = 0; then

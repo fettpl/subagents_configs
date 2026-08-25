@@ -341,6 +341,52 @@ class CiContractTests(unittest.TestCase):
         )
         self.assertNotIn("python -m unittest tests.test_security_static", self.text)
 
+    def test_validator_failure_diagnostic_is_fixed_and_suppressed(self):
+        self.assertIn("validator_status=0", self.text)
+        self.assertIn('if test "$validator_status" -ne 0; then', self.text)
+        self.assertIn(">/dev/null 2>&1", self.text)
+        self.assertIn('exit "$validator_status"', self.text)
+        for label, module in (
+            ("repository-validation", "tests.test_repository_validation"),
+            ("validation-runner", "tests.test_validation_runner"),
+            ("validation-smoke", "tests.test_validation_smoke"),
+            ("validation-backend", "tests.test_validation_backend"),
+            ("ci-contract", "tests.test_ci"),
+            ("validation-docs", "tests.test_docs"),
+            ("legacy-wrappers", "tests.test_wrappers"),
+            ("legacy-install", "tests.test_full_install_matrix"),
+        ):
+            self.assertIn(f'"{label}"', self.text)
+            self.assertIn(module, self.text)
+        for module in (
+            "tests.test_blocks",
+            "tests.test_capabilities",
+            "tests.test_catalogs",
+            "tests.test_claude_command_gate",
+            "tests.test_cli",
+            "tests.test_cli_integration",
+            "tests.test_diagnostics",
+            "tests.test_filesystem",
+            "tests.test_locks",
+            "tests.test_paths",
+            "tests.test_performance_contracts",
+            "tests.test_planning",
+            "tests.test_readme_contract",
+            "tests.test_routing_policy",
+            "tests.test_security_static",
+            "tests.test_state",
+            "tests.test_state_migrations",
+            "tests.test_targets",
+            "tests.test_transaction_install",
+            "tests.test_transaction_preparation",
+            "tests.test_transaction_uninstall",
+            "tests.test_validation_cli",
+            "tests.test_validation_environment",
+            "tests.test_validation_git_snapshot",
+        ):
+            self.assertIn(module, self.text)
+        self.assertNotIn("$RUNNER_TEMP", self.text.split("validator_status=0", 1)[1])
+
     def test_fixed_backend_and_shellcheck_candidates_are_regular_canonical_files(self):
         self.assertIn('test -f "$candidate"', self.text)
         self.assertIn('test "$(realpath "$candidate")" = "$candidate"', self.text)
