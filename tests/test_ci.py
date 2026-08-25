@@ -157,7 +157,7 @@ class CiContractTests(unittest.TestCase):
             for index, step in enumerate(self.steps)
             if step.get("uses", "").startswith("actions/setup-python@")
         )
-        install_index = names.index("Install pinned developer requirements")
+        install_index = names.index("Bootstrap developer environment")
         self.assertLess(private_index, setup_index)
         self.assertLess(private_index, install_index)
         private_step = self.steps[private_index]["run"]
@@ -170,6 +170,33 @@ class CiContractTests(unittest.TestCase):
         ):
             self.assertIn(path, private_step)
         self.assertIn('chmod 700 "$ci_root"', private_step)
+
+    def test_ci_bootstraps_copy_owned_venv_before_hash_install_and_validation(self):
+        bootstrap_steps = [
+            step
+            for step in self.steps
+            if step.get("name") == "Bootstrap developer environment"
+        ]
+        self.assertEqual(len(bootstrap_steps), 1)
+        bootstrap_index = self.steps.index(bootstrap_steps[0])
+        self.assertIn("scripts/bootstrap-developer.sh", bootstrap_steps[0]["run"])
+        self.assertNotIn("pip install", bootstrap_steps[0]["run"])
+
+        validator_steps = [
+            step
+            for step in self.steps
+            if step.get("name") == "Run isolated repository checks"
+        ]
+        self.assertEqual(len(validator_steps), 1)
+        validator_index = self.steps.index(validator_steps[0])
+        self.assertGreater(validator_index, bootstrap_index)
+        self.assertIn(
+            ".venv/bin/python scripts/validate-repository.py",
+            validator_steps[0]["run"],
+        )
+        self.assertNotIn(
+            "\npython scripts/validate-repository.py", validator_steps[0]["run"]
+        )
 
     def test_runner_matrix_is_pinned_to_supported_images(self):
         matrix = next(
@@ -238,10 +265,7 @@ class CiContractTests(unittest.TestCase):
         )
 
     def test_ci_uses_only_pinned_dependencies_existing_tools_and_local_checks(self):
-        self.assertIn(
-            "python -m pip install --require-hashes --requirement requirements-dev.lock",  # noqa: E501
-            self.text,
-        )
+        self.assertIn("scripts/bootstrap-developer.sh", self.text)
         self.assertNotRegex(self.text.lower(), r"\b(?:brew|apk|yum|dnf)\b")
         self.assertIn("sudo apt-get update", self.text)
         self.assertIn(
@@ -281,7 +305,9 @@ class CiContractTests(unittest.TestCase):
         self.assertNotRegex(self.text.lower(), r"pip[^\n]*(?:bwrap|shellcheck)|wget")
 
     def test_equivalent_unittest_discovery_is_not_repeated(self):
-        self.assertEqual(self.text.count("python scripts/validate-repository.py"), 1)
+        self.assertEqual(
+            self.text.count(".venv/bin/python scripts/validate-repository.py"), 1
+        )
         self.assertEqual(
             self.text.count("python -m unittest discover -s tests -p 'test_*.py'"), 1
         )
@@ -430,7 +456,7 @@ class CiContractTests(unittest.TestCase):
             ),
             self.text.replace("8#$tool_mode & 8#022", "8#$tool_mode & 8#000", 1),
             self.text.replace(
-                "python -m pip install --require-hashes --requirement requirements-dev.lock",  # noqa: E501
+                "scripts/bootstrap-developer.sh",
                 "python -m pip install bwrap",
                 1,
             ),
