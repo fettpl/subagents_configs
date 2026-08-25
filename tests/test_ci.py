@@ -33,10 +33,48 @@ class CiContractTests(unittest.TestCase):
             r"          set -euo pipefail\n"
             r"          sudo apt-get update\n"
             r"          sudo apt-get install --yes --no-install-recommends "
-            r"bubblewrap=0\.9\.0-1ubuntu0\.1\n"
+            r"bubblewrap=0\.9\.0-1ubuntu0\.1 "
+            r"apparmor=4\.0\.1really4\.0\.1-0ubuntu0\.24\.04\.5 "
+            r"apparmor-profiles=4\.0\.1really4\.0\.1-0ubuntu0\.24\.04\.5\n"
+            r"          profile_source=/usr/share/apparmor/extra-profiles/"
+            r"bwrap-userns-restrict\n"
+            r"          parser=/usr/sbin/apparmor_parser\n"
+            r"          if ! test -f \"\$profile_source\" \|\| ! test \"\$\(realpath "
+            r"\"\$profile_source\"\)\" = \"\$profile_source\" \|\| ! test "
+            r"\"\$\(stat -c '%u' "
+            r"\"\$profile_source\"\)\" = 0; then\n"
+            r"            echo \"AppArmor profile source is unavailable or unsafe\"\n"
+            r"            exit 1\n"
+            r"          fi\n"
+            r"          profile_mode=\"\$\(stat -c '%a' \"\$profile_source\"\)\"\n"
+            r"          test \"\$\(\(8#\$profile_mode & 8#022\)\)\" -eq 0\n"
+            r"          if ! test -f \"\$parser\" \|\| ! test -x \"\$parser\" "
+            r"\|\| ! test "
+            r"\"\$\(realpath \"\$parser\"\)\" = \"\$parser\" \|\| ! test "
+            r"\"\$\(stat -c '%u' "
+            r"\"\$parser\"\)\" = 0; then\n"
+            r"            echo \"AppArmor parser is unavailable or unsafe\"\n"
+            r"            exit 1\n"
+            r"          fi\n"
+            r"          parser_mode=\"\$\(stat -c '%a' \"\$parser\"\)\"\n"
+            r"          test \"\$\(\(8#\$parser_mode & 8#022\)\)\" -eq 0\n"
+            r"          sudo install --owner=root --group=root --mode=0644 "
+            r"\"\$profile_source\" /etc/apparmor.d/bwrap-userns-restrict\n"
+            r"          test -f /etc/apparmor.d/bwrap-userns-restrict\n"
+            r"          test \"\$\(realpath "
+            r"/etc/apparmor.d/bwrap-userns-restrict\)\" = "
+            r"/etc/apparmor.d/bwrap-userns-restrict\n"
+            r"          test \"\$\(stat -c '%u:%g' /etc/apparmor.d/"
+            r"bwrap-userns-restrict\)\" = 0:0\n"
+            r"          test \"\$\(stat -c '%a' /etc/apparmor.d/"
+            r"bwrap-userns-restrict\)\" = 644\n"
+            r"          sudo /usr/sbin/apparmor_parser --replace "
+            r"/etc/apparmor.d/bwrap-userns-restrict\n"
         )
-        sanitized, _ = allowed_linux_provisioning.subn("", text)
+        sanitized, provisioning_count = allowed_linux_provisioning.subn("", text)
         sanitized_lower = sanitized.lower()
+        if provisioning_count != 1:
+            violations.append("unsafe Ubuntu bubblewrap provisioning")
         if "contents: write" in lower:
             violations.append("write permission")
         if "persist-credentials: true" in lower:
@@ -132,7 +170,37 @@ class CiContractTests(unittest.TestCase):
             "set -euo pipefail\n"
             "sudo apt-get update\n"
             "sudo apt-get install --yes --no-install-recommends "
-            "bubblewrap=0.9.0-1ubuntu0.1\n",
+            "bubblewrap=0.9.0-1ubuntu0.1 "
+            "apparmor=4.0.1really4.0.1-0ubuntu0.24.04.5 "
+            "apparmor-profiles=4.0.1really4.0.1-0ubuntu0.24.04.5\n"
+            "profile_source=/usr/share/apparmor/extra-profiles/"
+            "bwrap-userns-restrict\n"
+            "parser=/usr/sbin/apparmor_parser\n"
+            'if ! test -f "$profile_source" || ! test "$(realpath '
+            '"$profile_source")" = "$profile_source" || ! test "$(stat -c \'%u\' '
+            '"$profile_source")" = 0; then\n'
+            '  echo "AppArmor profile source is unavailable or unsafe"\n'
+            "  exit 1\n"
+            "fi\n"
+            'profile_mode="$(stat -c \'%a\' "$profile_source")"\n'
+            'test "$((8#$profile_mode & 8#022))" -eq 0\n'
+            'if ! test -f "$parser" || ! test -x "$parser" || ! test "$(realpath '
+            '"$parser")" = "$parser" || ! test '
+            '"$(stat -c \'%u\' "$parser")" = 0; then\n'
+            '  echo "AppArmor parser is unavailable or unsafe"\n'
+            "  exit 1\n"
+            "fi\n"
+            'parser_mode="$(stat -c \'%a\' "$parser")"\n'
+            'test "$((8#$parser_mode & 8#022))" -eq 0\n'
+            "sudo install --owner=root --group=root --mode=0644 "
+            '"$profile_source" /etc/apparmor.d/bwrap-userns-restrict\n'
+            "test -f /etc/apparmor.d/bwrap-userns-restrict\n"
+            'test "$(realpath /etc/apparmor.d/bwrap-userns-restrict)" = '
+            "/etc/apparmor.d/bwrap-userns-restrict\n"
+            "test \"$(stat -c '%u:%g' /etc/apparmor.d/bwrap-userns-restrict)\" = 0:0\n"
+            "test \"$(stat -c '%a' /etc/apparmor.d/bwrap-userns-restrict)\" = 644\n"
+            "sudo /usr/sbin/apparmor_parser --replace "
+            "/etc/apparmor.d/bwrap-userns-restrict\n",
         )
         self.assertEqual(
             self.text.count("sudo apt-get update"),
@@ -154,7 +222,9 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("sudo apt-get update", self.text)
         self.assertIn(
             "sudo apt-get install --yes --no-install-recommends "
-            "bubblewrap=0.9.0-1ubuntu0.1",
+            "bubblewrap=0.9.0-1ubuntu0.1 "
+            "apparmor=4.0.1really4.0.1-0ubuntu0.24.04.5 "
+            "apparmor-profiles=4.0.1really4.0.1-0ubuntu0.24.04.5",
             self.text,
         )
         for fixed_tool in ("/usr/bin/bwrap", "/bin/bwrap", "/usr/bin/shellcheck"):
@@ -341,6 +411,21 @@ class CiContractTests(unittest.TestCase):
             f"{self.text}\nrun: sudo true\n",
             f"{self.text}\nrun: apt-get install shellcheck\n",
             f"{self.text}\nrun: brew install shellcheck\n",
+            self.text.replace(
+                "          sudo /usr/sbin/apparmor_parser --replace "
+                "/etc/apparmor.d/bwrap-userns-restrict\n",
+                "",
+                1,
+            ),
+            self.text.replace(
+                "          sudo /usr/sbin/apparmor_parser --replace "
+                "/etc/apparmor.d/bwrap-userns-restrict\n",
+                "          sudo sysctl -w "
+                "kernel.apparmor_restrict_unprivileged_userns=0\n"
+                "          sudo /usr/sbin/apparmor_parser --replace "
+                "/etc/apparmor.d/bwrap-userns-restrict\n",
+                1,
+            ),
         )
         for mutation in mutations:
             with self.subTest(mutation=mutation[-80:]):
