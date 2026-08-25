@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Literal
 
 from . import filesystem
-from .blocks import _markers, _scan, insert_or_replace_block, remove_exact_block
+from .blocks import (
+    insert_or_replace_block,
+    inspect_managed_block,
+    remove_exact_block,
+    validate_managed_content,
+)
 from .errors import ValidationBlockedError
 from .formats import (
     ValidatedSource,
@@ -183,18 +188,7 @@ def _entry_for_block(
 
 
 def _block_from_file(content: bytes, block_id: str) -> ManagedBlock | None:
-    begin, end = _markers(block_id)
-    matches = [item for item in _scan(content) if item[0] == block_id]
-    if not matches:
-        return None
-    _marker_id, start, stop = matches[0]
-    rendered = content[start:stop]
-    prefix = begin + b"\n"
-    suffix = end + b"\n"
-    if not rendered.startswith(prefix) or not rendered.endswith(suffix):
-        raise ValueError("malformed managed block")
-    body = rendered[len(prefix) : -len(suffix)]
-    return ManagedBlock(block_id, begin, end, body, _digest(rendered))
+    return inspect_managed_block(content, block_id)
 
 
 def _selected_sources(
@@ -828,7 +822,7 @@ def _target_install(
     except FileNotFoundError:
         pass
     else:
-        _scan(instruction_bytes)
+        validate_managed_content(instruction_bytes)
 
     if request.enable_global_routing:
         routing_identifier = f"routing-{target.value}"
@@ -1181,6 +1175,17 @@ def _validate_request(request: Request, operation: str) -> None:
         raise ValueError("uninstall does not accept install-only options")
     if request.enable_codex_multi_agent and Target.CODEX not in request.targets:
         raise ValueError("Codex multi-agent configuration requires Codex")
+
+
+def validate_lifecycle(request: Request, descriptor) -> None:
+    """Validate a lifecycle request against one canonical target descriptor."""
+    if not hasattr(descriptor, "target"):
+        raise TypeError("lifecycle validation requires a target descriptor")
+    if not isinstance(request, Request):
+        raise ValueError("request must be a Request")
+    if descriptor.target not in request.targets:
+        raise ValueError("descriptor target is not selected by request")
+    _validate_request(request, request.operation)
 
 
 def preflight_install(repo_root: Path, request: Request) -> TransactionPlan:

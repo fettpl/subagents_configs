@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from . import filesystem
+from .blocks import inspect_managed_block
 from .errors import TransactionError
 from .locks import (
     IdentityEvidence,
@@ -530,9 +531,7 @@ def _validate_manifest_linkage(target_plan: TargetPlan) -> None:
             and entry.managed_block_id is not None
             and operation.content is not None
         ):
-            from .planning import _block_from_file
-
-            block = _block_from_file(operation.content, entry.managed_block_id)
+            block = inspect_managed_block(operation.content, entry.managed_block_id)
             if block is None or block.sha256 != entry.installed_block_hash:
                 raise ValueError("manifest block hash does not match operation")
         relative = _identifier_relative(descriptor, entry.identifier)
@@ -603,9 +602,7 @@ def _validate_manifest_linkage(target_plan: TargetPlan) -> None:
                     or current[1] != entry.installed_mode
                 ):
                     raise ValueError("unchanged manifest block target does not match")
-                from .planning import _block_from_file
-
-                block = _block_from_file(current[0], entry.managed_block_id)
+                block = inspect_managed_block(current[0], entry.managed_block_id)
                 if block is None or block.sha256 != entry.installed_block_hash:
                     if operation is None:
                         raise ValueError(
@@ -1635,9 +1632,7 @@ def _verify_manifest_entries(home: Path, descriptor, manifest) -> None:
         ):
             raise IncompleteRollbackError("manifest entry target drifted")
         if entry.managed_block_id is not None:
-            from .planning import _block_from_file
-
-            block = _block_from_file(current[0], entry.managed_block_id)
+            block = inspect_managed_block(current[0], entry.managed_block_id)
             if block is None or block.sha256 != entry.installed_block_hash:
                 raise IncompleteRollbackError("manifest managed block drifted")
 
@@ -2065,6 +2060,11 @@ def recover_incomplete_journal(home: Path, descriptor) -> None:
             f"multi-participant recovery requires all homes: {participants}"
         )
     _recover_participants({descriptor.target: home})
+
+
+def recover_participants(homes: Mapping[Target, Path]) -> None:
+    """Public participant recovery adapter used by the recovery module."""
+    _recover_participants(homes)
 
 
 # Private seams used by transaction tests and by the future multi-home

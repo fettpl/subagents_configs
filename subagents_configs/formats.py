@@ -21,6 +21,18 @@ _COMMAND_GATE_SHA256 = (
     "834025bb3af05ef4f6fc3977be9ff81c2c136ea6c9fc213f37aefe83de7ba270"
 )
 
+# One normalized role contract is the input to native per-client overlays.  The
+# parser below still enforces the client-specific fields, while catalogs can
+# hash this table without copying prompt bodies or permission-bearing files.
+ROLE_POLICY = {
+    "code-explorer": {"read_only": True, "optional": False},
+    "code-reviewer": {"read_only": True, "optional": False},
+    "code-validator": {"read_only": True, "optional": False},
+    "quick-implementer": {"read_only": False, "optional": False},
+    "implementer": {"read_only": False, "optional": False},
+    "commit-pusher": {"read_only": False, "optional": True},
+}
+
 
 @dataclass(frozen=True)
 class ValidatedSource:

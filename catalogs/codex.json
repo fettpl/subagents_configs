@@ -1,0 +1,205 @@
+{
+  "agent_directory": "agents",
+  "catalog_sha256": "527360b2e6dcbe5b2a5e0fa0264cac98f384c5b737803ab7ec52b52e0c6b7944",
+  "external_lifecycle": null,
+  "global_instruction": {
+    "block_id": "routing-codex",
+    "filename": "AGENTS.md",
+    "source": "rules/SUBAGENT_ROUTING.md"
+  },
+  "include_in_all": true,
+  "lifecycle_capabilities": [
+    "block",
+    "file",
+    "manifest",
+    "runtime"
+  ],
+  "optional_blocks": [
+    {
+      "block_id": "routing-codex",
+      "relative_path": "AGENTS.md",
+      "source": "rules/SUBAGENT_ROUTING.md"
+    },
+    {
+      "block_id": "codex-multi-agent-v2",
+      "relative_path": "config.toml",
+      "source": null
+    }
+  ],
+  "order": 0,
+  "parser": "toml",
+  "policy_sha256": "0711ef9333a6930a739ca78c0a1bc9ba9f869980cc2d39460ea676f3e81fdecf",
+  "roles": [
+    {
+      "contract": {
+        "optional": false,
+        "read_only": true
+      },
+      "destination": "agents/code-explorer.toml",
+      "identifier": "code-explorer",
+      "optional": false,
+      "overlay": {
+        "model": "gpt-5.6-luna",
+        "model_reasoning_effort": "low",
+        "sandbox_mode": "read-only"
+      },
+      "policy_sha256": "9c7398d370458df47ff8e45e9b3bd98877a0200a27f9ca6d09b6d13c02d1d453",
+      "source": "agents/code-explorer.toml"
+    },
+    {
+      "contract": {
+        "optional": false,
+        "read_only": true
+      },
+      "destination": "agents/code-reviewer.toml",
+      "identifier": "code-reviewer",
+      "optional": false,
+      "overlay": {
+        "model": "gpt-5.6-sol",
+        "model_reasoning_effort": "low",
+        "sandbox_mode": "read-only"
+      },
+      "policy_sha256": "203f8091e6f8e85a0cb91399a237ce36a512dbd99b42df5855fdae72e54a5bab",
+      "source": "agents/code-reviewer.toml"
+    },
+    {
+      "contract": {
+        "optional": false,
+        "read_only": true
+      },
+      "destination": "agents/code-validator.toml",
+      "identifier": "code-validator",
+      "optional": false,
+      "overlay": {
+        "model": "gpt-5.6-luna",
+        "model_reasoning_effort": "low"
+      },
+      "policy_sha256": "0e762011c87f630bde59c6ce46ae274fbc74fd61744ad90ccd9cd1a3eb866959",
+      "source": "agents/code-validator.toml"
+    },
+    {
+      "contract": {
+        "optional": true,
+        "read_only": false
+      },
+      "destination": "agents/commit-pusher.toml",
+      "identifier": "commit-pusher",
+      "optional": true,
+      "overlay": {
+        "model": "gpt-5.6-luna",
+        "model_reasoning_effort": "low"
+      },
+      "policy_sha256": "0e762011c87f630bde59c6ce46ae274fbc74fd61744ad90ccd9cd1a3eb866959",
+      "source": "agents/commit-pusher.toml"
+    },
+    {
+      "contract": {
+        "optional": false,
+        "read_only": false
+      },
+      "destination": "agents/implementer.toml",
+      "identifier": "implementer",
+      "optional": false,
+      "overlay": {
+        "model": "gpt-5.6-luna",
+        "model_reasoning_effort": "medium"
+      },
+      "policy_sha256": "7dcf82a74a5d22b8a69e17cd707b9aeccee107e2203b62eb43a0560948320133",
+      "source": "agents/implementer.toml"
+    },
+    {
+      "contract": {
+        "optional": false,
+        "read_only": false
+      },
+      "destination": "agents/quick-implementer.toml",
+      "identifier": "quick-implementer",
+      "optional": false,
+      "overlay": {
+        "model": "gpt-5.6-luna",
+        "model_reasoning_effort": "low"
+      },
+      "policy_sha256": "0e762011c87f630bde59c6ce46ae274fbc74fd61744ad90ccd9cd1a3eb866959",
+      "source": "agents/quick-implementer.toml"
+    }
+  ],
+  "schema_version": 1,
+  "semantic_validator": "agent",
+  "source_format": "toml",
+  "source_sha256": "cc7172f6c59bb0c3ac39083d05e4f83bea98834b79335c741752e619c46fcda1",
+  "sources": [
+    {
+      "destination": "agents/code-explorer.toml",
+      "identifier": "code-explorer",
+      "kind": "agent",
+      "optional_role": null,
+      "sha256": "e237179fe7f3f531dcb64583701ba6a27572d9cb911f3590c249cc19ad9d67bf",
+      "source": "agents/code-explorer.toml",
+      "source_format": "toml"
+    },
+    {
+      "destination": "agents/code-reviewer.toml",
+      "identifier": "code-reviewer",
+      "kind": "agent",
+      "optional_role": null,
+      "sha256": "00b9fce31956cd47f919f09dcb16290d01369e9bec8cd6eb5a1c7aa837c730a9",
+      "source": "agents/code-reviewer.toml",
+      "source_format": "toml"
+    },
+    {
+      "destination": "agents/code-validator.toml",
+      "identifier": "code-validator",
+      "kind": "agent",
+      "optional_role": null,
+      "sha256": "5d8bfc9368f4c8a9fbba3c6a67a5ba621a37ecd8c02745abe02dcdbc339806f6",
+      "source": "agents/code-validator.toml",
+      "source_format": "toml"
+    },
+    {
+      "destination": "agents/commit-pusher.toml",
+      "identifier": "commit-pusher",
+      "kind": "agent",
+      "optional_role": "commit-pusher",
+      "sha256": "056cfd106d27db4ed617a56f1ad241e18c514e2cb905d2d0e1e9866baa1df312",
+      "source": "agents/commit-pusher.toml",
+      "source_format": "toml"
+    },
+    {
+      "destination": "agents/implementer.toml",
+      "identifier": "implementer",
+      "kind": "agent",
+      "optional_role": null,
+      "sha256": "1471da8eb2da120610d61a2904734f5fcf969a62d0205bc3a6b11547051aca75",
+      "source": "agents/implementer.toml",
+      "source_format": "toml"
+    },
+    {
+      "destination": "agents/quick-implementer.toml",
+      "identifier": "quick-implementer",
+      "kind": "agent",
+      "optional_role": null,
+      "sha256": "080afe1f70eeaef42467ec1901b863b0f77d16149a91034f970fc289a1451c5a",
+      "source": "agents/quick-implementer.toml",
+      "source_format": "toml"
+    },
+    {
+      "destination": null,
+      "identifier": "project-template",
+      "kind": "project-template",
+      "optional_role": null,
+      "sha256": "38f4e3f66352ac6b251ec888aff7a5bbac4b0dcd1bd750dfa0073fae02da767a",
+      "source": "templates/AGENTS.md.template",
+      "source_format": "markdown"
+    },
+    {
+      "destination": null,
+      "identifier": "routing",
+      "kind": "routing-source",
+      "optional_role": null,
+      "sha256": "9ff4d728e45b1b734af55448826cd644d63fd7615653b723a810f844fd123e3f",
+      "source": "rules/SUBAGENT_ROUTING.md",
+      "source_format": "markdown"
+    }
+  ],
+  "target": "codex"
+}

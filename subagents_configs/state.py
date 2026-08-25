@@ -29,6 +29,7 @@ from .paths import (
     normalized_absolute,
     strict_relative_path,
 )
+from .targets import capability_for
 
 SCHEMA_VERSION = 2
 _OWNERSHIPS = {"created", "replaced", "preexisting"}
@@ -50,11 +51,13 @@ _STATUSES = {
     "ambiguous",
 }
 _ROLLBACK_STATUSES = {"not-started", "in-progress", "complete", "incomplete"}
-_BLOCKS = {
-    Target.CODEX: {"routing-codex", "codex-multi-agent-v2"},
-    Target.OPENCODE: {"routing-opencode"},
-    Target.CLAUDE_CODE: {"routing-claude-code"},
-}
+
+
+def _managed_blocks(descriptor: TargetDescriptor) -> frozenset[str]:
+    return frozenset(
+        item.block_id for item in capability_for(descriptor.target).optional_blocks
+    )
+
 
 _MANIFEST_KEYS = {"schema_version", "target", "entries"}
 _ENTRY_KEYS = {
@@ -241,7 +244,7 @@ def _supported_identifiers(descriptor: TargetDescriptor) -> dict[str, str]:
         seen_source_destinations.add(destination)
         add(source.identifier, destination, source.identifier)
         add(destination, destination, source.identifier)
-    for block_id in _BLOCKS[descriptor.target]:
+    for block_id in _managed_blocks(descriptor):
         destination = descriptor.global_filename
         if block_id == "codex-multi-agent-v2":
             if descriptor.config_filename is None:
@@ -342,7 +345,7 @@ def _entry(
     managed_block_id = value["managed_block_id"]
     if managed_block_id is not None:
         managed_block_id = _string(managed_block_id, "managed_block_id")
-        if managed_block_id not in _BLOCKS[descriptor.target]:
+        if managed_block_id not in _managed_blocks(descriptor):
             raise ValueError("unsupported managed block id")
         if identifier != managed_block_id:
             raise ValueError("managed block id does not match identifier")
@@ -458,7 +461,7 @@ def _operation(
             if block_id == "codex-multi-agent-v2"
             else descriptor.global_filename
         )
-        for block_id in _BLOCKS[descriptor.target]
+        for block_id in _managed_blocks(descriptor)
     )
     if action in {"write-block", "remove-block"} and not is_block:
         raise ValueError("block actions require a managed block identifier")
@@ -1033,6 +1036,15 @@ def load_journal(home: Path, descriptor: TargetDescriptor) -> Journal | None:
         raise ValueError(
             f"unsafe or legacy journal state; manual recovery is required: {exc}"
         ) from exc
+
+
+def load_state(
+    home: Path, descriptor: TargetDescriptor
+) -> tuple[Manifest | None, Journal | None]:
+    """Load manifest and journal metadata through one stable public seam."""
+    if not isinstance(home, Path) or not isinstance(descriptor, TargetDescriptor):
+        raise TypeError("state load requires a Path and TargetDescriptor")
+    return load_manifest(home, descriptor), load_journal(home, descriptor)
 
 
 @dataclass(frozen=True)

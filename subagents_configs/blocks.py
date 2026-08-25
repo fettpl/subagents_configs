@@ -53,6 +53,33 @@ def render_managed_block(block_id: str, body: bytes) -> ManagedBlock:
     )
 
 
+def inspect_managed_block(content: bytes, block_id: str) -> ManagedBlock | None:
+    """Inspect one managed block without exposing the parser's private tuple format."""
+    begin, end = _markers(block_id)
+    matches = [item for item in _scan(content) if item[0] == block_id]
+    if not matches:
+        return None
+    _marker_id, start, stop = matches[0]
+    rendered = content[start:stop]
+    prefix = begin + b"\n"
+    suffix = end + b"\n"
+    if not rendered.startswith(prefix) or not rendered.endswith(suffix):
+        raise ValueError("managed block boundaries are invalid")
+    body = rendered[len(prefix) : -len(suffix)]
+    return ManagedBlock(
+        block_id=block_id,
+        begin_marker=begin,
+        end_marker=end,
+        content=body,
+        sha256=hashlib.sha256(rendered).hexdigest(),
+    )
+
+
+def validate_managed_content(content: bytes) -> None:
+    """Validate marker structure without exposing private parser details."""
+    _scan(content)
+
+
 def _validate_content(content: bytes) -> None:
     if type(content) is not bytes:
         raise TypeError("managed block body must be bytes")

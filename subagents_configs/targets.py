@@ -1,6 +1,13 @@
 from pathlib import PurePosixPath
 
-from .models import SourceSpec, Target, TargetDescriptor
+from .models import (
+    GlobalInstructionSpec,
+    ManagedBlockSpec,
+    SourceSpec,
+    Target,
+    TargetCapability,
+    TargetDescriptor,
+)
 
 _ROLES = (
     "code-explorer",
@@ -105,7 +112,7 @@ def _descriptor(
     )
 
 
-DESCRIPTORS: dict[Target, TargetDescriptor] = {
+_DESCRIPTORS: dict[Target, TargetDescriptor] = {
     Target.CODEX: _descriptor(
         Target.CODEX,
         environment_variable="CODEX_HOME",
@@ -141,7 +148,110 @@ DESCRIPTORS: dict[Target, TargetDescriptor] = {
     ),
 }
 
-DESCRIPTOR_ORDER = (Target.CODEX, Target.OPENCODE, Target.CLAUDE_CODE)
+
+def _capability(descriptor: TargetDescriptor, order: int) -> TargetCapability:
+    agent = next(source for source in descriptor.sources if source.kind == "agent")
+    routing = next(
+        source for source in descriptor.sources if source.kind == "routing-source"
+    )
+    optional_blocks = [
+        ManagedBlockSpec(
+            block_id=f"routing-{descriptor.target.value}",
+            relative_path=PurePosixPath(descriptor.global_filename),
+            source=routing.source,
+        )
+    ]
+    if descriptor.target is Target.CODEX:
+        optional_blocks.append(
+            ManagedBlockSpec(
+                block_id="codex-multi-agent-v2",
+                relative_path=PurePosixPath(
+                    descriptor.config_filename or "config.toml"
+                ),
+            )
+        )
+    runtime = tuple(
+        source
+        for source in descriptor.sources
+        if source.kind in {"validation-runtime", "command-gate", "target-extension"}
+    )
+    return TargetCapability(
+        target=descriptor.target,
+        order=order,
+        include_in_all=True,
+        agent_directory=agent.source.parent,
+        source_format=agent.source_format,
+        parser=agent.source_format,
+        semantic_validator="agent",
+        global_instruction=GlobalInstructionSpec(
+            optional_blocks[0].block_id,
+            PurePosixPath(descriptor.global_filename),
+            routing.source,
+        ),
+        optional_blocks=tuple(optional_blocks),
+        runtime_sources=runtime,
+        lifecycle_capabilities=frozenset({"file", "block", "manifest", "runtime"}),
+        external_lifecycle=None,
+    )
+
+
+CAPABILITIES: tuple[TargetCapability, ...] = tuple(
+    _capability(descriptor, order)
+    for order, descriptor in enumerate(_DESCRIPTORS.values())
+)
+_CAPABILITY_BY_TARGET = {capability.target: capability for capability in CAPABILITIES}
+DESCRIPTORS: dict[Target, TargetDescriptor] = {
+    capability.target: _DESCRIPTORS[capability.target] for capability in CAPABILITIES
+}
+DESCRIPTOR_ORDER = tuple(capability.target for capability in CAPABILITIES)
+
+
+def capability_for(target: Target) -> TargetCapability:
+    """Return the sole canonical capability record for ``target``."""
+    try:
+        return _CAPABILITY_BY_TARGET[target]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"unsupported target: {target}") from exc
+
+
+def parser_for(target: Target) -> str:
+    return capability_for(target).parser
+
+
+def semantic_validator_for(target: Target) -> str:
+    return capability_for(target).semantic_validator
+
+
+def runtime_sources_for(target: Target) -> tuple[SourceSpec, ...]:
+    return capability_for(target).runtime_sources
+
+
+def targets_for_request(
+    explicit: tuple[Target, ...], include_all: bool
+) -> tuple[Target, ...]:
+    """Normalize a target request using registry order and all-selection policy."""
+    if type(include_all) is not bool or not isinstance(explicit, tuple):
+        raise ValueError("target request has invalid shape")
+    if any(not isinstance(target, Target) for target in explicit):
+        raise ValueError("target request contains an unsupported target")
+    if len(set(explicit)) != len(explicit):
+        raise ValueError("duplicate targets are not supported")
+    if include_all and explicit:
+        raise ValueError("--all cannot be combined with explicit targets")
+    if include_all:
+        return tuple(
+            capability.target
+            for capability in CAPABILITIES
+            if capability.include_in_all
+        )
+    requested = set(explicit)
+    if requested - set(_CAPABILITY_BY_TARGET):
+        raise ValueError("target request contains an unsupported target")
+    return tuple(
+        capability.target
+        for capability in CAPABILITIES
+        if capability.target in requested
+    )
 
 
 def descriptor_for(target: Target) -> TargetDescriptor:

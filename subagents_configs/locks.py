@@ -8,10 +8,9 @@ import stat
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
 from pathlib import Path
 
-from .models import Target
+from .models import IdentityEvidence, Target
 from .paths import assert_safe_home, normalized_absolute
 from .targets import DESCRIPTOR_ORDER
 
@@ -32,16 +31,6 @@ def homes_locked(homes: Mapping[Target, Path]) -> bool:
 
     requested = frozenset(normalized_absolute(path) for path in homes.values())
     return requested <= _LOCK_HOMES.get()
-
-
-@dataclass(frozen=True)
-class IdentityEvidence:
-    device: int
-    inode: int
-    size: int
-    nlink: int
-    mode: int
-    sha256: str
 
 
 def _validate_target_sequence(homes: Mapping[Target, Path], targets: Sequence[Target]):
@@ -132,9 +121,9 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
 
 
 def capture_evidence(path: Path, label: str) -> IdentityEvidence | None:
-    from .filesystem import capture_evidence as _capture
+    from .filesystem import capture_evidence
 
-    return _capture(path, label)
+    return capture_evidence(path, label)
 
 
 def compare_and_swap(
@@ -144,9 +133,9 @@ def compare_and_swap(
     after_mode: int | None,
     action: str,
 ) -> IdentityEvidence | None:
-    from .filesystem import compare_and_swap as _compare_and_swap
+    from .filesystem import compare_and_swap
 
-    return _compare_and_swap(path, before, after_content, after_mode, action)
+    return compare_and_swap(path, before, after_content, after_mode, action)
 
 
 __all__ = [
