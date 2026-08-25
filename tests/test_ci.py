@@ -25,15 +25,29 @@ class CiContractTests(unittest.TestCase):
     def _unsafe_mutations(text: str) -> list[str]:
         violations = []
         lower = text.lower()
+        allowed_linux_provisioning = re.compile(
+            r"(?ms)^      - name: Provision Ubuntu bubblewrap\n"
+            r"        if: matrix\.os == ['\"]ubuntu-24\.04['\"]\n"
+            r"        shell: bash\n"
+            r"        run: \|\n"
+            r"          set -euo pipefail\n"
+            r"          sudo apt-get update\n"
+            r"          sudo apt-get install --yes --no-install-recommends "
+            r"bubblewrap=0\.9\.0-1ubuntu0\.1\n"
+        )
+        sanitized, _ = allowed_linux_provisioning.subn("", text)
+        sanitized_lower = sanitized.lower()
         if "contents: write" in lower:
             violations.append("write permission")
         if "persist-credentials: true" in lower:
             violations.append("persisted credentials")
         if re.search(r"\$\{\{\s*secrets\.", text):
             violations.append("secret reference")
-        if re.search(r"\bsudo\b", lower):
+        if re.search(r"\bsudo\b", sanitized_lower):
             violations.append("sudo")
-        if re.search(r"pip[^\n]*(?:bwrap|shellcheck)", lower):
+        if re.search(r"\b(?:apt(?:-get)?|apk|brew|dnf|yum)\b", sanitized_lower):
+            violations.append("package manager")
+        if re.search(r"pip[^\n]*(?:bwrap|shellcheck)", sanitized_lower):
             violations.append("tool installation")
         for line in text.splitlines():
             if "uses:" in line and not re.search(r"uses:\s+[^@\s]+@[0-9a-f]{40}", line):
@@ -45,7 +59,7 @@ class CiContractTests(unittest.TestCase):
         self.assertEqual(self.workflow["permissions"], {"contents": "read"})
         self.assertNotIn("contents: write", self.text.lower())
         self.assertNotRegex(self.text, r"\$\{\{\s*secrets\.")
-        self.assertNotRegex(self.text.lower(), r"\bsudo\b|curl[^\n]*\|\s*(?:sh|bash)")
+        self.assertNotRegex(self.text.lower(), r"curl[^\n]*\|\s*(?:sh|bash)")
         actions = [step["uses"] for step in self.steps if "uses" in step]
         self.assertEqual(
             actions,
@@ -89,11 +103,53 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("mktemp -d", self.text)
         self.assertIn("umask 077", self.text)
 
+    def test_runner_matrix_is_pinned_to_supported_images(self):
+        matrix = next(
+            job["strategy"]["matrix"]
+            for job in self.workflow["jobs"].values()
+            if "strategy" in job
+        )
+        self.assertEqual(set(matrix["os"]), {"ubuntu-24.04", "macos-15"})
+
+    def test_ubuntu_bubblewrap_provisioning_is_one_exact_linux_step(self):
+        provisioning = [
+            step
+            for step in self.steps
+            if step.get("name") == "Provision Ubuntu bubblewrap"
+        ]
+        self.assertEqual(len(provisioning), 1)
+        step = provisioning[0]
+        self.assertEqual(step["if"], "matrix.os == 'ubuntu-24.04'")
+        self.assertEqual(
+            step["run"],
+            "set -euo pipefail\n"
+            "sudo apt-get update\n"
+            "sudo apt-get install --yes --no-install-recommends "
+            "bubblewrap=0.9.0-1ubuntu0.1\n",
+        )
+        self.assertEqual(
+            self.text.count("sudo apt-get update"),
+            1,
+        )
+        self.assertEqual(
+            self.text.count(
+                "sudo apt-get install --yes --no-install-recommends "
+                "bubblewrap=0.9.0-1ubuntu0.1"
+            ),
+            1,
+        )
+
     def test_ci_uses_only_pinned_dependencies_existing_tools_and_local_checks(self):
         self.assertIn(
             "python -m pip install --requirement requirements-dev.txt", self.text
         )
-        self.assertNotRegex(self.text.lower(), r"\b(?:brew|apt(?:-get)?|apk|yum|dnf)\b")
+        self.assertNotRegex(self.text.lower(), r"\b(?:brew|apk|yum|dnf)\b")
+        self.assertIn("sudo apt-get update", self.text)
+        self.assertIn(
+            "sudo apt-get install --yes --no-install-recommends "
+            "bubblewrap=0.9.0-1ubuntu0.1",
+            self.text,
+        )
         for fixed_tool in ("/usr/bin/bwrap", "/bin/bwrap", "/usr/bin/shellcheck"):
             self.assertIn(fixed_tool, self.text)
         self.assertRegex(
@@ -145,6 +201,29 @@ class CiContractTests(unittest.TestCase):
             "test -f /usr/bin/shellcheck && test -x /usr/bin/shellcheck",
             self.text,
         )
+        self.assertIn('test "$(stat -c \'%u\' "$candidate")" = 0', self.text)
+        self.assertIn("test \"$(stat -c '%u' /usr/bin/shellcheck)\" = 0", self.text)
+        self.assertIn("test \"$(stat -f '%u' /usr/bin/sandbox-exec)\" = 0", self.text)
+
+    def test_shellcheck_is_required_and_executed_only_in_ubuntu_jobs(self):
+        ubuntu_gates = re.finditer(
+            r"if test \"\$\{\{ matrix\.os \}\}\" = \"ubuntu-24\.04\"; then"
+            r"(?P<body>[\s\S]*?)\n          fi",
+            self.text,
+        )
+        body = next(
+            (
+                match.group("body")
+                for match in ubuntu_gates
+                if "shellcheck" in match.group("body")
+            ),
+            None,
+        )
+        self.assertIsNotNone(body)
+        self.assertIn("ShellCheck is unavailable", body)
+        self.assertIn('"$shellcheck" install.sh', body)
+        self.assertEqual(self.text.count('"$shellcheck" install.sh'), 1)
+        self.assertIn("VALIDATION_SMOKE_MODE=required", self.text)
 
     def test_action_lines_are_all_sha_pinned(self):
         for line in self.text.splitlines():
@@ -219,7 +298,9 @@ class CiContractTests(unittest.TestCase):
                 "python -m pip install bwrap",
                 1,
             ),
-            f"{self.text}\nrun: sudo true\nrun: ${{{{ secrets.TOKEN }}}}\n",
+            f"{self.text}\nrun: sudo true\n",
+            f"{self.text}\nrun: apt-get install shellcheck\n",
+            f"{self.text}\nrun: brew install shellcheck\n",
         )
         for mutation in mutations:
             with self.subTest(mutation=mutation[-80:]):

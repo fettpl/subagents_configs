@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.14"]
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -22,6 +22,13 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Provision Ubuntu bubblewrap
+        if: matrix.os == 'ubuntu-24.04'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends bubblewrap=0.9.0-1ubuntu0.1
       - name: Install pinned developer requirements
         run: python -m pip install --requirement requirements-dev.txt
       - name: Run isolated repository checks
@@ -49,9 +56,9 @@ jobs:
 
           bwrap=""
           sandbox_exec=""
-          if test "${{ matrix.os }}" = "ubuntu-latest"; then
+          if test "${{ matrix.os }}" = "ubuntu-24.04"; then
             for candidate in /usr/bin/bwrap /bin/bwrap; do
-              if test -f "$candidate" && test -x "$candidate" && test "$(realpath "$candidate")" = "$candidate"; then
+              if test -f "$candidate" && test -x "$candidate" && test "$(realpath "$candidate")" = "$candidate" && test "$(stat -c '%u' "$candidate")" = 0; then
                 bwrap="$candidate"
                 break
               fi
@@ -62,7 +69,7 @@ jobs:
             fi
             echo "trusted fixed bwrap: $bwrap"
           else
-            if test -f /usr/bin/sandbox-exec && test -x /usr/bin/sandbox-exec && test "$(realpath /usr/bin/sandbox-exec)" = /usr/bin/sandbox-exec; then
+            if test -f /usr/bin/sandbox-exec && test -x /usr/bin/sandbox-exec && test "$(realpath /usr/bin/sandbox-exec)" = /usr/bin/sandbox-exec && test "$(stat -f '%u' /usr/bin/sandbox-exec)" = 0; then
               sandbox_exec=/usr/bin/sandbox-exec
             fi
             if test -z "$sandbox_exec"; then
@@ -70,14 +77,6 @@ jobs:
               exit 1
             fi
             echo "trusted fixed sandbox-exec: $sandbox_exec"
-          fi
-          shellcheck=""
-          if test -f /usr/bin/shellcheck && test -x /usr/bin/shellcheck && test "$(realpath /usr/bin/shellcheck)" = /usr/bin/shellcheck; then
-            shellcheck=/usr/bin/shellcheck
-          fi
-          if test -z "$shellcheck"; then
-            echo "ShellCheck is unavailable; refusing to claim shell validation"
-            exit 1
           fi
 
           python scripts/validate-catalogs.py
@@ -89,7 +88,17 @@ jobs:
           ruff check claude-code subagents_configs scripts tests
           ruff format --check claude-code subagents_configs scripts tests
           sh -n ./*.sh
-          "$shellcheck" install.sh uninstall.sh install-codex.sh uninstall-codex.sh install-opencode.sh uninstall-opencode.sh install-claude-code.sh uninstall-claude-code.sh
+          if test "${{ matrix.os }}" = "ubuntu-24.04"; then
+            shellcheck=""
+            if test -f /usr/bin/shellcheck && test -x /usr/bin/shellcheck && test "$(realpath /usr/bin/shellcheck)" = /usr/bin/shellcheck && test "$(stat -c '%u' /usr/bin/shellcheck)" = 0; then
+              shellcheck=/usr/bin/shellcheck
+            fi
+            if test -z "$shellcheck"; then
+              echo "ShellCheck is unavailable; refusing to claim shell validation"
+              exit 1
+            fi
+            "$shellcheck" install.sh uninstall.sh install-codex.sh uninstall-codex.sh install-opencode.sh uninstall-opencode.sh install-claude-code.sh uninstall-claude-code.sh
+          fi
           python -m compileall -q claude-code subagents_configs scripts tests
           git diff --check
           if ! checkout_status="$(git status --short)"; then
