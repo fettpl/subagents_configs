@@ -127,7 +127,8 @@ class CiContractTests(unittest.TestCase):
             if "strategy" in job
         )
         self.assertEqual(
-            {str(version) for version in matrix["python-version"]}, {"3.11", "3.14"}
+            {str(version) for version in matrix["python-version"]},
+            {"3.11", "3.12", "3.13", "3.14"},
         )
         setup = next(
             step
@@ -216,7 +217,8 @@ class CiContractTests(unittest.TestCase):
 
     def test_ci_uses_only_pinned_dependencies_existing_tools_and_local_checks(self):
         self.assertIn(
-            "python -m pip install --requirement requirements-dev.txt", self.text
+            "python -m pip install --require-hashes --requirement requirements-dev.lock",  # noqa: E501
+            self.text,
         )
         self.assertNotRegex(self.text.lower(), r"\b(?:brew|apk|yum|dnf)\b")
         self.assertIn("sudo apt-get update", self.text)
@@ -234,14 +236,10 @@ class CiContractTests(unittest.TestCase):
             self.text, r"(?:test|if)\s+.*(?:-x|command -v).*(?:bwrap|shellcheck)"
         )
         for command in (
-            "scripts/validate-catalogs.py",
-            "tests.test_validation_backend.BackendIntegrationTests",
-            "unittest discover -s tests -p 'test_*.py'",
-            "ruff check claude-code subagents_configs scripts tests",
-            "ruff format --check claude-code subagents_configs scripts tests",
+            "scripts/validate-repository.py",
             "shellcheck",
-            "compileall -q claude-code subagents_configs scripts tests",
-            "git diff --check",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "PYTHONPYCACHEPREFIX",
         ):
             self.assertIn(command, self.text)
         self.assertIn("install.sh", self.text)
@@ -261,6 +259,7 @@ class CiContractTests(unittest.TestCase):
         self.assertNotRegex(self.text.lower(), r"pip[^\n]*(?:bwrap|shellcheck)|wget")
 
     def test_equivalent_unittest_discovery_is_not_repeated(self):
+        self.assertEqual(self.text.count("python scripts/validate-repository.py"), 1)
         self.assertEqual(
             self.text.count("python -m unittest discover -s tests -p 'test_*.py'"), 1
         )
@@ -380,24 +379,19 @@ class CiContractTests(unittest.TestCase):
         )
 
     def test_checkout_cleanliness_is_enforced_fail_closed(self):
-        self.assertRegex(
-            self.text,
-            r'if\s+test\s+-n\s+"\$checkout_status";\s+then',
+        validator = (ROOT / "scripts" / "validate-repository.py").read_text(
+            encoding="utf-8"
         )
-        self.assertRegex(
-            self.text,
-            r"git status --short[\s\S]*?exit 1",
-        )
+        self.assertIn('("git", "status", "--short")', validator)
+        self.assertIn("if output:", validator)
+        self.assertIn("checkout is not clean", validator)
 
     def test_checkout_status_errors_fail_closed(self):
-        self.assertRegex(
-            self.text,
-            r'if\s+!\s+checkout_status="\$\(git status --short\)";\s+then',
+        validator = (ROOT / "scripts" / "validate-repository.py").read_text(
+            encoding="utf-8"
         )
-        self.assertRegex(
-            self.text,
-            r'checkout_status="\$\(git status --short\)"[\s\S]*?exit 1',
-        )
+        self.assertIn("except OSError:", validator)
+        self.assertIn("validation failed: checkout is not clean", validator)
 
     def test_negative_ci_mutations_trigger_contract_guards(self):
         mutations = (
@@ -412,7 +406,7 @@ class CiContractTests(unittest.TestCase):
             ),
             self.text.replace("8#$tool_mode & 8#022", "8#$tool_mode & 8#000", 1),
             self.text.replace(
-                "python -m pip install --requirement requirements-dev.txt",
+                "python -m pip install --require-hashes --requirement requirements-dev.lock",  # noqa: E501
                 "python -m pip install bwrap",
                 1,
             ),

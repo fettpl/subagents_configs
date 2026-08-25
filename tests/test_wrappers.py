@@ -69,6 +69,17 @@ class WrapperTests(unittest.TestCase):
                 text,
             )
 
+    def test_runtime_wrappers_never_install_or_bootstrap_dependencies(self):
+        for name in WRAPPERS:
+            text = (ROOT / name).read_text(encoding="utf-8").lower()
+            self.assertNotIn("pip", text, name)
+            self.assertNotIn("requirements", text, name)
+        bootstrap = (ROOT / "scripts" / "bootstrap-developer.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("requirements-dev.lock", bootstrap)
+        self.assertNotIn("install.sh", bootstrap)
+
     def test_generic_wrappers_validate_and_use_absolute_interpreter_override(self):
         for name, operation in (
             ("install.sh", "install"),

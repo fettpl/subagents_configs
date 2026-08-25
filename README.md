@@ -401,20 +401,21 @@ the rendered plan for any restart/reload limitation.
 
 ## Development checks and formats
 
-Use Python 3.11 or newer and the pinned developer requirements. The repository
-checks native Codex TOML, OpenCode/Claude YAML frontmatter and Markdown,
-catalog semantics, Python with Ruff, shell wrappers with ShellCheck, and
-fail-closed backend behavior. Local verification includes:
+Use CPython 3.11–3.14 and the reviewed hash-locked developer requirements.
+Create the private developer environment with `scripts/bootstrap-developer.sh`.
+Runtime wrappers never install dependencies. The repository checks native Codex
+TOML, OpenCode/Claude YAML frontmatter and Markdown, catalog semantics, Python
+with Ruff, shell wrappers with ShellCheck, and fail-closed backend behavior.
+Run the canonical validator from a clean checkout:
 
 ```sh
-python3 scripts/validate-catalogs.py
-python3 -m unittest discover -s tests -p 'test_*.py' -v
-ruff check claude-code subagents_configs scripts tests
-ruff format --check claude-code subagents_configs scripts tests
-shellcheck install.sh uninstall.sh install-codex.sh uninstall-codex.sh install-opencode.sh uninstall-opencode.sh install-claude-code.sh uninstall-claude-code.sh
-python3 -m compileall -q claude-code subagents_configs scripts tests
-git diff --check
+python3 scripts/validate-repository.py
 ```
+
+Validation uses temporary private homes and caches. It performs no package
+installation, download, network access, or credential access. Install only the
+checked-in `requirements-runtime.lock` or `requirements-dev.lock` with pip's
+`--require-hashes` option when explicitly bootstrapping a developer environment.
 
 The static security contract owns forbidden-execution scans so negative test
 fixtures are not mistaken for active runtime code. Do not replace it with a

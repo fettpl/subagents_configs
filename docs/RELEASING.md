@@ -45,8 +45,16 @@ status`, source inventory, native TOML/YAML-frontmatter/Markdown formats, and
 the fail-closed behavior when a usable isolation backend is absent. Record the
 exact revision and tool versions in the release notes.
 
-Reproducible verification means using the pinned `requirements-dev.txt`, a
-clean checkout, deterministic temporary homes, and the exact commands above.
+Reproducible verification means using the hash-locked `requirements-dev.lock`,
+a clean checkout, deterministic temporary homes, and the canonical validator:
+
+```sh
+python3 scripts/validate-repository.py
+```
+
+The validator performs no installation, download, network access, or
+credential access. Bootstrap a developer environment only with
+`scripts/bootstrap-developer.sh`; runtime wrappers never install packages.
 It does not mean that client behavior, operating-system sandboxing, or
 third-party dependencies are permanently identical.
 
