@@ -28,7 +28,7 @@ from .paths import assert_contained, assert_safe_home, assert_safe_managed_path
 from .planning import PlannedOperation, TargetPlan, TransactionPlan
 from .state import encode_journal
 from .state import load_journal as _load_journal
-from .targets import descriptor_for
+from .targets import descriptor_for, registry_target_order
 
 
 class FailureInjector(Protocol):
@@ -100,7 +100,7 @@ def _journal_path(home: Path) -> Path:
 
 
 def _canonical_participant_order(participants: tuple[Target, ...]) -> None:
-    order = {Target.CODEX: 0, Target.OPENCODE: 1, Target.CLAUDE_CODE: 2}
+    order = {target: index for index, target in enumerate(registry_target_order())}
     if not participants or len(set(participants)) != len(participants):
         raise ValueError("journal participants must be unique")
     if tuple(sorted(participants, key=order.__getitem__)) != participants:
@@ -674,10 +674,7 @@ def _validate_plan(plan: TransactionPlan) -> None:
     seen_targets: set[Target] = set()
     seen_homes: set[Path] = set()
     target_order = {
-        target: index
-        for index, target in enumerate(
-            (Target.CODEX, Target.OPENCODE, Target.CLAUDE_CODE)
-        )
+        target: index for index, target in enumerate(registry_target_order())
     }
     previous_order = -1
     for target_plan in plan.targets:
@@ -1850,7 +1847,7 @@ def _planned_from_journal(descriptor, operation: JournalOperation) -> PlannedOpe
 
 
 def recover_incomplete_journal(home: Path, descriptor) -> None:
-    if descriptor.target not in {Target.CODEX, Target.OPENCODE, Target.CLAUDE_CODE}:
+    if descriptor.target not in set(registry_target_order()):
         raise ValueError("unsupported target descriptor")
     assert_safe_home(home)
     journal = load_journal(home, descriptor)

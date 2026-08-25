@@ -1,7 +1,9 @@
 import ast
+import copy
 import hashlib
 import inspect
 import unittest
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 from subagents_configs.blocks import inspect_managed_block
@@ -47,6 +49,98 @@ class CapabilityRegistryTests(unittest.TestCase):
             targets_for_request((), True),
             (Target.CODEX, Target.OPENCODE, Target.CLAUDE_CODE),
         )
+
+    def test_registry_mutation_drives_participant_order_and_parser_dispatch(self):
+        from unittest.mock import patch
+
+        import subagents_configs.targets as targets_module
+        from subagents_configs import formats, transaction
+        from subagents_configs.targets import registry_target_order
+
+        reordered = tuple(
+            replace(
+                capability,
+                order={
+                    Target.CODEX: 2,
+                    Target.OPENCODE: 0,
+                    Target.CLAUDE_CODE: 1,
+                }[capability.target],
+            )
+            for capability in CAPABILITIES
+        )
+        with patch.object(targets_module, "CAPABILITIES", reordered):
+            self.assertEqual(
+                registry_target_order(),
+                (Target.OPENCODE, Target.CLAUDE_CODE, Target.CODEX),
+            )
+            transaction.canonical_participant_order(
+                (Target.OPENCODE, Target.CLAUDE_CODE, Target.CODEX)
+            )
+            self.assertEqual(formats.parser_for(Target.CODEX), "toml")
+            altered = tuple(
+                replace(capability, parser="yaml-frontmatter")
+                if capability.target is Target.CODEX
+                else capability
+                for capability in reordered
+            )
+            with patch.object(targets_module, "CAPABILITIES", altered):
+                self.assertEqual(formats.parser_for(Target.CODEX), "yaml-frontmatter")
+                with self.assertRaisesRegex(ValueError, "missing opening frontmatter"):
+                    formats.validate_rendered_agent(
+                        Target.CODEX,
+                        "code-explorer",
+                        Path("agents/code-explorer.toml"),
+                        Path("agents/code-explorer.toml").read_bytes(),
+                        str(
+                            Path(__file__).resolve().parents[1]
+                            / "scripts/run-validation-isolated.py"
+                        ),
+                    )
+            validator_altered = tuple(
+                replace(capability, semantic_validator="unsupported")
+                if capability.target is Target.CODEX
+                else capability
+                for capability in reordered
+            )
+            with patch.object(targets_module, "CAPABILITIES", validator_altered):
+                with self.assertRaisesRegex(
+                    ValueError, "unsupported semantic validator"
+                ):
+                    formats.validate_rendered_agent(
+                        Target.CODEX,
+                        "code-explorer",
+                        Path("agents/code-explorer.toml"),
+                        Path("agents/code-explorer.toml").read_bytes(),
+                        str(
+                            Path(__file__).resolve().parents[1]
+                            / "scripts/run-validation-isolated.py"
+                        ),
+                    )
+
+    def test_canonical_role_policy_mutation_rejects_native_divergence(self):
+        import tomllib
+
+        from subagents_configs import formats
+
+        parsed = tomllib.loads(
+            (
+                Path(__file__).resolve().parents[1] / "agents/code-explorer.toml"
+            ).read_text()
+        )
+        original = copy.deepcopy(formats.ROLE_POLICY["codex"])
+        try:
+            formats.ROLE_POLICY["codex"]["code-explorer"]["overlay"]["model"] = (
+                "tampered-model"
+            )
+            with self.assertRaisesRegex(ValueError, "canonical role policy"):
+                formats.validate_agent_semantics(
+                    Target.CODEX,
+                    "code-explorer",
+                    parsed,
+                    "read-only body",
+                )
+        finally:
+            formats.ROLE_POLICY["codex"] = original
         self.assertEqual(
             targets_for_request((Target.CLAUDE_CODE, Target.CODEX), False),
             (Target.CODEX, Target.CLAUDE_CODE),
@@ -163,6 +257,39 @@ class CapabilityRegistryTests(unittest.TestCase):
             FileAction.replace(
                 "role", PurePosixPath("agents/role"), evidence, object(), object()
             )
+
+    def test_block_constructors_reject_forged_or_mismatched_blocks(self):
+        block = inspect_managed_block(
+            b"# BEGIN SUBAGENTS_CONFIGS routing-codex\n"
+            b"body\n# END SUBAGENTS_CONFIGS routing-codex\n",
+            "routing-codex",
+        )
+        self.assertIsNotNone(block)
+        evidence = IdentityEvidence(
+            1, 2, 3, 1, 0o600, hashlib.sha256(b"old\n").hexdigest()
+        )
+        forged = (
+            replace(block, block_id="routing-opencode"),
+            replace(block, begin_marker=b"# BEGIN forged"),
+            replace(block, end_marker=b"# END forged\n"),
+            replace(block, content=b"tampered\n"),
+            replace(block, sha256="0" * 64),
+        )
+        for candidate in forged:
+            with self.assertRaises((TypeError, ValueError)):
+                BlockAction.write(
+                    "routing-codex",
+                    PurePosixPath("AGENTS.md"),
+                    None,
+                    candidate,
+                )
+            with self.assertRaises((TypeError, ValueError)):
+                BlockAction.remove(
+                    "routing-codex",
+                    PurePosixPath("AGENTS.md"),
+                    evidence,
+                    candidate,
+                )
 
     def test_transaction_failure_injector_is_keyword_only(self):
         from subagents_configs.transaction import apply_transaction

@@ -9,7 +9,7 @@ from pathlib import Path
 from .locks import locked_target_homes
 from .models import Journal, JournalOperation, Target
 from .planning import PlannedOperation, TargetPlan
-from .targets import DESCRIPTOR_ORDER, descriptor_for
+from .targets import descriptor_for, registry_target_order
 from .transaction import (
     IncompleteRollbackError,
     backup_bytes,
@@ -267,7 +267,10 @@ def recover_transaction(
     """Recover exactly the requested participant set under canonical locks."""
     if not isinstance(homes, Mapping) or not isinstance(targets, tuple) or not targets:
         raise ValueError("recovery requires participant homes and targets")
-    if tuple(target for target in DESCRIPTOR_ORDER if target in targets) != targets:
+    if (
+        tuple(target for target in registry_target_order() if target in targets)
+        != targets
+    ):
         raise ValueError("recovery targets must use canonical registry order")
     if set(homes) != set(targets):
         raise ValueError("recovery homes must exactly match targets")

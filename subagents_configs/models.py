@@ -218,6 +218,31 @@ class FileAction(LifecycleAction):
         )
 
 
+def _validated_managed_block(identifier: str, block: "ManagedBlock") -> "ManagedBlock":
+    _identifier(identifier)
+    if type(block) is not ManagedBlock:
+        raise TypeError("managed block has the wrong type")
+    begin = f"# BEGIN SUBAGENTS_CONFIGS {identifier}".encode("ascii")
+    end = f"# END SUBAGENTS_CONFIGS {identifier}".encode("ascii")
+    if block.block_id != identifier:
+        raise ValueError("managed block id does not match lifecycle identifier")
+    if block.begin_marker != begin or block.end_marker != end:
+        raise ValueError("managed block markers do not match lifecycle identifier")
+    if type(block.content) is not bytes:
+        raise TypeError("managed block body must be bytes")
+    if b"\r" in block.content or not block.content.endswith(b"\n"):
+        raise ValueError("managed block content must use canonical LF boundaries")
+    if (
+        b"# BEGIN SUBAGENTS_CONFIGS" in block.content
+        or b"# END SUBAGENTS_CONFIGS" in block.content
+    ):
+        raise ValueError("managed block body contains an ambiguous marker")
+    rendered = begin + b"\n" + block.content + end + b"\n"
+    if block.sha256 != hashlib.sha256(rendered).hexdigest():
+        raise ValueError("managed block hash does not match canonical bytes")
+    return block
+
+
 @dataclass(frozen=True, init=False)
 class BlockAction(LifecycleAction):
     action: Literal["write-block", "remove-block"]
@@ -236,8 +261,7 @@ class BlockAction(LifecycleAction):
     ) -> "BlockAction":
         _identifier(identifier)
         _relative_path(relative_path)
-        if not isinstance(block, ManagedBlock):
-            raise TypeError("managed block has the wrong type")
+        block = _validated_managed_block(identifier, block)
         _evidence(expected, required=False)
         item = object.__new__(cls)
         for name, value in (
@@ -261,8 +285,7 @@ class BlockAction(LifecycleAction):
         _identifier(identifier)
         _relative_path(relative_path)
         _evidence(expected, required=True)
-        if not isinstance(block, ManagedBlock):
-            raise TypeError("managed block has the wrong type")
+        block = _validated_managed_block(identifier, block)
         item = object.__new__(cls)
         for name, value in (
             ("action", "remove-block"),

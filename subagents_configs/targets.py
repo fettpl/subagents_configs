@@ -206,7 +206,19 @@ DESCRIPTORS: dict[Target, TargetDescriptor] = {
     capability.target: _descriptor_from_capability(capability)
     for capability in CAPABILITIES
 }
-DESCRIPTOR_ORDER = tuple(capability.target for capability in CAPABILITIES)
+
+
+def registry_target_order() -> tuple[Target, ...]:
+    """Return targets in the order declared by the canonical registry."""
+    ordered = tuple(sorted(CAPABILITIES, key=lambda capability: capability.order))
+    if len({capability.order for capability in ordered}) != len(ordered):
+        raise ValueError("capability registry contains duplicate target orders")
+    if len({capability.target for capability in ordered}) != len(ordered):
+        raise ValueError("capability registry contains duplicate targets")
+    return tuple(capability.target for capability in ordered)
+
+
+DESCRIPTOR_ORDER = registry_target_order()
 
 
 def capability_for(target: Target) -> TargetCapability:
@@ -242,19 +254,16 @@ def targets_for_request(
     if include_all and explicit:
         raise ValueError("--all cannot be combined with explicit targets")
     if include_all:
-        return tuple(
+        selected = {
             capability.target
             for capability in CAPABILITIES
             if capability.include_in_all
-        )
+        }
+        return tuple(target for target in registry_target_order() if target in selected)
     requested = set(explicit)
-    if requested - {capability.target for capability in CAPABILITIES}:
+    if requested - set(registry_target_order()):
         raise ValueError("target request contains an unsupported target")
-    return tuple(
-        capability.target
-        for capability in CAPABILITIES
-        if capability.target in requested
-    )
+    return tuple(target for target in registry_target_order() if target in requested)
 
 
 def descriptor_for(target: Target) -> TargetDescriptor:
