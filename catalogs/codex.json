@@ -1,6 +1,6 @@
 {
   "agent_directory": "agents",
-  "catalog_sha256": "527360b2e6dcbe5b2a5e0fa0264cac98f384c5b737803ab7ec52b52e0c6b7944",
+  "catalog_sha256": "072b9f6c5f7592e0d5de04044de2ff0825ec6f555ef8f2a9cf7e7306b8decb4a",
   "external_lifecycle": null,
   "global_instruction": {
     "block_id": "routing-codex",
@@ -28,7 +28,7 @@
   ],
   "order": 0,
   "parser": "toml",
-  "policy_sha256": "0711ef9333a6930a739ca78c0a1bc9ba9f869980cc2d39460ea676f3e81fdecf",
+  "policy_sha256": "47ce8eb8d5df4c0a1bc2b368c5aa21047dfdea6e6b579a50e26036e59739870a",
   "roles": [
     {
       "contract": {

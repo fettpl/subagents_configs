@@ -598,7 +598,7 @@ class UninstallTests(unittest.TestCase):
                         raise RuntimeError("mid-target failure")
 
         with self.assertRaises(RuntimeError):
-            apply_transaction(plan, FailAfterOneOpenCodeMutation())
+            apply_transaction(plan, failure_injector=FailAfterOneOpenCodeMutation())
         self.assertEqual(codex_target.read_bytes(), codex_before)
         self.assertEqual(opencode_target.read_bytes(), opencode_before)
 
@@ -653,7 +653,7 @@ class UninstallTests(unittest.TestCase):
                     raise RuntimeError("late target failure")
 
         with self.assertRaises(RuntimeError):
-            apply_transaction(plan, FailOpenCode())
+            apply_transaction(plan, failure_injector=FailOpenCode())
         self.assertEqual(codex_file.read_bytes(), codex_before)
         self.assertEqual(opencode_file.read_bytes(), opencode_before)
 

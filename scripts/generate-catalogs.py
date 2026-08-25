@@ -61,20 +61,7 @@ def render_catalog(root: Path, target: Target) -> bytes:
         }
         sources.append(record)
         if spec.kind == "agent":
-            parsed = item.parsed or {}
-            overlay = {
-                key: parsed[key]
-                for key in (
-                    "model",
-                    "model_reasoning_effort",
-                    "mode",
-                    "tools",
-                    "permission",
-                    "permissionMode",
-                    "sandbox_mode",
-                )
-                if key in parsed
-            }
+            overlay = ROLE_POLICY[target.value][spec.identifier]["overlay"]
             roles.append(
                 {
                     "identifier": spec.identifier,
@@ -83,7 +70,14 @@ def render_catalog(root: Path, target: Target) -> bytes:
                     if spec.destination
                     else None,
                     "optional": spec.optional_role is not None,
-                    "contract": ROLE_POLICY[spec.identifier],
+                    "contract": {
+                        "optional": ROLE_POLICY[target.value][spec.identifier][
+                            "optional"
+                        ],
+                        "read_only": ROLE_POLICY[target.value][spec.identifier][
+                            "read_only"
+                        ],
+                    },
                     "overlay": overlay,
                     "policy_sha256": _hash(overlay),
                 }

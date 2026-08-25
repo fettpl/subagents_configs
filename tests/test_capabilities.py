@@ -1,6 +1,8 @@
+import ast
 import hashlib
+import inspect
 import unittest
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from subagents_configs.blocks import inspect_managed_block
 from subagents_configs.models import (
@@ -123,6 +125,88 @@ class CapabilityRegistryTests(unittest.TestCase):
             decode_lifecycle_action({**raw, "unexpected": True})
         with self.assertRaises(ValueError):
             decode_lifecycle_action({k: v for k, v in raw.items() if k != "desired"})
+
+    def test_lifecycle_decoder_exhaustively_handles_block_variants(self):
+        block = {
+            "block_id": "routing-codex",
+            "begin_marker": "IyBCRUdJTiBTVUJBR0VOVFNfQ09ORklHUyByb3V0aW5nLWNvZGV4",
+            "end_marker": (
+                "IyBFTkQgU1VCQUdFTlRTX0NPTkZJR1Mgc m91dGluZy1jb2RleA=="
+            ).replace(" ", ""),
+            "content": "Ym9keQo=",
+            "sha256": hashlib.sha256(
+                b"# BEGIN SUBAGENTS_CONFIGS routing-codex\nbody\n"
+                b"# END SUBAGENTS_CONFIGS routing-codex\n"
+            ).hexdigest(),
+        }
+        base = {
+            "action": "write-block",
+            "identifier": "routing-codex",
+            "relative_path": "AGENTS.md",
+            "expected": None,
+            "block": block,
+        }
+        action = decode_lifecycle_action(base)
+        self.assertEqual(action.action, "write-block")
+        with self.assertRaises(ValueError):
+            decode_lifecycle_action({**base, "block": {**block, "unexpected": True}})
+        with self.assertRaises(ValueError):
+            decode_lifecycle_action(
+                {key: value for key, value in base.items() if key != "block"}
+            )
+
+    def test_lifecycle_replace_rejects_untyped_desired_and_backup(self):
+        evidence = IdentityEvidence(
+            1, 2, 3, 1, 0o600, hashlib.sha256(b"old\n").hexdigest()
+        )
+        with self.assertRaises((TypeError, ValueError)):
+            FileAction.replace(
+                "role", PurePosixPath("agents/role"), evidence, object(), object()
+            )
+
+    def test_transaction_failure_injector_is_keyword_only(self):
+        from subagents_configs.transaction import apply_transaction
+
+        self.assertEqual(
+            inspect.signature(apply_transaction).parameters["failure_injector"].kind,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+
+    def test_consumers_use_registry_and_no_cross_module_private_imports(self):
+        root = Path(__file__).resolve().parents[1] / "subagents_configs"
+        for filename in ("cli.py", "planning.py", "formats.py"):
+            tree = ast.parse((root / filename).read_text(), filename=filename)
+            names = {
+                alias.name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom)
+                for alias in node.names
+            }
+            self.assertNotIn("DESCRIPTOR_ORDER", names, filename)
+        for path in root.glob("*.py"):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and (
+                    node.level > 0
+                    or (node.module and node.module.startswith("subagents_configs."))
+                ):
+                    self.assertFalse(
+                        any(alias.name.startswith("_") for alias in node.names),
+                        str(path),
+                    )
+
+    def test_catalog_projection_has_hashes_and_unique_destinations(self):
+        root = Path(__file__).resolve().parents[1]
+        for target in ("codex", "opencode", "claude-code"):
+            import json
+
+            value = json.loads((root / "catalogs" / f"{target}.json").read_text())
+            self.assertRegex(value["policy_sha256"], r"^[0-9a-f]{64}$")
+            self.assertRegex(value["source_sha256"], r"^[0-9a-f]{64}$")
+            destinations = [
+                item["destination"] for item in value["sources"] if item["destination"]
+            ]
+            self.assertEqual(len(destinations), len(set(destinations)))
 
     def test_named_public_seams_are_importable(self):
         from subagents_configs.filesystem import safe_mutate

@@ -34,14 +34,14 @@ _CLAUDE_HOOK_DESTINATION = (
 )
 
 
-def _agent_sources(target: Target, directory: str, suffix: str) -> list[SourceSpec]:
+def _agent_sources(directory: str, suffix: str, source_format: str) -> list[SourceSpec]:
     return [
         SourceSpec(
             identifier=role,
             source=PurePosixPath(directory) / f"{role}{suffix}",
             destination=PurePosixPath("agents") / f"{role}{suffix}",
             kind="agent",
-            source_format="toml" if target is Target.CODEX else "yaml-frontmatter",
+            source_format=source_format,
             optional_role="commit-pusher" if role == "commit-pusher" else None,
         )
         for role in _ROLES
@@ -62,156 +62,159 @@ def _runtime_sources() -> list[SourceSpec]:
     ]
 
 
-def _descriptor(
-    target: Target,
-    *,
-    environment_variable: str,
-    default_home: str,
-    global_filename: str,
-    config_filename: str | None,
-    agent_directory: str,
-    agent_suffix: str,
-    routing_source: str,
-    template_source: str,
-) -> TargetDescriptor:
+def _capability_sources(capability: TargetCapability) -> tuple[SourceSpec, ...]:
     sources = [
-        *_agent_sources(target, agent_directory, agent_suffix),
+        *_agent_sources(
+            capability.agent_directory.as_posix(),
+            capability.agent_suffix,
+            capability.source_format,
+        ),
         SourceSpec(
             identifier="routing",
-            source=PurePosixPath(routing_source),
+            source=capability.global_instruction.source,
             destination=None,
             kind="routing-source",
             source_format="markdown",
         ),
         SourceSpec(
             identifier="project-template",
-            source=PurePosixPath(template_source),
+            source=capability.project_template,
             destination=None,
             kind="project-template",
             source_format="markdown",
         ),
-        *_runtime_sources(),
+        *capability.runtime_sources,
     ]
-    if target is Target.CLAUDE_CODE:
-        sources.append(
-            SourceSpec(
-                identifier="claude/code-validator-command-gate",
-                source=PurePosixPath(_CLAUDE_HOOK_SOURCE),
-                destination=PurePosixPath(_CLAUDE_HOOK_DESTINATION),
-                kind="command-gate",
-                source_format="python",
-            )
-        )
-    return TargetDescriptor(
-        target=target,
-        environment_variable=environment_variable,
-        default_home=default_home,
-        global_filename=global_filename,
-        config_filename=config_filename,
-        sources=tuple(sources),
-    )
+    return tuple(sources)
 
 
-_DESCRIPTORS: dict[Target, TargetDescriptor] = {
-    Target.CODEX: _descriptor(
-        Target.CODEX,
-        environment_variable="CODEX_HOME",
-        default_home="~/.codex",
-        global_filename="AGENTS.md",
-        config_filename="config.toml",
-        agent_directory="agents",
-        agent_suffix=".toml",
-        routing_source="rules/SUBAGENT_ROUTING.md",
-        template_source="templates/AGENTS.md.template",
-    ),
-    Target.OPENCODE: _descriptor(
-        Target.OPENCODE,
-        environment_variable="OPENCODE_HOME",
-        default_home="~/.config/opencode",
-        global_filename="AGENTS.md",
-        config_filename=None,
-        agent_directory="opencode/agents",
-        agent_suffix=".md",
-        routing_source="rules/OPENCODE_SUBAGENT_ROUTING.md",
-        template_source="templates/opencode/AGENTS.md.template",
-    ),
-    Target.CLAUDE_CODE: _descriptor(
-        Target.CLAUDE_CODE,
-        environment_variable="CLAUDE_CONFIG_DIR",
-        default_home="~/.claude",
-        global_filename="CLAUDE.md",
-        config_filename=None,
-        agent_directory="claude-code/agents",
-        agent_suffix=".md",
-        routing_source="rules/CLAUDE_SUBAGENT_ROUTING.md",
-        template_source="templates/claude-code/CLAUDE.md.template",
-    ),
-}
-
-
-def _capability(descriptor: TargetDescriptor, order: int) -> TargetCapability:
-    agent = next(source for source in descriptor.sources if source.kind == "agent")
-    routing = next(
-        source for source in descriptor.sources if source.kind == "routing-source"
-    )
-    optional_blocks = [
-        ManagedBlockSpec(
-            block_id=f"routing-{descriptor.target.value}",
-            relative_path=PurePosixPath(descriptor.global_filename),
-            source=routing.source,
-        )
-    ]
-    if descriptor.target is Target.CODEX:
-        optional_blocks.append(
-            ManagedBlockSpec(
-                block_id="codex-multi-agent-v2",
-                relative_path=PurePosixPath(
-                    descriptor.config_filename or "config.toml"
-                ),
-            )
-        )
-    runtime = tuple(
-        source
-        for source in descriptor.sources
-        if source.kind in {"validation-runtime", "command-gate", "target-extension"}
-    )
-    return TargetCapability(
-        target=descriptor.target,
-        order=order,
+CAPABILITIES: tuple[TargetCapability, ...] = (
+    TargetCapability(
+        target=Target.CODEX,
+        order=0,
         include_in_all=True,
-        agent_directory=agent.source.parent,
-        source_format=agent.source_format,
-        parser=agent.source_format,
+        agent_directory=PurePosixPath("agents"),
+        source_format="toml",
+        parser="toml",
         semantic_validator="agent",
         global_instruction=GlobalInstructionSpec(
-            optional_blocks[0].block_id,
-            PurePosixPath(descriptor.global_filename),
-            routing.source,
+            "routing-codex",
+            PurePosixPath("AGENTS.md"),
+            PurePosixPath("rules/SUBAGENT_ROUTING.md"),
         ),
-        optional_blocks=tuple(optional_blocks),
-        runtime_sources=runtime,
+        optional_blocks=(
+            ManagedBlockSpec(
+                "routing-codex",
+                PurePosixPath("AGENTS.md"),
+                PurePosixPath("rules/SUBAGENT_ROUTING.md"),
+            ),
+            ManagedBlockSpec("codex-multi-agent-v2", PurePosixPath("config.toml")),
+        ),
+        runtime_sources=tuple(_runtime_sources()),
         lifecycle_capabilities=frozenset({"file", "block", "manifest", "runtime"}),
         external_lifecycle=None,
+        environment_variable="CODEX_HOME",
+        default_home="~/.codex",
+        config_filename="config.toml",
+        project_template=PurePosixPath("templates/AGENTS.md.template"),
+        agent_suffix=".toml",
+    ),
+    TargetCapability(
+        target=Target.OPENCODE,
+        order=1,
+        include_in_all=True,
+        agent_directory=PurePosixPath("opencode/agents"),
+        source_format="yaml-frontmatter",
+        parser="yaml-frontmatter",
+        semantic_validator="agent",
+        global_instruction=GlobalInstructionSpec(
+            "routing-opencode",
+            PurePosixPath("AGENTS.md"),
+            PurePosixPath("rules/OPENCODE_SUBAGENT_ROUTING.md"),
+        ),
+        optional_blocks=(
+            ManagedBlockSpec(
+                "routing-opencode",
+                PurePosixPath("AGENTS.md"),
+                PurePosixPath("rules/OPENCODE_SUBAGENT_ROUTING.md"),
+            ),
+        ),
+        runtime_sources=tuple(_runtime_sources()),
+        lifecycle_capabilities=frozenset({"file", "block", "manifest", "runtime"}),
+        external_lifecycle=None,
+        environment_variable="OPENCODE_HOME",
+        default_home="~/.config/opencode",
+        config_filename=None,
+        project_template=PurePosixPath("templates/opencode/AGENTS.md.template"),
+        agent_suffix=".md",
+    ),
+    TargetCapability(
+        target=Target.CLAUDE_CODE,
+        order=2,
+        include_in_all=True,
+        agent_directory=PurePosixPath("claude-code/agents"),
+        source_format="yaml-frontmatter",
+        parser="yaml-frontmatter",
+        semantic_validator="agent",
+        global_instruction=GlobalInstructionSpec(
+            "routing-claude-code",
+            PurePosixPath("CLAUDE.md"),
+            PurePosixPath("rules/CLAUDE_SUBAGENT_ROUTING.md"),
+        ),
+        optional_blocks=(
+            ManagedBlockSpec(
+                "routing-claude-code",
+                PurePosixPath("CLAUDE.md"),
+                PurePosixPath("rules/CLAUDE_SUBAGENT_ROUTING.md"),
+            ),
+        ),
+        runtime_sources=tuple(
+            [
+                *_runtime_sources(),
+                SourceSpec(
+                    identifier="claude/code-validator-command-gate",
+                    source=PurePosixPath(_CLAUDE_HOOK_SOURCE),
+                    destination=PurePosixPath(_CLAUDE_HOOK_DESTINATION),
+                    kind="command-gate",
+                    source_format="python",
+                ),
+            ]
+        ),
+        lifecycle_capabilities=frozenset({"file", "block", "manifest", "runtime"}),
+        external_lifecycle=None,
+        environment_variable="CLAUDE_CONFIG_DIR",
+        default_home="~/.claude",
+        config_filename=None,
+        project_template=PurePosixPath("templates/claude-code/CLAUDE.md.template"),
+        agent_suffix=".md",
+    ),
+)
+
+
+def _descriptor_from_capability(capability: TargetCapability) -> TargetDescriptor:
+    return TargetDescriptor(
+        target=capability.target,
+        environment_variable=capability.environment_variable,
+        default_home=capability.default_home,
+        global_filename=capability.global_instruction.filename.name,
+        config_filename=capability.config_filename,
+        sources=_capability_sources(capability),
     )
 
 
-CAPABILITIES: tuple[TargetCapability, ...] = tuple(
-    _capability(descriptor, order)
-    for order, descriptor in enumerate(_DESCRIPTORS.values())
-)
-_CAPABILITY_BY_TARGET = {capability.target: capability for capability in CAPABILITIES}
 DESCRIPTORS: dict[Target, TargetDescriptor] = {
-    capability.target: _DESCRIPTORS[capability.target] for capability in CAPABILITIES
+    capability.target: _descriptor_from_capability(capability)
+    for capability in CAPABILITIES
 }
 DESCRIPTOR_ORDER = tuple(capability.target for capability in CAPABILITIES)
 
 
 def capability_for(target: Target) -> TargetCapability:
     """Return the sole canonical capability record for ``target``."""
-    try:
-        return _CAPABILITY_BY_TARGET[target]
-    except (KeyError, TypeError) as exc:
-        raise ValueError(f"unsupported target: {target}") from exc
+    for capability in CAPABILITIES:
+        if capability.target is target:
+            return capability
+    raise ValueError(f"unsupported target: {target}")
 
 
 def parser_for(target: Target) -> str:
@@ -245,7 +248,7 @@ def targets_for_request(
             if capability.include_in_all
         )
     requested = set(explicit)
-    if requested - set(_CAPABILITY_BY_TARGET):
+    if requested - {capability.target for capability in CAPABILITIES}:
         raise ValueError("target request contains an unsupported target")
     return tuple(
         capability.target

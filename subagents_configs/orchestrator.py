@@ -17,15 +17,15 @@ from .planning import (
     preflight_uninstall,
     render_plan,
 )
+from .recovery import recover_transaction
 from .state import load_journal
 from .targets import descriptor_for
 from .transaction import (
     FailureInjector,
     IncompleteRollbackError,
     TransactionError,
-    _recover_participants,
-    _validate_transaction_commitment,
     apply_transaction,
+    validate_transaction_commitment,
 )
 
 EXIT_SUCCESS = 0
@@ -156,7 +156,7 @@ def _journal_groups(
                 raise ValueError(f"missing participant journal for {target.value}")
             group_journals.append(participant)
         ordered = tuple(group_journals)
-        _validate_transaction_commitment(ordered, group_homes)
+        validate_transaction_commitment(ordered, group_homes)
         groups.append((group_homes, ordered))
     return tuple(groups)
 
@@ -177,7 +177,7 @@ def _recover_groups(
     groups: tuple[tuple[dict[Target, Path], tuple[Journal, ...]], ...],
 ) -> None:
     for homes, _journals in groups:
-        _recover_participants(homes)
+        recover_transaction(homes, tuple(homes))
 
 
 def _plan(request: Request, repo_root: Path) -> TransactionPlan:

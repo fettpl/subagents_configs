@@ -144,7 +144,7 @@ class TransactionInstallTests(unittest.TestCase):
             Target.OPENCODE, ordered.index(operation), operation.identifier
         )
         with self.assertRaises(RuntimeError):
-            apply_transaction(plan, _FailBefore(operation_id))
+            apply_transaction(plan, failure_injector=_FailBefore(operation_id))
         for target in (Target.CODEX, Target.OPENCODE):
             home = self._home(target)
             self.assertFalse((home / "agents/code-explorer.toml").exists())
@@ -162,7 +162,7 @@ class TransactionInstallTests(unittest.TestCase):
             def before_operation(self, operation_id):
                 seen.append(operation_id)
 
-        apply_transaction(plan, Recorder())
+        apply_transaction(plan, failure_injector=Recorder())
         expected = []
         for target_plan in plan.targets:
             operations = sorted(
@@ -244,7 +244,7 @@ class TransactionInstallTests(unittest.TestCase):
                 target.chmod(0o644)
 
         with self.assertRaises(transaction.TransactionError):
-            transaction.apply_transaction(plan, ReplaceBeforeApply())
+            transaction.apply_transaction(plan, failure_injector=ReplaceBeforeApply())
 
     def test_noop_reinstall_does_not_rewrite_managed_files_or_create_backups(self):
         from subagents_configs import transaction
@@ -401,7 +401,7 @@ class TransactionInstallTests(unittest.TestCase):
                     raise RuntimeError("manifest failure")
 
         with self.assertRaises(RuntimeError):
-            apply_transaction(second, FailAtManifest())
+            apply_transaction(second, failure_injector=FailAtManifest())
         self.assertEqual(destination.read_bytes(), previous)
 
     def test_block_update_backup_and_uninstall_restore_user_bytes(
@@ -483,7 +483,7 @@ class TransactionInstallTests(unittest.TestCase):
                     raise RuntimeError("manifest failure")
 
         with self.assertRaises(RuntimeError):
-            apply_transaction(second, FailAtManifest())
+            apply_transaction(second, failure_injector=FailAtManifest())
         self.assertEqual(destination.read_bytes(), previous)
 
     def test_install_then_uninstall_applies_and_removes_final_manifest(self):
@@ -540,7 +540,7 @@ class TransactionInstallTests(unittest.TestCase):
                     raise RuntimeError("manifest failure")
 
         with self.assertRaises(RuntimeError):
-            apply_transaction(uninstall, FailAtManifest())
+            apply_transaction(uninstall, failure_injector=FailAtManifest())
         self.assertEqual(
             (home / ".subagents_configs/manifest.json").read_bytes(), before_manifest
         )
@@ -813,7 +813,7 @@ class TransactionInstallTests(unittest.TestCase):
                     raise RuntimeError("manifest failure")
 
         with self.assertRaises(RuntimeError):
-            apply_transaction(uninstall, FailAtManifest())
+            apply_transaction(uninstall, failure_injector=FailAtManifest())
         self.assertEqual(destination.read_bytes(), b"user retained bytes\n")
         self.assertTrue((home / "agents/code-reviewer.toml").exists())
         self.assertFalse((home / ".subagents_configs/journal.json").exists())
@@ -1285,7 +1285,7 @@ class TransactionInstallTests(unittest.TestCase):
 
         plan = self._plan(Target.CODEX)
         with self.assertRaises(KeyboardInterrupt):
-            apply_transaction(plan, StopNow())
+            apply_transaction(plan, failure_injector=StopNow())
         self.assertFalse((self._home() / "agents/code-explorer.toml").exists())
 
     def test_system_exit_with_incomplete_rollback_preserves_primary_type_and_evidence(
@@ -1315,7 +1315,7 @@ class TransactionInstallTests(unittest.TestCase):
                     raise SystemExit("stop now")
 
         with self.assertRaises(SystemExit):
-            apply_transaction(plan, StopAfterDrift())
+            apply_transaction(plan, failure_injector=StopAfterDrift())
         self.assertTrue((self._home() / ".subagents_configs/journal.json").exists())
 
     def test_exact_mapping_coordinator_rejects_participant_disagreement_without_writes(
@@ -1398,7 +1398,7 @@ class TransactionInstallTests(unittest.TestCase):
                     raise RuntimeError("injected later failure")
 
         with self.assertRaises(transaction.IncompleteRollbackError):
-            apply_transaction(plan, DriftThenFail())
+            apply_transaction(plan, failure_injector=DriftThenFail())
         self.assertTrue((self._home() / ".subagents_configs/journal.json").exists())
         backups = list((self._home() / ".subagents_configs/backups").iterdir())
         self.assertTrue(backups)
@@ -1417,7 +1417,7 @@ class TransactionInstallTests(unittest.TestCase):
             transaction, "_sync_and_remove_journal", side_effect=OSError("cleanup")
         ):
             with self.assertRaises(transaction.IncompleteRollbackError) as error:
-                apply_transaction(plan, FailBefore())
+                apply_transaction(plan, failure_injector=FailBefore())
         self.assertEqual(
             str(error.exception),
             "transaction failed and rolled back, but journal cleanup failed",

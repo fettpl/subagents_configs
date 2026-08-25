@@ -1,5 +1,6 @@
 import base64
 import enum
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -130,19 +131,36 @@ class FileAction(LifecycleAction):
         _relative_path(relative_path)
         if action == "create":
             _evidence(expected, required=False)
-            if expected is not None or desired is None or backup is not None:
+            if (
+                ownership != "created"
+                or expected is not None
+                or type(desired) is not DesiredFile
+                or backup is not None
+            ):
                 raise ValueError("create action has invalid evidence or backup")
         elif action == "replace":
             _evidence(expected, required=True)
-            if desired is None or backup is None or backup.sha256 != expected.sha256:
+            if (
+                ownership != "replaced"
+                or type(desired) is not DesiredFile
+                or type(backup) is not BackupSpec
+            ):
+                raise TypeError(
+                    "replace action requires typed desired and backup values"
+                )
+            if backup.sha256 != expected.sha256:
                 raise ValueError("replace action requires matching backup evidence")
         elif action == "remove":
             _evidence(expected, required=True)
-            if desired is not None or backup is not None:
+            if ownership != "created" or desired is not None or backup is not None:
                 raise ValueError("remove action cannot carry desired or backup data")
         elif action == "restore":
             _evidence(expected, required=True)
-            if desired is not None or backup is None:
+            if (
+                ownership != "replaced"
+                or desired is not None
+                or type(backup) is not BackupSpec
+            ):
                 raise ValueError("restore action requires a backup")
         else:
             raise ValueError("unsupported file lifecycle action")
@@ -160,7 +178,7 @@ class FileAction(LifecycleAction):
     def create(
         cls, identifier: str, relative_path: PurePosixPath, desired: DesiredFile
     ) -> "FileAction":
-        if not isinstance(desired, DesiredFile):
+        if type(desired) is not DesiredFile:
             raise TypeError("desired file has the wrong type")
         return cls._make(
             "create", identifier, relative_path, None, desired, None, "created"
@@ -320,6 +338,36 @@ def decode_lifecycle_action(raw: Mapping[str, object]) -> LifecycleAction:
     def expected(value: object) -> IdentityEvidence:
         return _raw_evidence(value, "expected")
 
+    def managed_block(value: object) -> ManagedBlock:
+        if type(value) is not dict or set(value) != {
+            "block_id",
+            "begin_marker",
+            "end_marker",
+            "content",
+            "sha256",
+        }:
+            raise ValueError("invalid managed block fields")
+        block_id = _raw_string(value["block_id"], "block.block_id")
+        try:
+            begin = base64.b64decode(value["begin_marker"], validate=True)
+            end = base64.b64decode(value["end_marker"], validate=True)
+            content = base64.b64decode(value["content"], validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("managed block content is not canonical base64") from exc
+        expected_begin = f"# BEGIN SUBAGENTS_CONFIGS {block_id}".encode("ascii")
+        expected_end = f"# END SUBAGENTS_CONFIGS {block_id}".encode("ascii")
+        if (
+            begin != expected_begin
+            or end != expected_end
+            or not content.endswith(b"\n")
+        ):
+            raise ValueError("managed block markers or content are invalid")
+        rendered = begin + b"\n" + content + end + b"\n"
+        digest = _raw_string(value["sha256"], "block.sha256")
+        if digest != hashlib.sha256(rendered).hexdigest():
+            raise ValueError("managed block hash does not match rendered bytes")
+        return ManagedBlock(block_id, begin, end, content, digest)
+
     if action == "create":
         if set(raw) != {"action", "identifier", "relative_path", "desired"}:
             raise ValueError("invalid create lifecycle fields")
@@ -350,6 +398,22 @@ def decode_lifecycle_action(raw: Mapping[str, object]) -> LifecycleAction:
             raise ValueError("invalid restore lifecycle fields")
         return FileAction.restore(
             identifier, relative_path, expected(raw["expected"]), backup(raw["backup"])
+        )
+    if action == "write-block":
+        if set(raw) != {"action", "identifier", "relative_path", "expected", "block"}:
+            raise ValueError("invalid write-block lifecycle fields")
+        before = None if raw["expected"] is None else expected(raw["expected"])
+        return BlockAction.write(
+            identifier, relative_path, before, managed_block(raw["block"])
+        )
+    if action == "remove-block":
+        if set(raw) != {"action", "identifier", "relative_path", "expected", "block"}:
+            raise ValueError("invalid remove-block lifecycle fields")
+        return BlockAction.remove(
+            identifier,
+            relative_path,
+            expected(raw["expected"]),
+            managed_block(raw["block"]),
         )
     raise ValueError("unsupported lifecycle action")
 
@@ -509,3 +573,8 @@ class TargetCapability:
     runtime_sources: tuple[SourceSpec, ...]
     lifecycle_capabilities: frozenset[LifecycleCapability]
     external_lifecycle: ExternalLifecycleSpec | None
+    environment_variable: str
+    default_home: str
+    config_filename: str | None
+    project_template: PurePosixPath
+    agent_suffix: str

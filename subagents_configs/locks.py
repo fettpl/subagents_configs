@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .models import IdentityEvidence, Target
 from .paths import assert_safe_home, normalized_absolute
-from .targets import DESCRIPTOR_ORDER
+from .targets import targets_for_request
 
 _LOCK_DEPTH: ContextVar[int] = ContextVar("subagents_configs_lock_depth", default=0)
 _LOCK_HOMES: ContextVar[frozenset[Path]] = ContextVar(
@@ -37,7 +37,7 @@ def _validate_target_sequence(homes: Mapping[Target, Path], targets: Sequence[Ta
     requested = tuple(targets)
     if not requested or len(set(requested)) != len(requested):
         raise ValueError("lock targets must be unique")
-    expected = tuple(target for target in DESCRIPTOR_ORDER if target in requested)
+    expected = targets_for_request(requested, False)
     if requested != expected:
         raise ValueError("lock targets are not in descriptor order")
     if any(not isinstance(target, Target) for target in requested):

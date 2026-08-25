@@ -15,22 +15,101 @@ from pathlib import Path
 from . import filesystem
 from .models import SourceSpec, Target
 from .paths import normalized_absolute, strict_relative_path
-from .targets import DESCRIPTORS, selected_sources
+from .targets import CAPABILITIES, descriptor_for, selected_sources
 
 _COMMAND_GATE_SHA256 = (
     "834025bb3af05ef4f6fc3977be9ff81c2c136ea6c9fc213f37aefe83de7ba270"
 )
 
-# One normalized role contract is the input to native per-client overlays.  The
-# parser below still enforces the client-specific fields, while catalogs can
-# hash this table without copying prompt bodies or permission-bearing files.
+# One normalized role contract is the sole semantic source for native overlays.
+# Values are policy metadata, never prompt bodies or private source contents.
+_READ_PERMISSIONS = {
+    "edit": "deny",
+    "bash": "deny",
+    "external_directory": "deny",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "task": "deny",
+    "skill": "deny",
+}
+_VALIDATOR_PERMISSIONS = {
+    "edit": "deny",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "task": "deny",
+    "skill": "deny",
+    "external_directory": {"*": "deny", "{{VALIDATION_HELPER}}": "allow"},
+    "bash": {"*": "deny", "python3 {{VALIDATION_HELPER}} -- *": "allow"},
+}
+_ROLES = (
+    "code-explorer",
+    "code-reviewer",
+    "code-validator",
+    "quick-implementer",
+    "implementer",
+    "commit-pusher",
+)
 ROLE_POLICY = {
-    "code-explorer": {"read_only": True, "optional": False},
-    "code-reviewer": {"read_only": True, "optional": False},
-    "code-validator": {"read_only": True, "optional": False},
-    "quick-implementer": {"read_only": False, "optional": False},
-    "implementer": {"read_only": False, "optional": False},
-    "commit-pusher": {"read_only": False, "optional": True},
+    "codex": {
+        role: {
+            "optional": role == "commit-pusher",
+            "read_only": role in {"code-explorer", "code-reviewer", "code-validator"},
+            "overlay": {
+                "model": "gpt-5.6-sol" if role == "code-reviewer" else "gpt-5.6-luna",
+                "model_reasoning_effort": "medium" if role == "implementer" else "low",
+                **(
+                    {"sandbox_mode": "read-only"}
+                    if role in {"code-explorer", "code-reviewer"}
+                    else {}
+                ),
+            },
+        }
+        for role in _ROLES
+    },
+    "opencode": {
+        role: {
+            "optional": role == "commit-pusher",
+            "read_only": role in {"code-explorer", "code-reviewer", "code-validator"},
+            "overlay": {
+                "model": "openai/gpt-5.6-luna",
+                "mode": "subagent",
+                **(
+                    {"permission": _READ_PERMISSIONS}
+                    if role in {"code-explorer", "code-reviewer"}
+                    else {}
+                ),
+                **(
+                    {"permission": _VALIDATOR_PERMISSIONS}
+                    if role == "code-validator"
+                    else {}
+                ),
+            },
+        }
+        for role in _ROLES
+    },
+    "claude-code": {
+        role: {
+            "optional": role == "commit-pusher",
+            "read_only": role in {"code-explorer", "code-reviewer", "code-validator"},
+            "overlay": {
+                "model": "inherit",
+                "tools": {
+                    "code-explorer": "Read, Grep, Glob",
+                    "code-reviewer": "Read, Grep, Glob",
+                    "code-validator": "Read, Grep, Glob, Bash",
+                    "quick-implementer": "Read, Grep, Glob, Edit, Bash",
+                    "implementer": "Read, Grep, Glob, Edit, Bash",
+                    "commit-pusher": "Read, Grep, Glob, Bash",
+                }[role],
+                **(
+                    {"permissionMode": "plan"}
+                    if role in {"code-explorer", "code-reviewer"}
+                    else {}
+                ),
+            },
+        }
+        for role in _ROLES
+    },
 }
 
 
@@ -471,6 +550,26 @@ def validate_agent_semantics(
         if role != "code-validator" and "hooks" in parsed:
             raise ValueError(f"Claude {role} has an unexpected hook")
 
+    if validation_helper != "{{VALIDATION_HELPER}}":
+        validation_helper = validate_validation_helper(validation_helper)
+    policy = ROLE_POLICY[target.value][role]["overlay"]
+
+    def render_policy(value: object) -> object:
+        if isinstance(value, str):
+            return value.replace("{{VALIDATION_HELPER}}", validation_helper)
+        if isinstance(value, Mapping):
+            return {
+                render_policy(key) if isinstance(key, str) else key: render_policy(item)
+                for key, item in value.items()
+            }
+        return value
+
+    for key, expected in policy.items():
+        if key not in parsed or parsed[key] != render_policy(expected):
+            raise ValueError(
+                f"{target.value} {role} disagrees with canonical role policy"
+            )
+
     unsafe_values = {"workspace-write", "acceptEdits", "bypassPermissions"}
     if any(
         isinstance(value, str) and value in unsafe_values for value in parsed.values()
@@ -637,6 +736,7 @@ def validate_source_inventory(
     destinations: set[str] = set()
     parsed_roles: set[str] = set()
     parsed_by_role: dict[str, Mapping[str, object]] = {}
+    pending_agents: list[tuple[SourceSpec, Mapping[str, object], str]] = []
     result: list[ValidatedSource] = []
     for spec in specs:
         if spec.identifier in seen:
@@ -688,7 +788,7 @@ def validate_source_inventory(
             if isinstance(parsed_role, str):
                 parsed_roles.add(parsed_role)
                 parsed_by_role[parsed_role] = parsed
-            validate_agent_semantics(target, spec.identifier, parsed, body)
+            pending_agents.append((spec, parsed, body))
         elif spec.kind in {"routing-source", "project-template"}:
             if spec.source_format != "markdown":
                 raise ValueError(f"invalid policy format: {spec.source}")
@@ -714,6 +814,8 @@ def validate_source_inventory(
                 parsed=parsed,
             )
         )
+    for spec, parsed, body in pending_agents:
+        validate_agent_semantics(target, spec.identifier, parsed, body)
     if parsed_roles and sum(spec.kind == "agent" for spec in specs) >= 5:
         required_roles = {
             "code-explorer",
@@ -763,7 +865,9 @@ def validate_source_inventory(
 
 def validate_all_catalogs(repo_root: Path) -> None:
     """Validate native agents and policy sources for every active target."""
-    for target, descriptor in DESCRIPTORS.items():
+    for capability in CAPABILITIES:
+        target = capability.target
+        descriptor = descriptor_for(target)
         specs = tuple(
             spec
             for spec in selected_sources(descriptor, include_commit_pusher=True)

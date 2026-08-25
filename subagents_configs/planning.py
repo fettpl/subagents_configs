@@ -41,7 +41,7 @@ from .paths import (
     normalized_absolute,
 )
 from .state import encode_manifest, load_journal, load_manifest
-from .targets import DESCRIPTOR_ORDER, descriptor_for, selected_sources
+from .targets import descriptor_for, selected_sources, targets_for_request
 
 
 @dataclass(frozen=True)
@@ -195,9 +195,7 @@ def _selected_sources(
     repo_root: Path, request: Request
 ) -> dict[Target, tuple[ValidatedSource, ...]]:
     inventories: dict[Target, tuple[ValidatedSource, ...]] = {}
-    for target in DESCRIPTOR_ORDER:
-        if target not in request.targets:
-            continue
+    for target in targets_for_request(request.targets, False):
         descriptor = descriptor_for(target)
         specs = selected_sources(descriptor, request.include_commit_pusher)
         try:
@@ -1148,9 +1146,7 @@ def _validate_request(request: Request, operation: str) -> None:
         raise ValueError("targets must use supported Target values")
     if len(set(request.targets)) != len(request.targets):
         raise ValueError("duplicate targets are not supported")
-    unknown = set(request.targets) - set(DESCRIPTOR_ORDER)
-    if unknown:
-        raise ValueError("unsupported target selection")
+    targets_for_request(request.targets, False)
     if not isinstance(request.homes, Mapping):
         raise ValueError("homes must map every selected target")
     if set(request.homes) != set(request.targets) or any(
@@ -1194,8 +1190,7 @@ def preflight_install(repo_root: Path, request: Request) -> TransactionPlan:
     inventories = _selected_sources(root, request)
     target_plans = tuple(
         _target_install(root, request, target, inventories[target])
-        for target in DESCRIPTOR_ORDER
-        if target in request.targets
+        for target in targets_for_request(request.targets, False)
     )
     return TransactionPlan("install", target_plans)
 
@@ -1206,8 +1201,7 @@ def preflight_uninstall(repo_root: Path, request: Request) -> TransactionPlan:
     inventories = _selected_sources(root, request)
     target_plans = tuple(
         _target_uninstall(root, request, target, inventories[target])
-        for target in DESCRIPTOR_ORDER
-        if target in request.targets
+        for target in targets_for_request(request.targets, False)
     )
     return TransactionPlan("uninstall", target_plans)
 

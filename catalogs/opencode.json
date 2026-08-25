@@ -1,6 +1,6 @@
 {
   "agent_directory": "opencode/agents",
-  "catalog_sha256": "e155377f08cf8ee11c08a17cc8007a0cbba95b83ea42068e22499ed81fde4e33",
+  "catalog_sha256": "463792343bdd0242fa73959ffa68dde27b49b81dae4af26b671c1683b7d9b93c",
   "external_lifecycle": null,
   "global_instruction": {
     "block_id": "routing-opencode",
@@ -23,7 +23,7 @@
   ],
   "order": 1,
   "parser": "yaml-frontmatter",
-  "policy_sha256": "bf7be4de4d31ac70fb798bfc0ba64ad4fe2c3c91fae89da30eeb09052701c567",
+  "policy_sha256": "1867c492ab1d34c1de4e4a7a5d66e694eb4b0ae6d80807087e9f4209e9d847c4",
   "roles": [
     {
       "contract": {
