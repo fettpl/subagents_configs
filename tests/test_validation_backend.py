@@ -158,7 +158,7 @@ class BackendArgumentTests(unittest.TestCase):
                 ("socket", home / "run" / "socket"),
                 ("credential", home / ".ssh" / "id_rsa"),
             )
-            backend = BackendSpec("macos", _system_launcher(), _system_python())
+            backend = BackendSpec("linux", _system_launcher(), _system_python())
             for spelling in spellings:
                 for name, path in protected:
                     encoded = str(path).replace("/", spelling)
@@ -196,15 +196,18 @@ class BackendArgumentTests(unittest.TestCase):
                     validate_command_argv((str(CLT_PYTHON),), worktree, home),
                     (str(CLT_PYTHON),),
                 )
-            build_backend_argv(
-                backend,
-                (str(worktree / "guest.py"),),
-                worktree,
-                temp,
-                _environment(temp),
-            )
+            with patch(
+                "scripts.validation_isolation.backend.render_macos_profile",
+                side_effect=AssertionError("macOS profile unexpectedly required"),
+            ):
+                build_backend_argv(
+                    backend,
+                    (str(worktree / "guest.py"),),
+                    worktree,
+                    temp,
+                    _environment(temp),
+                )
 
-    @unittest.skipUnless(MACOS_RUNTIME_AVAILABLE, "macOS runtime is unavailable")
     def test_macos_profile_rejects_seatbelt_syntax_in_every_path(self):
         from scripts.validation_isolation.backend import render_macos_profile
 
@@ -232,15 +235,23 @@ class BackendArgumentTests(unittest.TestCase):
                         Path("/usr/bin") / unsafe,
                     )
 
-    @unittest.skipUnless(MACOS_RUNTIME_AVAILABLE, "macOS runtime is unavailable")
     def test_macos_profile_denies_network_and_limits_writes(self):
+        from scripts.validation_isolation import backend
         from scripts.validation_isolation.backend import render_macos_profile
 
-        profile = render_macos_profile(
-            Path("/private/tmp/snapshot"),
-            Path("/private/tmp/temp"),
-            _system_python(),
-        )
+        with (
+            patch.object(backend, "_validate_trusted_interpreter"),
+            patch.object(
+                backend,
+                "_validate_system_directory",
+                side_effect=lambda path, label: path,
+            ),
+        ):
+            profile = render_macos_profile(
+                Path("/private/tmp/snapshot"),
+                Path("/private/tmp/temp"),
+                _system_python(),
+            )
         self.assertIn("(deny network*)", profile)
         self.assertIn("/private/tmp/snapshot", profile)
         self.assertIn("/private/tmp/temp", profile)
@@ -254,32 +265,62 @@ class BackendArgumentTests(unittest.TestCase):
             ):
                 self.assertNotIn(f'(subpath "{optional_root}")', profile)
 
-    @unittest.skipUnless(MACOS_RUNTIME_AVAILABLE, "macOS runtime is unavailable")
     def test_macos_profile_allows_exact_command_line_tools_python_root(self):
+        from scripts.validation_isolation import backend
         from scripts.validation_isolation.backend import render_macos_profile
 
-        profile = render_macos_profile(
-            Path("/private/tmp/snapshot"),
-            Path("/private/tmp/temp"),
-            Path("/usr/bin/python3"),
-        )
+        with (
+            patch.object(backend, "_validate_trusted_interpreter"),
+            patch.object(
+                backend,
+                "_validate_system_directory",
+                side_effect=lambda path, label: path,
+            ),
+        ):
+            profile = render_macos_profile(
+                Path("/private/tmp/snapshot"),
+                Path("/private/tmp/temp"),
+                Path("/usr/bin/python3"),
+            )
         self.assertIn(
             '(allow file-read* (subpath "/Library/Developer/CommandLineTools/'
             'Library/Frameworks/Python3.framework"))',
             profile,
         )
 
-    @unittest.skipUnless(
-        MACOS_CLT_AVAILABLE, "macOS CommandLineTools Python is unavailable"
-    )
     def test_macos_profile_allows_only_fixed_command_line_tools_runtime_literals(self):
+        from scripts.validation_isolation import backend
         from scripts.validation_isolation.backend import render_macos_profile
 
-        profile = render_macos_profile(
-            Path("/private/tmp/snapshot"),
-            Path("/private/tmp/temp"),
-            CLT_PYTHON,
-        )
+        urandom = Path("/dev/urandom")
+        original_lstat = backend.os.lstat
+        original_resolve = Path.resolve
+
+        def trusted_urandom(path):
+            if Path(path) == urandom:
+                return original_lstat("/dev/null")
+            return original_lstat(path)
+
+        def canonical_urandom(path, *, strict=False):
+            if path == urandom:
+                return urandom
+            return original_resolve(path, strict=strict)
+
+        with (
+            patch.object(backend, "_validate_trusted_interpreter"),
+            patch.object(
+                backend,
+                "_validate_system_directory",
+                side_effect=lambda path, label: path,
+            ),
+            patch.object(backend.os, "lstat", side_effect=trusted_urandom),
+            patch.object(Path, "resolve", canonical_urandom),
+        ):
+            profile = render_macos_profile(
+                Path("/private/tmp/snapshot"),
+                Path("/private/tmp/temp"),
+                CLT_PYTHON,
+            )
         for literal in (
             "/",
             "/Library",
@@ -303,24 +344,32 @@ class BackendArgumentTests(unittest.TestCase):
         )
         self.assertNotIn("/var/select/developer_dir", profile)
 
-    @unittest.skipUnless(MACOS_RUNTIME_AVAILABLE, "macOS runtime is unavailable")
     def test_macos_profile_does_not_grant_command_line_tools_root_to_other_interpreters(
         self,
     ):
+        from scripts.validation_isolation import backend
         from scripts.validation_isolation.backend import render_macos_profile
 
-        profile = render_macos_profile(
-            Path("/private/tmp/snapshot"),
-            Path("/private/tmp/temp"),
-            Path("/usr/bin/true"),
-        )
+        with (
+            patch.object(backend, "_validate_trusted_interpreter"),
+            patch.object(
+                backend,
+                "_validate_system_directory",
+                side_effect=lambda path, label: path,
+            ),
+        ):
+            profile = render_macos_profile(
+                Path("/private/tmp/snapshot"),
+                Path("/private/tmp/temp"),
+                Path("/usr/bin/true"),
+            )
         self.assertNotIn(
             "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework",
             profile,
         )
 
-    @unittest.skipUnless(MACOS_RUNTIME_AVAILABLE, "macOS runtime is unavailable")
     def test_macos_profile_rejects_custom_home_interpreter_and_broad_reads(self):
+        from scripts.validation_isolation import backend
         from scripts.validation_isolation.backend import render_macos_profile
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -329,11 +378,19 @@ class BackendArgumentTests(unittest.TestCase):
             custom = _executable(root / "home" / "python")
             with self.assertRaises(ValueError):
                 render_macos_profile(root / "snapshot", root / "temp", custom)
-        profile = render_macos_profile(
-            Path("/private/tmp/snapshot"),
-            Path("/private/tmp/temp"),
-            _system_python(),
-        )
+        with (
+            patch.object(backend, "_validate_trusted_interpreter"),
+            patch.object(
+                backend,
+                "_validate_system_directory",
+                side_effect=lambda path, label: path,
+            ),
+        ):
+            profile = render_macos_profile(
+                Path("/private/tmp/snapshot"),
+                Path("/private/tmp/temp"),
+                Path("/usr/bin/true"),
+            )
         for broad in ("/etc", "/Library", "/System", "/Users", "/home"):
             self.assertNotIn(f'(subpath "{broad}")', profile)
 
