@@ -295,6 +295,21 @@ class TransactionPreparationTests(unittest.TestCase):
                 transaction._recover_single(home, descriptor_for(Target.CODEX))
         self.assertEqual(journal_path.read_bytes(), b"attacker journal replacement\n")
 
+    def test_single_recovery_rejects_journal_disappearing_after_initial_capture(self):
+        from subagents_configs.targets import descriptor_for
+
+        home = self.root / "codex-home"
+        plan = preflight_install(
+            self.repository,
+            planning_request("install", {Target.CODEX: home}),
+        )
+        with patch.object(transaction, "_sync_and_remove_journal"):
+            transaction.apply_transaction(plan)
+        with patch.object(transaction, "load_journal", return_value=None):
+            with self.assertRaises(transaction.IncompleteRollbackError) as error:
+                transaction._recover_single(home, descriptor_for(Target.CODEX))
+        self.assertEqual(str(error.exception), "recovery journal disappeared")
+
     def test_participant_recovery_keeps_replacement_after_validation(self):
         homes = {
             Target.CODEX: self.root / "codex-home",

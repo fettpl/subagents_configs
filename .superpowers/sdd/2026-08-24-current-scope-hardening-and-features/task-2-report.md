@@ -141,3 +141,35 @@ Commit: `fix: preserve validated recovery identities and atomic cleanup` (final 
 - Recovery retains the attacker replacement and raises a typed cleanup error; participant cleanup cannot use a post-validation journal identity.
 - The quarantine path is random and descriptor-relative; if detach identity or removal cannot be proved, cleanup restores when safe or leaves evidence in place.
 - No Task 9 strict dry-run, Pi, network, or unrelated behavior was added.
+
+## Fix round 3/5 — recovery journal disappearance fail-closed
+
+Status: complete
+
+Commit: `fix: reject disappearing recovery journals` (final fix-round commit)
+
+### RED / GREEN evidence
+
+- RED journal disappearance:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tests.test_transaction_preparation.TransactionPreparationTests.test_single_recovery_rejects_journal_disappearing_after_initial_capture -v`
+  — failed with `AssertionError: IncompleteRollbackError not raised` before the guard was added.
+- GREEN journal disappearance fix:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tests.test_transaction_preparation.TransactionPreparationTests.test_single_recovery_rejects_journal_disappearing_after_initial_capture -v`
+  — passed with fixed `IncompleteRollbackError("recovery journal disappeared")`.
+- GREEN focused suite:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tests.test_transaction_preparation tests.test_planning tests.test_full_install_matrix tests.test_cli_integration -q`
+  — 80 tests passed.
+- GREEN full discovery:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest discover -s tests -p 'test_*.py' -q`
+  — 388 tests passed.
+- Static checks passed: `.venv/bin/ruff check subagents_configs tests`, `.venv/bin/ruff format --check subagents_configs tests`, and `git diff --check`.
+
+### Requirement mapping and threat-model ruling
+
+- `_recover_single` now distinguishes genuine absence (`initial identity is None`, `load_journal` returns `None`) from disappearance after an initially observed journal. The latter raises the fixed `IncompleteRollbackError("recovery journal disappeared")` and cannot silently skip recovery.
+- The controller ruling records that active non-cooperating same-UID namespace mutation is outside the threat model. Public POSIX/Darwin provides no conditional directory unlink-by-open-inode boundary; the existing descriptor-relative random detach and identity verification remain defense-in-depth. No unsafe rename hop or retained staging artifact was added.
+- All prior lock lifetime, six-field CAS/schema, zero-write preparation, recovery identity, and cleanup contracts remain unchanged.
+
+### Cost / concern
+
+- The actionable code change is deliberately narrow: one fixed recovery guard and one exact regression test. The excluded same-UID race would require a platform-specific conditional directory-unlink primitive or a contract change, neither of which is available or authorized here.

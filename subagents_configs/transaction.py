@@ -1734,6 +1734,8 @@ def _recover_single(home: Path, descriptor) -> None:
     loaded_identity = capture_evidence(journal_path, "recovery journal")
     journal = load_journal(home, descriptor)
     if journal is None:
+        if loaded_identity is not None:
+            raise IncompleteRollbackError("recovery journal disappeared")
         return
     if capture_evidence(journal_path, "recovery journal") != loaded_identity:
         raise IncompleteRollbackError("recovery journal changed during validation")
