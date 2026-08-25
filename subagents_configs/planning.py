@@ -18,7 +18,7 @@ from .blocks import (
     remove_exact_block,
     validate_managed_content,
 )
-from .errors import ValidationBlockedError
+from .errors import TransactionError, ValidationBlockedError
 from .formats import (
     ValidatedSource,
     validate_rendered_agent,
@@ -118,7 +118,10 @@ def _read_regular(
     path: Path, label: str, cache: filesystem.CommandCache | None = None
 ) -> tuple[bytes, int]:
     if cache is not None:
-        return cache.read_regular(path, label)
+        try:
+            return cache.read_cached_regular(path)
+        except TransactionError:
+            return cache.read_regular(path, label)
     result = lstat_existing(path, label)
     if result is None:
         raise FileNotFoundError(path)

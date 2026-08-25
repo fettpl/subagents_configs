@@ -7,6 +7,7 @@ import hashlib
 import os
 import secrets
 import stat
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -127,11 +128,19 @@ def read_bytes_with_evidence(path: Path, label: str) -> tuple[IdentityEvidence, 
 
     descriptor = _open_regular_read(path, label)
     try:
-        content = _read_descriptor_bytes(descriptor)
-        evidence = _evidence_from_descriptor(descriptor, label, known_content=content)
-        return evidence, content
+        return read_descriptor_with_evidence(descriptor, label)
     finally:
         os.close(descriptor)
+
+
+def read_descriptor_with_evidence(
+    descriptor: int, label: str
+) -> tuple[IdentityEvidence, bytes]:
+    """Read one already pinned descriptor and derive complete evidence."""
+
+    content = _read_descriptor_bytes(descriptor)
+    evidence = _evidence_from_descriptor(descriptor, label, known_content=content)
+    return evidence, content
 
 
 @dataclass(frozen=True)
@@ -168,8 +177,13 @@ class CommandCache:
             raise TypeError("cached bytes require a Path and identity evidence")
         if type(content) is not bytes:
             raise TypeError("cached bytes must be bytes")
-        if evidence.size != len(content) or evidence.sha256 != self.hash_bytes(content):
+        digest = self._hashes.get(content)
+        if digest is None:
+            digest = sha256_bytes(content)
+            self._hashes[content] = digest
+        if evidence.size != len(content) or evidence.sha256 != digest:
             raise ValueError("cached bytes disagree with identity evidence")
+        self._hashes[content] = evidence.sha256
         self._bytes[normalized_absolute(path)] = (evidence, content)
         return content
 
@@ -189,7 +203,7 @@ class CommandCache:
         return content
 
     def read_regular(self, path: Path, label: str) -> tuple[bytes, int]:
-        """Read a regular file once while reusing unchanged evidence in scope."""
+        """Read and revalidate a regular file against complete cached evidence."""
 
         key = normalized_absolute(path)
         cached = self._bytes.get(key)
@@ -200,27 +214,32 @@ class CommandCache:
                 raise
             self._bytes[key] = (evidence, content)
             return content, evidence.mode
-        try:
-            current = _metadata_evidence(key, label)
-        except FileNotFoundError:
-            raise
-        if (
-            current.device,
-            current.inode,
-            current.size,
-            current.nlink,
-            current.mode,
-        ) != (
-            cached[0].device,
-            cached[0].inode,
-            cached[0].size,
-            cached[0].nlink,
-            cached[0].mode,
-        ):
-            evidence, content = read_bytes_with_evidence(key, label)
-            self._bytes[key] = (evidence, content)
-            return content, evidence.mode
+        evidence, content = read_bytes_with_evidence(key, label)
+        if evidence != cached[0]:
+            raise TransactionError("cached regular file identity changed")
         return cached[1], cached[0].mode
+
+    def read_cached_regular(self, path: Path) -> tuple[bytes, int]:
+        """Reuse a complete validated immutable buffer within read-only planning."""
+
+        cached = self._bytes.get(normalized_absolute(path))
+        if cached is None:
+            raise TransactionError("cached regular file is unavailable")
+        return cached[1], cached[0].mode
+
+    def read_source(
+        self, path: Path, reader: Callable[[], tuple[IdentityEvidence, bytes]]
+    ) -> bytes:
+        """Read a pinned source once, then reuse its validated immutable buffer."""
+
+        key = normalized_absolute(path)
+        cached = self._bytes.get(key)
+        if cached is None:
+            evidence, content = reader()
+            self._hashes[content] = evidence.sha256
+            self.remember_bytes(key, evidence, content)
+            return content
+        return cached[1]
 
     def hash_bytes(self, content: bytes) -> str:
         if type(content) is not bytes:
@@ -260,7 +279,7 @@ def _evidence_from_descriptor(
             digest.update(chunk)
         sha256 = digest.hexdigest()
     else:
-        sha256 = hashlib.sha256(known_content).hexdigest()
+        sha256 = sha256_bytes(known_content)
     after = os.fstat(descriptor)
     if (
         result.st_dev,
@@ -284,24 +303,6 @@ def _evidence_from_descriptor(
         mode=stat.S_IMODE(result.st_mode),
         sha256=sha256,
     )
-
-
-def _metadata_evidence(path: Path, label: str) -> IdentityEvidence:
-    """Capture identity metadata without rereading bytes already in a cache."""
-
-    descriptor = _open_regular_read(path, label, operation="metadata")
-    try:
-        result = os.fstat(descriptor)
-        return IdentityEvidence(
-            device=result.st_dev,
-            inode=result.st_ino,
-            size=result.st_size,
-            nlink=result.st_nlink,
-            mode=stat.S_IMODE(result.st_mode),
-            sha256="",
-        )
-    finally:
-        os.close(descriptor)
 
 
 def capture_evidence(path: Path, label: str) -> IdentityEvidence | None:
