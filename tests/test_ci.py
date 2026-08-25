@@ -348,9 +348,6 @@ class CiContractTests(unittest.TestCase):
         self.assertIn('exit "$validator_status"', self.text)
         for label, module in (
             ("repository-validation", "tests.test_repository_validation"),
-            ("validation-runner", "tests.test_validation_runner"),
-            ("validation-smoke", "tests.test_validation_smoke"),
-            ("validation-backend", "tests.test_validation_backend"),
             ("ci-contract", "tests.test_ci"),
             ("validation-docs", "tests.test_docs"),
             ("legacy-wrappers", "tests.test_wrappers"),
@@ -358,6 +355,55 @@ class CiContractTests(unittest.TestCase):
         ):
             self.assertIn(f'"{label}"', self.text)
             self.assertIn(module, self.text)
+        for label, selector in (
+            (
+                "backend-selection",
+                "tests.test_validation_backend.BackendSelectionTests",
+            ),
+            ("backend-arguments", "tests.test_validation_backend.BackendArgumentTests"),
+            (
+                "backend-paths",
+                "tests.test_validation_backend.BackendPathValidationTests",
+            ),
+            (
+                "backend-integration",
+                "tests.test_validation_backend.BackendIntegrationTests",
+            ),
+            (
+                "runner-trust",
+                "tests.test_validation_runner.RunnerTests.test_trusted_executable_directories_are_canonical_and_skip_aliases",
+            ),
+            (
+                "runner-process",
+                "tests.test_validation_runner.RunnerTests.test_runs_probe_before_child_and_preserves_argv_boundary",
+            ),
+            (
+                "runner-integrity",
+                "tests.test_validation_runner.RunnerTests.test_requested_launch_rechecks_identity_after_argv_construction",
+            ),
+            (
+                "runner-cleanup",
+                "tests.test_validation_runner.RunnerTests.test_timeout_is_sanitized_and_cleanup_runs",
+            ),
+            (
+                "smoke-inventory",
+                "tests.test_validation_smoke.ValidationInventorySmokeTests",
+            ),
+            (
+                "smoke-cleanup",
+                "tests.test_validation_smoke.ValidationCleanupContractTests",
+            ),
+            (
+                "smoke-runner-cleanup",
+                "tests.test_validation_smoke.RunnerCleanupPrecedenceTests",
+            ),
+            (
+                "smoke-real-backend",
+                "tests.test_validation_smoke.RealValidationSmokeTests",
+            ),
+        ):
+            self.assertIn(f'"{label}"', self.text)
+            self.assertIn(selector, self.text)
         for module in (
             "tests.test_blocks",
             "tests.test_capabilities",

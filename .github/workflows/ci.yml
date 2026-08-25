@@ -150,12 +150,51 @@ jobs:
             }
             run_validation_diagnostic "repository-validation" \
               .venv/bin/python -m unittest tests.test_repository_validation
-            run_validation_diagnostic "validation-runner" \
-              .venv/bin/python -m unittest tests.test_validation_runner
-            run_validation_diagnostic "validation-smoke" \
-              .venv/bin/python -m unittest tests.test_validation_smoke
-            run_validation_diagnostic "validation-backend" \
-              .venv/bin/python -m unittest tests.test_validation_backend
+            run_validation_diagnostic "backend-selection" \
+              .venv/bin/python -m unittest \
+              tests.test_validation_backend.BackendSelectionTests
+            run_validation_diagnostic "backend-arguments" \
+              .venv/bin/python -m unittest \
+              tests.test_validation_backend.BackendArgumentTests
+            run_validation_diagnostic "backend-paths" \
+              .venv/bin/python -m unittest \
+              tests.test_validation_backend.BackendPathValidationTests
+            run_validation_diagnostic "backend-integration" \
+              .venv/bin/python -m unittest \
+              tests.test_validation_backend.BackendIntegrationTests
+            run_validation_diagnostic "runner-trust" \
+              .venv/bin/python -m unittest \
+              tests.test_validation_runner.RunnerTests.test_trusted_executable_directories_are_canonical_and_skip_aliases \
+              tests.test_validation_runner.RunnerTests.test_runner_uses_fixed_system_interpreter_not_current_or_hosted_python \
+              tests.test_validation_runner.RunnerTests.test_runner_rejects_arbitrary_configured_system_interpreter \
+              tests.test_validation_runner.RunnerTests.test_runner_selects_an_absolute_regular_fixed_system_interpreter
+            run_validation_diagnostic "runner-process" \
+              .venv/bin/python -m unittest \
+              tests.test_validation_runner.RunnerTests.test_runs_probe_before_child_and_preserves_argv_boundary \
+              tests.test_validation_runner.RunnerTests.test_child_failure_is_returned_with_bounded_output \
+              tests.test_validation_runner.RunnerTests.test_non_string_child_output_is_blocked_without_payload
+            run_validation_diagnostic "runner-integrity" \
+              .venv/bin/python -m unittest \
+              tests.test_validation_runner.RunnerTests.test_requested_launch_rechecks_identity_after_argv_construction \
+              tests.test_validation_runner.RunnerTests.test_requested_launch_rejects_private_root_replacement \
+              tests.test_validation_runner.RunnerTests.test_source_mutation_is_checked_even_after_child_failure \
+              tests.test_validation_runner.RunnerTests.test_probe_failure_blocks_child
+            run_validation_diagnostic "runner-cleanup" \
+              .venv/bin/python -m unittest \
+              tests.test_validation_runner.RunnerTests.test_timeout_is_sanitized_and_cleanup_runs \
+              tests.test_validation_runner.RunnerTests.test_mutation_error_overrides_child_and_cleanup_error
+            run_validation_diagnostic "smoke-inventory" \
+              .venv/bin/python -m unittest \
+              tests.test_validation_smoke.ValidationInventorySmokeTests
+            run_validation_diagnostic "smoke-cleanup" \
+              .venv/bin/python -m unittest \
+              tests.test_validation_smoke.ValidationCleanupContractTests
+            run_validation_diagnostic "smoke-runner-cleanup" \
+              .venv/bin/python -m unittest \
+              tests.test_validation_smoke.RunnerCleanupPrecedenceTests
+            run_validation_diagnostic "smoke-real-backend" \
+              .venv/bin/python -m unittest \
+              tests.test_validation_smoke.RealValidationSmokeTests
             run_validation_diagnostic "ci-contract" \
               .venv/bin/python -m unittest tests.test_ci
             run_validation_diagnostic "validation-docs" \
