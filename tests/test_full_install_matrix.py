@@ -243,6 +243,9 @@ class FullInstallMatrixTests(unittest.TestCase):
             }:
                 self.assertIsNotNone(source.destination)
                 return source.destination.as_posix()
+        for setting in descriptor.managed_settings:
+            if identifier in {setting.identifier, setting.relative_path.as_posix()}:
+                return setting.relative_path.as_posix()
         aliases = {
             "routing-codex": descriptor.global_filename,
             "routing-opencode": descriptor.global_filename,
@@ -353,6 +356,9 @@ class FullInstallMatrixTests(unittest.TestCase):
             and (include_commit_pusher or source.optional_role != "commit-pusher")
         }
         paths.add(".subagents_configs/manifest.json")
+        paths.update(
+            item.relative_path.as_posix() for item in descriptor.managed_settings
+        )
         return paths
 
     def _expected_default_files(self, target: Target) -> set[str]:
@@ -385,6 +391,15 @@ class FullInstallMatrixTests(unittest.TestCase):
 
     def _assert_exact_inventory(self, home: Path, expected: set[str]) -> None:
         expected = {*expected, ".subagents_configs.lock"}
+        expected_directories = {
+            ".subagents_configs",
+            ".subagents_configs/backups",
+            ".subagents_configs/validation",
+            ".subagents_configs/validation/validation_isolation",
+            "agents",
+        }
+        if (home / ".subagents_configs/claude-hooks").exists():
+            expected_directories.add(".subagents_configs/claude-hooks")
         entries = {
             path.relative_to(home).as_posix(): path.lstat() for path in home.rglob("*")
         }
@@ -410,13 +425,7 @@ class FullInstallMatrixTests(unittest.TestCase):
                 for relative, item in entries.items()
                 if stat.S_ISDIR(item.st_mode)
             },
-            {
-                ".subagents_configs",
-                ".subagents_configs/backups",
-                ".subagents_configs/validation",
-                ".subagents_configs/validation/validation_isolation",
-                "agents",
-            },
+            expected_directories,
         )
         lock = home / ".subagents_configs.lock"
         lock_item = lock.lstat()
@@ -499,10 +508,21 @@ class FullInstallMatrixTests(unittest.TestCase):
                         )
                         if target is Target.CODEX:
                             self.assertFalse((home / "config.toml").exists())
+                        command_gate_paths = {
+                            source.destination.as_posix()
+                            for source in descriptor_for(target).sources
+                            if source.destination is not None
+                            and source.kind == "command-gate"
+                        }
                         for relative in managed:
                             item = home / relative
+                            expected_mode = (
+                                0o700 if relative in command_gate_paths else 0o600
+                            )
                             self.assertEqual(
-                                stat.S_IMODE(item.stat().st_mode), 0o600, relative
+                                stat.S_IMODE(item.stat().st_mode),
+                                expected_mode,
+                                relative,
                             )
                         self.assertEqual(
                             (home / "user-notes.txt").read_bytes(),
@@ -996,6 +1016,10 @@ class FullInstallMatrixTests(unittest.TestCase):
                                             "agents": ("directory", 0o700, None),
                                         }
                                     )
+                                    if target is Target.CLAUDE_CODE:
+                                        expected_after[
+                                            ".subagents_configs/claude-hooks"
+                                        ] = ("directory", 0o700, None)
                                 self.assertEqual(after, expected_after)
                                 actual_backups = {
                                     path
@@ -1497,6 +1521,10 @@ class FullInstallMatrixTests(unittest.TestCase):
                                 "agents": ("directory", 0o700, None),
                             }
                         )
+                        if target is Target.CLAUDE_CODE:
+                            expected_recovery[target][
+                                ".subagents_configs/claude-hooks"
+                            ] = ("directory", 0o700, None)
                         expected_recovery[target].update(
                             {
                                 relative: ("file", mode, content)

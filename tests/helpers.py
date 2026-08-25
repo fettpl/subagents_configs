@@ -73,6 +73,7 @@ def planning_repository(repo_root: Path) -> Path:
         "agents",
         "opencode/agents",
         "claude-code/agents",
+        "claude-code/hooks",
         "rules",
         "templates",
     ):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import tomllib
@@ -138,6 +139,7 @@ def _entry_for_file(
     backup_hash: str | None = None,
     original_mode: int | None = None,
     unresolved_reason: str | None = None,
+    managed_setting_id: str | None = None,
 ) -> ManifestEntry:
     return ManifestEntry(
         identifier=identifier,
@@ -151,6 +153,7 @@ def _entry_for_file(
         managed_block_id=None,
         installed_block_hash=None,
         unresolved_reason=unresolved_reason,
+        managed_setting_id=managed_setting_id,
     )
 
 
@@ -179,6 +182,7 @@ def _entry_for_block(
         managed_block_id=identifier,
         installed_block_hash=block_hash,
         unresolved_reason=unresolved_reason,
+        managed_setting_id=None,
     )
 
 
@@ -197,6 +201,135 @@ def _block_from_file(content: bytes, block_id: str) -> ManagedBlock | None:
     return ManagedBlock(block_id, begin, end, body, _digest(rendered))
 
 
+def _json_pairs(pairs: list[tuple[object, object]]) -> dict[object, object]:
+    result: dict[object, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("unsafe Claude settings")
+        result[key] = value
+    return result
+
+
+def _read_json_settings(
+    path: Path,
+) -> tuple[bytes | None, int | None, dict[str, object]]:
+    try:
+        content, mode = _read_regular(path, "Claude settings")
+    except FileNotFoundError:
+        return None, None, {}
+    try:
+        parsed = json.loads(content.decode("utf-8"), object_pairs_hook=_json_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+        raise ValueError("unsafe Claude settings") from None
+    if type(parsed) is not dict or any(type(key) is not str for key in parsed):
+        raise ValueError("unsafe Claude settings")
+    return content, mode, parsed
+
+
+def _setting_value(setting, home: Path) -> dict[str, object]:
+    value = setting.value
+    if not isinstance(value, dict):
+        raise ValueError("unsafe Claude settings")
+    hook = normalized_absolute(
+        home / ".subagents_configs/claude-hooks/code-validator-pretooluse.py"
+    )
+    rendered = json.loads(
+        json.dumps(value, separators=(",", ":"), ensure_ascii=False).replace(
+            "{{CLAUDE_HOOK}}", str(hook)
+        )
+    )
+    if type(rendered) is not dict:
+        raise ValueError("unsafe Claude settings")
+    return rendered
+
+
+def _plan_claude_command_gate(
+    home: Path,
+    prior: ManifestEntry | None,
+) -> tuple[PlannedOperation | None, ManifestEntry | None]:
+    descriptor = descriptor_for(Target.CLAUDE_CODE)
+    if len(descriptor.managed_settings) != 1:
+        raise ValueError("Claude command gate settings are unavailable")
+    setting = descriptor.managed_settings[0]
+    relative = setting.relative_path.as_posix()
+    destination = _safe_destination(home, relative, setting.identifier)
+    current, current_mode, parsed = _read_json_settings(destination)
+    desired_entry = _setting_value(setting, home)
+    hooks = parsed.get("hooks")
+    if hooks is None:
+        hooks = {}
+        parsed["hooks"] = hooks
+    if type(hooks) is not dict:
+        raise ValueError("unsafe Claude settings")
+    pretool = hooks.get("PreToolUse")
+    if pretool is None:
+        pretool = []
+        hooks["PreToolUse"] = pretool
+    if type(pretool) is not list:
+        raise ValueError("unsafe Claude settings")
+    bash_entries = [
+        item for item in pretool if type(item) is dict and item.get("matcher") == "Bash"
+    ]
+    exact = [item for item in bash_entries if item == desired_entry]
+    if len(bash_entries) != len(exact) or len(exact) > 1:
+        raise ValueError("conflicting Claude command gate setting")
+    if exact:
+        if current is None or current_mode is None:
+            raise ValueError("unsafe Claude settings")
+        if prior is not None and (
+            _digest(current) != prior.installed_hash
+            or current_mode != prior.installed_mode
+        ):
+            raise ValueError("Claude settings changed after install")
+        ownership = prior.ownership if prior is not None else "preexisting"
+        return None, _entry_for_file(
+            setting.identifier,
+            relative,
+            current,
+            current_mode,
+            ownership,
+            managed_setting_id=setting.identifier,
+        )
+    if prior is not None:
+        if current is None:
+            raise ValueError("Claude settings are missing")
+        if (
+            _digest(current) != prior.installed_hash
+            or current_mode != prior.installed_mode
+        ):
+            raise ValueError("Claude settings changed after install")
+        if prior.ownership == "preexisting":
+            raise ValueError("Claude settings conflict with preexisting state")
+    pretool.append(desired_entry)
+    after = (json.dumps(parsed, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    before_hash = _digest(current) if current is not None else None
+    ownership = "created" if current is None else "replaced"
+    operation = _make_file_operation(
+        Target.CLAUDE_CODE,
+        setting.identifier,
+        relative,
+        current,
+        current_mode,
+        after,
+        ownership,
+        backup_required=current is not None,
+    )
+    entry = _entry_for_file(
+        setting.identifier,
+        relative,
+        after,
+        0o600,
+        ownership,
+        backup_path=_backup_name(setting.identifier, before_hash)
+        if current is not None and before_hash is not None
+        else None,
+        backup_hash=before_hash,
+        original_mode=current_mode,
+        managed_setting_id=setting.identifier,
+    )
+    return operation, entry
+
+
 def _selected_sources(
     repo_root: Path, request: Request
 ) -> dict[Target, tuple[ValidatedSource, ...]]:
@@ -207,7 +340,12 @@ def _selected_sources(
         descriptor = descriptor_for(target)
         specs = selected_sources(descriptor, request.include_commit_pusher)
         try:
-            inventories[target] = validate_source_inventory(repo_root, target, specs)
+            inventories[target] = validate_source_inventory(
+                repo_root,
+                target,
+                specs,
+                require_commit_pusher=request.include_commit_pusher,
+            )
         except ValidationBlockedError:
             raise
         except (OSError, RuntimeError, ValueError) as exc:
@@ -268,6 +406,7 @@ def _make_file_operation(
     ownership: Ownership,
     *,
     backup_required: bool,
+    after_mode: int = 0o600,
 ) -> PlannedOperation | None:
     after_hash = _digest(after)
     before_hash = _digest(before) if before is not None else None
@@ -281,7 +420,7 @@ def _make_file_operation(
                 before_hash,
                 after_hash,
                 before_mode,
-                0o600,
+                after_mode,
                 after,
                 ownership,
                 False,
@@ -297,7 +436,7 @@ def _make_file_operation(
         before_hash,
         after_hash,
         before_mode,
-        0o600,
+        after_mode,
         after,
         ownership,
         backup_required,
@@ -324,6 +463,7 @@ def _plan_regular_source(
         conflicts.append(reason)
         return None, ManifestEntry(**{**prior.__dict__, "unresolved_reason": reason})
     proposed = _source_bytes(target, source, home)
+    installed_mode = 0o700 if source.spec.kind == "command-gate" else 0o600
     existing: tuple[bytes, int] | None
     try:
         existing = _read_regular(destination, source.spec.identifier)
@@ -359,12 +499,13 @@ def _plan_regular_source(
             proposed,
             prior.ownership,
             backup_required=True,
+            after_mode=installed_mode,
         )
         return operation, _entry_for_file(
             source.spec.identifier,
             relative,
             proposed,
-            0o600,
+            installed_mode,
             prior.ownership,
             backup_path=prior.backup_path,
             backup_hash=prior.backup_hash,
@@ -384,15 +525,16 @@ def _plan_regular_source(
             proposed,
             "created",
             backup_required=False,
+            after_mode=installed_mode,
         )
         return operation, _entry_for_file(
-            source.spec.identifier, relative, proposed, 0o600, "created"
+            source.spec.identifier, relative, proposed, installed_mode, "created"
         )
     current, current_mode = existing
     current_hash = _digest(current)
     proposed_hash = _digest(proposed)
     if current_hash == proposed_hash:
-        if current_mode & ~0o600:
+        if current_mode & ~installed_mode:
             reason = f"identical preexisting destination has broad mode {relative}"
             conflicts.append(reason)
             return None, None
@@ -412,13 +554,14 @@ def _plan_regular_source(
         proposed,
         "replaced",
         backup_required=True,
+        after_mode=installed_mode,
     )
     backup_path = _backup_name(source.spec.identifier, current_hash)
     return operation, _entry_for_file(
         source.spec.identifier,
         relative,
         proposed,
-        0o600,
+        installed_mode,
         "replaced",
         backup_path=backup_path,
         backup_hash=current_hash,
@@ -773,7 +916,7 @@ def _target_install(
     conflicts: list[str] = []
     for source in inventory:
         if source.spec.destination is None or (
-            source.spec.kind != "agent" and source.spec.kind != "validation-runtime"
+            source.spec.kind not in {"agent", "validation-runtime", "command-gate"}
         ):
             continue
         operation, entry = _plan_regular_source(
@@ -787,6 +930,26 @@ def _target_install(
             operations.append(operation)
         if entry is not None:
             entries[entry.relative_path] = entry
+
+    if target is Target.CLAUDE_CODE:
+        setting_operation, setting_entry = _plan_claude_command_gate(
+            home,
+            next(
+                (
+                    item
+                    for item in prior_manifest.entries
+                    if item.managed_setting_id
+                    == "claude/code-validator-command-gate/settings"
+                ),
+                None,
+            )
+            if prior_manifest is not None
+            else None,
+        )
+        if setting_operation is not None:
+            operations.append(setting_operation)
+        if setting_entry is not None:
+            entries[setting_entry.relative_path] = setting_entry
 
     instruction = _safe_destination(home, descriptor.global_filename, "instructions")
     try:

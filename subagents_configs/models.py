@@ -27,9 +27,25 @@ class SourceSpec:
     identifier: str
     source: PurePosixPath
     destination: PurePosixPath | None
-    kind: Literal["agent", "routing-source", "project-template", "validation-runtime"]
-    source_format: Literal["toml", "yaml-frontmatter", "markdown", "python"]
+    kind: Literal[
+        "agent",
+        "routing-source",
+        "project-template",
+        "validation-runtime",
+        "command-gate",
+    ]
+    source_format: Literal["toml", "yaml-frontmatter", "markdown", "python", "json"]
     optional_role: Literal["commit-pusher"] | None = None
+
+
+@dataclass(frozen=True)
+class ManagedSettingSpec:
+    """A target-owned JSON setting represented as a deterministic path/value."""
+
+    identifier: str
+    relative_path: PurePosixPath
+    key_path: tuple[str, ...]
+    value: object
 
 
 @dataclass(frozen=True)
@@ -40,6 +56,7 @@ class TargetDescriptor:
     global_filename: str
     config_filename: str | None
     sources: tuple[SourceSpec, ...]
+    managed_settings: tuple[ManagedSettingSpec, ...] = ()
 
 
 Ownership = Literal["created", "replaced", "preexisting"]
@@ -58,6 +75,7 @@ class ManifestEntry:
     managed_block_id: str | None
     installed_block_hash: str | None
     unresolved_reason: str | None
+    managed_setting_id: str | None = None
 
 
 @dataclass(frozen=True)

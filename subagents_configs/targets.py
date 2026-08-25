@@ -1,6 +1,6 @@
 from pathlib import PurePosixPath
 
-from .models import SourceSpec, Target, TargetDescriptor
+from .models import ManagedSettingSpec, SourceSpec, Target, TargetDescriptor
 
 _ROLES = (
     "code-explorer",
@@ -20,6 +20,10 @@ _VALIDATION_FILES = (
     "scripts/validation_isolation/backend.py",
     "scripts/validation_isolation/runner.py",
     "scripts/validation_isolation/cli.py",
+)
+_CLAUDE_HOOK_SOURCE = "claude-code/hooks/code-validator-pretooluse.py"
+_CLAUDE_HOOK_DESTINATION = (
+    ".subagents_configs/claude-hooks/code-validator-pretooluse.py"
 )
 
 
@@ -62,6 +66,7 @@ def _descriptor(
     agent_suffix: str,
     routing_source: str,
     template_source: str,
+    managed_settings: tuple[ManagedSettingSpec, ...] = (),
 ) -> TargetDescriptor:
     sources = [
         *_agent_sources(target, agent_directory, agent_suffix),
@@ -81,6 +86,16 @@ def _descriptor(
         ),
         *_runtime_sources(),
     ]
+    if target is Target.CLAUDE_CODE:
+        sources.append(
+            SourceSpec(
+                identifier="claude/code-validator-command-gate",
+                source=PurePosixPath(_CLAUDE_HOOK_SOURCE),
+                destination=PurePosixPath(_CLAUDE_HOOK_DESTINATION),
+                kind="command-gate",
+                source_format="python",
+            )
+        )
     return TargetDescriptor(
         target=target,
         environment_variable=environment_variable,
@@ -88,6 +103,7 @@ def _descriptor(
         global_filename=global_filename,
         config_filename=config_filename,
         sources=tuple(sources),
+        managed_settings=managed_settings,
     )
 
 
@@ -124,6 +140,22 @@ DESCRIPTORS: dict[Target, TargetDescriptor] = {
         agent_suffix=".md",
         routing_source="rules/CLAUDE_SUBAGENT_ROUTING.md",
         template_source="templates/claude-code/CLAUDE.md.template",
+        managed_settings=(
+            ManagedSettingSpec(
+                identifier="claude/code-validator-command-gate/settings",
+                relative_path=PurePosixPath("settings.json"),
+                key_path=("hooks", "PreToolUse"),
+                value={
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "{{CLAUDE_HOOK}}",
+                        }
+                    ],
+                },
+            ),
+        ),
     ),
 }
 

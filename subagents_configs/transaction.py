@@ -266,6 +266,9 @@ def _identifier_relative(descriptor, identifier: str) -> str | None:
             source.destination.as_posix() if source.destination else None,
         }:
             return source.destination.as_posix() if source.destination else None
+    for setting in descriptor.managed_settings:
+        if identifier in {setting.identifier, setting.relative_path.as_posix()}:
+            return setting.relative_path.as_posix()
     global_aliases = {
         descriptor.global_filename: descriptor.global_filename,
     }
@@ -380,7 +383,13 @@ def _validate_operation(target_plan: TargetPlan, operation: PlannedOperation) ->
     if (
         operation.expected_after_mode is not None
         and operation.action not in {"restore", "remove-block"}
-        and operation.expected_after_mode & ~0o600
+        and operation.expected_after_mode
+        & ~(
+            0o700
+            if descriptor_for(target_plan.target).target is Target.CLAUDE_CODE
+            and operation.identifier == "claude/code-validator-command-gate"
+            else 0o600
+        )
     ):
         raise ValueError("managed after-state must be private")
     if (operation.expected_before_hash is None) != (
@@ -518,12 +527,25 @@ def _validate_manifest_linkage(target_plan: TargetPlan) -> None:
                 != entry.relative_path
             ):
                 raise ValueError("manifest block metadata does not match operation")
-            if entry.managed_block_id is not None and operation.content is not None:
-                from .planning import _block_from_file
+            if (
+                entry.managed_setting_id is not None
+                and operation.managed_block_id is not None
+            ):
+                raise ValueError("setting-owned entry cannot also be a block entry")
+        setting_ids = {item.identifier for item in descriptor.managed_settings}
+        if entry.identifier in setting_ids:
+            if entry.managed_setting_id != entry.identifier:
+                raise ValueError("manifest setting metadata does not match operation")
+        if (
+            operation is not None
+            and entry.managed_block_id is not None
+            and operation.content is not None
+        ):
+            from .planning import _block_from_file
 
-                block = _block_from_file(operation.content, entry.managed_block_id)
-                if block is None or block.sha256 != entry.installed_block_hash:
-                    raise ValueError("manifest block hash does not match operation")
+            block = _block_from_file(operation.content, entry.managed_block_id)
+            if block is None or block.sha256 != entry.installed_block_hash:
+                raise ValueError("manifest block hash does not match operation")
         relative = _identifier_relative(descriptor, entry.identifier)
         if relative is None or relative != entry.relative_path:
             raise ValueError("manifest entry path does not match its identifier")

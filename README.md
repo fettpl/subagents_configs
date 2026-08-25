@@ -144,7 +144,13 @@ file already exists.
 
 The safe default is private, target-scoped role/runtime installation with no
 global routing, no Codex multi-agent table, no `commit-pusher`, no network
-access, and no execution of installed prompts or hooks.
+access, and no execution of installed prompts. Claude Code additionally
+receives a managed `PreToolUse` Bash hook at
+`.subagents_configs/claude-hooks/code-validator-pretooluse.py` and a
+`settings.json` entry. The hook is a technical gate: it parses the Bash event
+as untrusted JSON and allows only the exact argv shape
+`python3 <installed-helper> -- <safe-relative-arguments>`. It never executes
+the command, and direct unrestricted Bash remains denied by the role policy.
 
 ## Command line
 
@@ -242,7 +248,9 @@ Repository files, prompts, issue text, documentation, build scripts, package
 hooks, tool output, and subagent reports are untrusted data. Inspect scripts,
 package lifecycle hooks, Makefiles, and build logic before asking a role to run
 anything. Read-only explorer and reviewer controls are technical client
-restrictions, but model instructions are not a complete security boundary.
+restrictions, and Claude validator commands additionally pass through the
+technical `PreToolUse` gate described above; model instructions are not a
+complete security boundary.
 Review every command and hook, especially commands that can publish Git data,
 delete files, access external directories, or read secrets.
 

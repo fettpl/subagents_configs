@@ -69,6 +69,7 @@ _ENTRY_KEYS = {
     "managed_block_id",
     "installed_block_hash",
     "unresolved_reason",
+    "managed_setting_id",
 }
 _JOURNAL_KEYS = {
     "schema_version",
@@ -195,7 +196,7 @@ def _optional_hash(value: object, field: str) -> str | None:
 def _mode(value: object, field: str, *, installed: bool = False) -> int:
     if type(value) is not int or not 0 <= value <= 0o777:
         raise ValueError(f"{field} must be an integer mode from 000 through 777")
-    if installed and value & ~0o600:
+    if installed and value & ~0o700:
         raise ValueError("installed_mode must not grant group or other access")
     return value
 
@@ -249,6 +250,10 @@ def _supported_identifiers(descriptor: TargetDescriptor) -> dict[str, str]:
             destination = descriptor.config_filename
         add(block_id, destination, block_id)
         add(destination, destination, block_id)
+    for setting in descriptor.managed_settings:
+        destination = setting.relative_path.as_posix()
+        add(setting.identifier, destination, setting.identifier)
+        add(destination, destination, setting.identifier)
     return identifiers
 
 
@@ -322,7 +327,19 @@ def _entry(
     *,
     verify_backups: bool = True,
 ) -> ManifestEntry:
-    value = _dict(raw, _ENTRY_KEYS, "manifest entry")
+    # Existing schema-v2 entries predate the optional setting-owner marker;
+    # accept that one omitted field while remaining strict about every other
+    # key.  New setting-owned entries always carry the marker.
+    expected_entry_keys = _ENTRY_KEYS - {"managed_setting_id"}
+    if type(raw) is not dict:
+        raise ValueError("manifest entry must be an object")
+    actual_entry_keys = set(raw)
+    if actual_entry_keys not in (
+        expected_entry_keys,
+        expected_entry_keys | {"managed_setting_id"},
+    ):
+        raise ValueError("invalid manifest entry fields")
+    value = raw
     identifiers = _supported_identifiers(descriptor)
     identifier = _string(value["identifier"], "identifier")
     if identifier not in identifiers:
@@ -331,7 +348,11 @@ def _entry(
     if relative_path != identifiers[identifier]:
         raise ValueError("relative_path does not match managed identifier")
     installed_hash = _hash(value["installed_hash"], "installed_hash")
-    installed_mode = _mode(value["installed_mode"], "installed_mode", installed=True)
+    installed_mode = _mode(
+        value["installed_mode"],
+        "installed_mode",
+        installed=identifier != "claude/code-validator-command-gate",
+    )
     ownership = value["ownership"]
     if type(ownership) is not str or ownership not in _OWNERSHIPS:
         raise ValueError("invalid ownership")
@@ -342,6 +363,22 @@ def _entry(
             raise ValueError("unsupported managed block id")
         if identifier != managed_block_id:
             raise ValueError("managed block id does not match identifier")
+    managed_setting_id = value.get("managed_setting_id")
+    setting_identifiers = {item.identifier for item in descriptor.managed_settings}
+    setting_paths = {
+        item.relative_path.as_posix() for item in descriptor.managed_settings
+    }
+    if identifier in setting_paths and identifier not in setting_identifiers:
+        raise ValueError("settings path is not a managed setting identifier")
+    if identifier in setting_identifiers and managed_setting_id != identifier:
+        raise ValueError("setting-owned entry is missing managed setting id")
+    if managed_setting_id is not None:
+        managed_setting_id = _string(managed_setting_id, "managed_setting_id")
+        settings = {item.identifier for item in descriptor.managed_settings}
+        if managed_setting_id not in settings or identifier != managed_setting_id:
+            raise ValueError("managed setting id does not match identifier")
+        if managed_block_id is not None:
+            raise ValueError("entry cannot be both block and setting owned")
     backup_path, backup_hash = _backup(
         home,
         value["backup_path"],
@@ -383,6 +420,7 @@ def _entry(
         managed_block_id=managed_block_id,
         installed_block_hash=installed_block_hash,
         unresolved_reason=unresolved_reason,
+        managed_setting_id=managed_setting_id,
     )
 
 
@@ -439,6 +477,12 @@ def _operation(
     allowed = _supported_identifiers(descriptor)
     if identifier != "state/manifest" and identifier not in allowed:
         raise ValueError("journal identifier is not managed")
+    setting_paths = {
+        item.relative_path.as_posix() for item in descriptor.managed_settings
+    }
+    setting_identifiers = {item.identifier for item in descriptor.managed_settings}
+    if identifier in setting_paths and identifier not in setting_identifiers:
+        raise ValueError("settings path is not a managed setting identifier")
     action = value["action"]
     if type(action) is not str or action not in _ACTIONS:
         raise ValueError("invalid journal action")
@@ -547,7 +591,10 @@ def _operation(
     if requires_reverse_backup and backup_hash != before_hash:
         raise ValueError("backup hash must match expected-before hash")
     if action in {"create", "replace", "write-block", "write-manifest"}:
-        if after_mode is not None and after_mode & ~0o600:
+        allowed_installed_mode = (
+            0o700 if identifier == "claude/code-validator-command-gate" else 0o600
+        )
+        if after_mode is not None and after_mode & ~allowed_installed_mode:
             raise ValueError(
                 "installed journal mode must not grant group or other access"
             )
@@ -645,7 +692,7 @@ def _decode_journal(
 
 
 def _entry_json(entry: ManifestEntry) -> dict[str, object]:
-    return {
+    value = {
         "identifier": entry.identifier,
         "relative_path": entry.relative_path,
         "installed_hash": entry.installed_hash,
@@ -658,6 +705,9 @@ def _entry_json(entry: ManifestEntry) -> dict[str, object]:
         "installed_block_hash": entry.installed_block_hash,
         "unresolved_reason": entry.unresolved_reason,
     }
+    if entry.managed_setting_id is not None:
+        value["managed_setting_id"] = entry.managed_setting_id
+    return value
 
 
 def encode_manifest(manifest: Manifest) -> bytes:
@@ -842,10 +892,24 @@ def _runtime_files(descriptor: TargetDescriptor) -> set[tuple[str, ...]]:
     return files
 
 
+def _command_gate_files(descriptor: TargetDescriptor) -> set[tuple[str, ...]]:
+    files: set[tuple[str, ...]] = set()
+    for source in descriptor.sources:
+        if source.kind != "command-gate" or source.destination is None:
+            continue
+        parts = source.destination.parts
+        if len(parts) < 3 or parts[:2] != (".subagents_configs", "claude-hooks"):
+            raise ValueError("command gate destination is outside state")
+        files.add(tuple(parts[2:]))
+    return files
+
+
 def _inventory_runtime_fd(
     directory_fd: int,
     relative: tuple[str, ...],
     allowed_files: set[tuple[str, ...]],
+    *,
+    executable: bool = False,
 ) -> None:
     for name in _fd_names(directory_fd, "validation directory"):
         candidate = (*relative, name)
@@ -855,7 +919,8 @@ def _inventory_runtime_fd(
         if candidate in allowed_files:
             if not stat.S_ISREG(result.st_mode):
                 raise ValueError("validation runtime file must be regular")
-            if stat.S_IMODE(result.st_mode) & ~0o600:
+            permitted = 0o700 if executable else 0o600
+            if stat.S_IMODE(result.st_mode) & ~permitted:
                 raise ValueError("validation runtime file must be private")
             continue
         if any(path[: len(candidate)] == candidate for path in allowed_files):
@@ -865,7 +930,9 @@ def _inventory_runtime_fd(
                 directory_fd, name, "validation runtime directory"
             )
             try:
-                _inventory_runtime_fd(child_fd, candidate, allowed_files)
+                _inventory_runtime_fd(
+                    child_fd, candidate, allowed_files, executable=executable
+                )
             finally:
                 os.close(child_fd)
             continue
@@ -876,9 +943,16 @@ def _inventory_state_fd(
     state_fd: int, state_dir: Path, descriptor: TargetDescriptor
 ) -> None:
     allowed_runtime = _runtime_files(descriptor)
+    allowed_command_gates = _command_gate_files(descriptor)
     filesystem._after_parent_pin("state-inventory", state_dir)
     names = set(_fd_names(state_fd, "state directory"))
-    allowed = {"manifest.json", "journal.json", "backups", "validation"}
+    allowed = {
+        "manifest.json",
+        "journal.json",
+        "backups",
+        "validation",
+        "claude-hooks",
+    }
     unknown = names - allowed
     if unknown:
         raise ValueError(f"unknown state entries: {sorted(unknown)}")
@@ -904,6 +978,16 @@ def _inventory_state_fd(
             _inventory_runtime_fd(validation_fd, tuple(), allowed_runtime)
         finally:
             os.close(validation_fd)
+    if "claude-hooks" in names:
+        hooks_fd = _open_private_directory(
+            state_fd, "claude-hooks", "command gate directory"
+        )
+        try:
+            _inventory_runtime_fd(
+                hooks_fd, tuple(), allowed_command_gates, executable=True
+            )
+        finally:
+            os.close(hooks_fd)
 
 
 def _read_state_files(
@@ -933,7 +1017,7 @@ def _read_state_files(
     if (
         result["manifest.json"] is None
         and result["journal.json"] is None
-        and not state_names.intersection({"backups", "validation"})
+        and not state_names.intersection({"backups", "validation", "claude-hooks"})
     ):
         raise ValueError("unknown or unsafe .subagents_configs state")
     return result
