@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -134,37 +135,67 @@ class RunnerTests(unittest.TestCase):
                     )
             self.assertNotIn("SECRET", str(raised.exception))
 
-    def test_runner_passes_raw_sys_executable_to_trust_validation(self):
+    def test_runner_uses_fixed_system_interpreter_not_current_or_hosted_python(self):
         from scripts.validation_isolation import runner
 
         with trusted_parent_tempdir() as temporary:
             root = Path(temporary).resolve()
             repository = make_repository(root)
-            real = root / "trusted-python"
-            real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            real.chmod(0o755)
-            link = root / "python-link"
-            link.symlink_to(real)
+            hosted = root / "toolcache-python"
+            hosted.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            hosted.chmod(0o755)
+            fixed = _system_python()
             with (
-                patch.object(runner.sys, "executable", str(link)),
+                patch.object(runner.sys, "executable", str(hosted)),
+                patch.object(runner, "_trusted_system_interpreter", return_value=fixed),
                 patch.object(
                     runner,
                     "build_child_environment",
                     return_value={"PATH": "/usr/bin"},
                 ),
                 patch.object(runner, "probe_backend"),
+                patch.object(runner, "build_backend_argv", return_value=("sandbox",)),
                 patch.object(
                     runner,
                     "select_backend",
-                    wraps=__import__(
-                        "scripts.validation_isolation.backend",
-                        fromlist=["select_backend"],
-                    ).select_backend,
+                    return_value=type(
+                        "Backend",
+                        (),
+                        {
+                            "name": "macos",
+                            "launcher": _system_launcher(),
+                            "python_executable": fixed,
+                        },
+                    )(),
                 ) as select,
             ):
-                with self.assertRaisesRegex(ValueError, "canonical|symlink"):
-                    runner.run_isolated(("false",), repository, "darwin")
-            self.assertEqual(select.call_args.args[3], link)
+                runner.run_isolated(
+                    ("false",),
+                    repository,
+                    sys.platform,
+                    lambda argv, cwd, env, timeout: subprocess.CompletedProcess(
+                        argv, 0, "", ""
+                    ),
+                )
+            self.assertEqual(select.call_args.args[3], fixed)
+            self.assertNotEqual(select.call_args.args[3], hosted)
+
+    def test_runner_rejects_arbitrary_configured_system_interpreter(self):
+        from scripts.validation_isolation import runner
+
+        with self.assertRaisesRegex(ValueError, "approved|interpreter"):
+            runner._trusted_system_interpreter(
+                sys.platform, str(Path.cwd() / "hosted-python")
+            )
+
+    def test_runner_selects_an_absolute_regular_fixed_system_interpreter(self):
+        from scripts.validation_isolation import runner
+
+        selected = runner._trusted_system_interpreter(sys.platform, None)
+        self.assertTrue(selected.is_absolute())
+        self.assertEqual(selected, selected.resolve(strict=True))
+        self.assertTrue(selected.is_file())
+        self.assertNotEqual(selected, Path(sys.executable))
 
     def test_requested_launch_rechecks_identity_after_argv_construction(self):
         from scripts.validation_isolation import backend as backend_module

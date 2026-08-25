@@ -75,6 +75,29 @@ class CiContractTests(unittest.TestCase):
         sanitized_lower = sanitized.lower()
         if provisioning_count != 1:
             violations.append("unsafe Ubuntu bubblewrap provisioning")
+        setup_positions = [
+            index
+            for index, line in enumerate(text.splitlines())
+            if line.startswith("      - uses: actions/setup-python@")
+        ]
+        bootstrap_positions = [
+            index
+            for index, line in enumerate(text.splitlines())
+            if line == "      - name: Bootstrap developer environment"
+        ]
+        if (
+            len(setup_positions) != 1
+            or len(bootstrap_positions) != 1
+            or setup_positions[0] > bootstrap_positions[0]
+        ):
+            violations.append("unsafe setup/bootstrap ordering")
+        if text.count("scripts/bootstrap-developer.sh") != 1:
+            violations.append("bootstrap mechanism count")
+        if re.search(
+            r"(?m)^\s*(?:run:\s*)?(?:(?:python3?|\.venv/bin/python)\s+-m\s+)?pip\s+install\b",
+            text,
+        ):
+            violations.append("direct workflow dependency install")
         if "contents: write" in lower:
             violations.append("write permission")
         if "persist-credentials: true" in lower:
@@ -127,7 +150,8 @@ class CiContractTests(unittest.TestCase):
             if "strategy" in job
         )
         self.assertEqual(
-            {str(version) for version in matrix["python-version"]}, {"3.11", "3.14"}
+            {str(version) for version in matrix["python-version"]},
+            {"3.11", "3.12", "3.13", "3.14"},
         )
         setup = next(
             step
@@ -147,6 +171,55 @@ class CiContractTests(unittest.TestCase):
             self.assertRegex(self.text, rf"\b{variable}=")
         self.assertIn("mktemp -d", self.text)
         self.assertIn("umask 077", self.text)
+
+    def test_private_cache_environment_is_provisioned_before_setup_and_install(self):
+        names = [step.get("name", "") for step in self.steps]
+        private_index = names.index("Provision private CI paths")
+        setup_index = next(
+            index
+            for index, step in enumerate(self.steps)
+            if step.get("uses", "").startswith("actions/setup-python@")
+        )
+        install_index = names.index("Bootstrap developer environment")
+        self.assertLess(private_index, setup_index)
+        self.assertLess(private_index, install_index)
+        private_step = self.steps[private_index]["run"]
+        for path in (
+            "HOME=",
+            "XDG_CACHE_HOME=",
+            "XDG_CONFIG_HOME=",
+            "PYTHONPYCACHEPREFIX=",
+            "RUFF_CACHE_DIR=",
+        ):
+            self.assertIn(path, private_step)
+        self.assertIn('chmod 700 "$ci_root"', private_step)
+
+    def test_ci_bootstraps_copy_owned_venv_before_hash_install_and_validation(self):
+        bootstrap_steps = [
+            step
+            for step in self.steps
+            if step.get("name") == "Bootstrap developer environment"
+        ]
+        self.assertEqual(len(bootstrap_steps), 1)
+        bootstrap_index = self.steps.index(bootstrap_steps[0])
+        self.assertIn("scripts/bootstrap-developer.sh", bootstrap_steps[0]["run"])
+        self.assertNotIn("pip install", bootstrap_steps[0]["run"])
+
+        validator_steps = [
+            step
+            for step in self.steps
+            if step.get("name") == "Run isolated repository checks"
+        ]
+        self.assertEqual(len(validator_steps), 1)
+        validator_index = self.steps.index(validator_steps[0])
+        self.assertGreater(validator_index, bootstrap_index)
+        self.assertIn(
+            ".venv/bin/python scripts/validate-repository.py",
+            validator_steps[0]["run"],
+        )
+        self.assertNotIn(
+            "\npython scripts/validate-repository.py", validator_steps[0]["run"]
+        )
 
     def test_runner_matrix_is_pinned_to_supported_images(self):
         matrix = next(
@@ -215,9 +288,7 @@ class CiContractTests(unittest.TestCase):
         )
 
     def test_ci_uses_only_pinned_dependencies_existing_tools_and_local_checks(self):
-        self.assertIn(
-            "python -m pip install --requirement requirements-dev.txt", self.text
-        )
+        self.assertIn("scripts/bootstrap-developer.sh", self.text)
         self.assertNotRegex(self.text.lower(), r"\b(?:brew|apk|yum|dnf)\b")
         self.assertIn("sudo apt-get update", self.text)
         self.assertIn(
@@ -234,14 +305,10 @@ class CiContractTests(unittest.TestCase):
             self.text, r"(?:test|if)\s+.*(?:-x|command -v).*(?:bwrap|shellcheck)"
         )
         for command in (
-            "scripts/validate-catalogs.py",
-            "tests.test_validation_backend.BackendIntegrationTests",
-            "unittest discover -s tests -p 'test_*.py'",
-            "ruff check claude-code subagents_configs scripts tests",
-            "ruff format --check claude-code subagents_configs scripts tests",
+            "scripts/validate-repository.py",
             "shellcheck",
-            "compileall -q claude-code subagents_configs scripts tests",
-            "git diff --check",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "PYTHONPYCACHEPREFIX",
         ):
             self.assertIn(command, self.text)
         self.assertIn("install.sh", self.text)
@@ -261,6 +328,9 @@ class CiContractTests(unittest.TestCase):
         self.assertNotRegex(self.text.lower(), r"pip[^\n]*(?:bwrap|shellcheck)|wget")
 
     def test_equivalent_unittest_discovery_is_not_repeated(self):
+        self.assertEqual(
+            self.text.count(".venv/bin/python scripts/validate-repository.py"), 1
+        )
         self.assertEqual(
             self.text.count("python -m unittest discover -s tests -p 'test_*.py'"), 1
         )
@@ -380,26 +450,34 @@ class CiContractTests(unittest.TestCase):
         )
 
     def test_checkout_cleanliness_is_enforced_fail_closed(self):
-        self.assertRegex(
-            self.text,
-            r'if\s+test\s+-n\s+"\$checkout_status";\s+then',
+        validator = (ROOT / "scripts" / "validate-repository.py").read_text(
+            encoding="utf-8"
         )
-        self.assertRegex(
-            self.text,
-            r"git status --short[\s\S]*?exit 1",
+        self.assertIn('(git, "status", "--short")', validator)
+        self.assertIn(
+            'label == "clean checkout" and result.stdout.byte_count', validator
         )
+        self.assertIn('_diagnostic(label, "dirty"', validator)
 
     def test_checkout_status_errors_fail_closed(self):
-        self.assertRegex(
-            self.text,
-            r'if\s+!\s+checkout_status="\$\(git status --short\)";\s+then',
+        validator = (ROOT / "scripts" / "validate-repository.py").read_text(
+            encoding="utf-8"
         )
-        self.assertRegex(
-            self.text,
-            r'checkout_status="\$\(git status --short\)"[\s\S]*?exit 1',
-        )
+        self.assertIn("except OSError:", validator)
+        self.assertIn('_diagnostic(label, "dirty"', validator)
 
     def test_negative_ci_mutations_trigger_contract_guards(self):
+        setup_marker = next(
+            line
+            for line in self.text.splitlines()
+            if line.startswith("      - uses: actions/setup-python@")
+        )
+        bootstrap_marker = "      - name: Bootstrap developer environment"
+        swapped_setup_bootstrap = (
+            self.text.replace(setup_marker, "__SETUP_MARKER__", 1)
+            .replace(bootstrap_marker, setup_marker, 1)
+            .replace("__SETUP_MARKER__", bootstrap_marker, 1)
+        )
         mutations = (
             self.text.replace("contents: read", "contents: write", 1),
             self.text.replace(
@@ -412,10 +490,17 @@ class CiContractTests(unittest.TestCase):
             ),
             self.text.replace("8#$tool_mode & 8#022", "8#$tool_mode & 8#000", 1),
             self.text.replace(
-                "python -m pip install --requirement requirements-dev.txt",
+                "scripts/bootstrap-developer.sh",
                 "python -m pip install bwrap",
                 1,
             ),
+            swapped_setup_bootstrap,
+            f"{self.text}\n"
+            "      - name: duplicate dependency install\n"
+            "        run: python -m pip install requirements-dev.lock\n",
+            f"{self.text}\n"
+            "      - name: bare dependency install\n"
+            "        run: pip install requests\n",
             f"{self.text}\nrun: sudo true\n",
             f"{self.text}\nrun: apt-get install shellcheck\n",
             f"{self.text}\nrun: brew install shellcheck\n",

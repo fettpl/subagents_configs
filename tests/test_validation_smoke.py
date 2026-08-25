@@ -218,12 +218,40 @@ class RunnerCleanupPrecedenceTests(unittest.TestCase):
 
 
 class RealValidationSmokeTests(unittest.TestCase):
+    def test_optional_mode_skips_before_backend_selection(self):
+        with (
+            patch.dict(os.environ, {"VALIDATION_SMOKE_MODE": "optional"}),
+            patch.object(
+                sys.modules[__name__],
+                "_fixed_backend_path",
+                return_value=Path("/usr/bin/bwrap"),
+            ),
+            patch(
+                "scripts.validation_isolation.runner.run_isolated",
+                side_effect=AssertionError("backend must not run in optional mode"),
+            ),
+        ):
+            with self.assertRaises(unittest.SkipTest):
+                self.test_fixed_backend_enforces_smoke_properties_with_real_probe_evidence()
+
+    def test_required_mode_does_not_skip_missing_backend(self):
+        with (
+            patch.dict(os.environ, {"VALIDATION_SMOKE_MODE": "required"}),
+            patch.object(
+                sys.modules[__name__], "_fixed_backend_path", return_value=None
+            ),
+        ):
+            with self.assertRaises(AssertionError):
+                self.test_fixed_backend_enforces_smoke_properties_with_real_probe_evidence()
+
     def test_fixed_backend_enforces_smoke_properties_with_real_probe_evidence(self):
         mode = os.environ.get("VALIDATION_SMOKE_MODE", "optional")
+        if mode == "optional":
+            self.skipTest(
+                "optional smoke mode is covered by the canonical backend gate"
+            )
         backend_path = _fixed_backend_path()
         if backend_path is None:
-            if mode == "optional":
-                self.skipTest("fixed validation backend is unavailable")
             self.fail("required fixed validation backend is unavailable")
         with tempfile.TemporaryDirectory() as temporary:
             repository = make_repository(Path(temporary))
@@ -258,9 +286,7 @@ class RealValidationSmokeTests(unittest.TestCase):
                     str(interpreter),
                 ):
                     result = run_isolated(smoke_command, repository, sys.platform)
-            except (OSError, RuntimeError, ValueError) as exc:
-                if os.environ.get("VALIDATION_SMOKE_MODE", "optional") == "optional":
-                    self.skipTest(f"fixed backend cannot execute in this host: {exc}")
+            except (OSError, RuntimeError, ValueError):
                 raise
             self.assertEqual(result.returncode, 23)
             self.assertLessEqual(len(result.stdout), 8192)
