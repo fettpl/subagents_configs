@@ -12,6 +12,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from subagents_configs import orchestrator
+from subagents_configs.diagnostics import (
+    Diagnostic,
+    DiagnosticCode,
+    SafeContext,
+    render_diagnostic,
+)
 from subagents_configs.locks import locked_target_homes
 from subagents_configs.models import Journal, JournalOperation, Target
 from subagents_configs.planning import (
@@ -35,6 +41,28 @@ COMBINATIONS = tuple(
     for size in range(1, len(TARGETS) + 1)
     for combination in itertools.combinations(TARGETS, size)
 )
+
+
+def _diagnostic(
+    code: DiagnosticCode,
+    selected: tuple[Target, ...],
+    homes: dict[Target, Path],
+    operation: str,
+    phase: str,
+    status: str,
+) -> str:
+    return render_diagnostic(
+        Diagnostic(
+            code,
+            SafeContext(
+                tuple(target.value for target in selected),
+                tuple(str(homes[target]) for target in selected),
+                operation,
+                phase,
+                status,
+            ),
+        )
+    )
 
 
 class _FailAt:
@@ -963,7 +991,15 @@ class FullInstallMatrixTests(unittest.TestCase):
                             self.assertEqual(status, orchestrator.EXIT_APPLY_ERROR)
                             self.assertEqual(output, expected_output)
                             self.assertEqual(
-                                error, "error: apply failed; rollback completed\n"
+                                error,
+                                _diagnostic(
+                                    DiagnosticCode.APPLY_ROLLED_BACK,
+                                    selected,
+                                    homes,
+                                    operation,
+                                    "apply",
+                                    "rolled-back",
+                                ),
                             )
                             for target, home in homes.items():
                                 after = tree_snapshot(home)
@@ -1123,7 +1159,17 @@ class FullInstallMatrixTests(unittest.TestCase):
                     )
                     self.assertEqual(status, orchestrator.EXIT_UNRESOLVED_UNINSTALL)
                     self.assertTrue(output.startswith(render_plan(expected_plan)))
-                    self.assertIn(f"unresolved: target={drift_target.value}", output)
+                    self.assertIn(
+                        _diagnostic(
+                            DiagnosticCode.UNRESOLVED_UNINSTALL,
+                            (drift_target,),
+                            {drift_target: homes[drift_target]},
+                            "uninstall",
+                            "output",
+                            "unresolved",
+                        ),
+                        output,
+                    )
                     self.assertEqual(error, "")
                     self.assertEqual(
                         drifted.read_bytes(), b"user changed managed content\n"
@@ -1201,7 +1247,17 @@ class FullInstallMatrixTests(unittest.TestCase):
                         repository=repository,
                     )
                     self.assertEqual(status, orchestrator.EXIT_BLOCKED_VALIDATION)
-                    self.assertIn("validation blocked", error)
+                    self.assertEqual(
+                        error,
+                        _diagnostic(
+                            DiagnosticCode.VALIDATION_BLOCKED,
+                            (Target.CODEX,),
+                            homes,
+                            "install",
+                            "validation",
+                            "blocked",
+                        ),
+                    )
                     self.assertEqual(tree_snapshot(homes[Target.CODEX]), before)
 
         with private_tempdir() as directory:
@@ -1217,7 +1273,17 @@ class FullInstallMatrixTests(unittest.TestCase):
                 "install", self._argv((Target.CODEX,), homes), root
             )
             self.assertEqual(status, orchestrator.EXIT_BLOCKED_VALIDATION)
-            self.assertIn("recovery validation blocked", error)
+            self.assertEqual(
+                error,
+                _diagnostic(
+                    DiagnosticCode.VALIDATION_BLOCKED,
+                    (Target.CODEX,),
+                    homes,
+                    "install",
+                    "recovery",
+                    "blocked",
+                ),
+            )
             self.assertEqual(tree_snapshot(homes[Target.CODEX]), before)
 
     def test_corrupt_late_inventory_and_recovery_state_cover_all_combinations(self):
@@ -1262,7 +1328,14 @@ class FullInstallMatrixTests(unittest.TestCase):
                         self.assertEqual(output, "")
                         self.assertEqual(
                             error,
-                            "error: validation blocked: source validation failed\n",
+                            _diagnostic(
+                                DiagnosticCode.VALIDATION_BLOCKED,
+                                selected,
+                                homes,
+                                "install",
+                                "validation",
+                                "blocked",
+                            ),
                         )
                         for target, home in homes.items():
                             self.assertEqual(tree_snapshot(home), before[target])
@@ -1288,7 +1361,17 @@ class FullInstallMatrixTests(unittest.TestCase):
                     )
                     self.assertEqual(status, orchestrator.EXIT_BLOCKED_VALIDATION)
                     self.assertEqual(output, "")
-                    self.assertEqual(error, "error: recovery validation blocked\n")
+                    self.assertEqual(
+                        error,
+                        _diagnostic(
+                            DiagnosticCode.VALIDATION_BLOCKED,
+                            selected,
+                            homes,
+                            "install",
+                            "recovery",
+                            "blocked",
+                        ),
+                    )
                     for target, home in homes.items():
                         self.assertEqual(tree_snapshot(home), before[target])
 
@@ -1321,7 +1404,17 @@ class FullInstallMatrixTests(unittest.TestCase):
                     )
                     self.assertEqual(status, orchestrator.EXIT_PREFLIGHT_ERROR)
                     self.assertEqual(output, "")
-                    self.assertIn("preflight rejected", error)
+                    self.assertEqual(
+                        error,
+                        _diagnostic(
+                            DiagnosticCode.PREFLIGHT_REJECTED,
+                            selected,
+                            homes,
+                            "install",
+                            "preflight",
+                            "rejected",
+                        ),
+                    )
                     for target, home in homes.items():
                         self.assertEqual(tree_snapshot(home), before[target])
 
@@ -1356,7 +1449,17 @@ class FullInstallMatrixTests(unittest.TestCase):
                     )
                     self.assertEqual(status, orchestrator.EXIT_BLOCKED_VALIDATION)
                     self.assertEqual(output, "")
-                    self.assertEqual(error, "error: recovery validation blocked\n")
+                    self.assertEqual(
+                        error,
+                        _diagnostic(
+                            DiagnosticCode.VALIDATION_BLOCKED,
+                            selected,
+                            homes,
+                            "install",
+                            "recovery",
+                            "blocked",
+                        ),
+                    )
                     for target, home in homes.items():
                         self.assertEqual(tree_snapshot(home), before[target])
 
@@ -1442,7 +1545,17 @@ class FullInstallMatrixTests(unittest.TestCase):
                     )
                     self.assertEqual(status, orchestrator.EXIT_BLOCKED_VALIDATION)
                     self.assertEqual(output, "")
-                    self.assertEqual(error, "error: recovery validation blocked\n")
+                    self.assertEqual(
+                        error,
+                        _diagnostic(
+                            DiagnosticCode.VALIDATION_BLOCKED,
+                            selected,
+                            homes,
+                            "install",
+                            "recovery",
+                            "blocked",
+                        ),
+                    )
                     for target, home in homes.items():
                         self.assertEqual(
                             tree_snapshot(home), before_disagreeing[target]
@@ -1476,7 +1589,17 @@ class FullInstallMatrixTests(unittest.TestCase):
                     )
                     self.assertEqual(status, orchestrator.EXIT_BLOCKED_VALIDATION)
                     self.assertEqual(output, "")
-                    self.assertEqual(error, "error: recovery validation blocked\n")
+                    self.assertEqual(
+                        error,
+                        _diagnostic(
+                            DiagnosticCode.VALIDATION_BLOCKED,
+                            selected,
+                            homes,
+                            "install",
+                            "recovery",
+                            "blocked",
+                        ),
+                    )
                     for target, home in homes.items():
                         self.assertEqual(tree_snapshot(home), before_missing[target])
 
