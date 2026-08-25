@@ -51,7 +51,10 @@ jobs:
           sandbox_exec=""
           if test "${{ matrix.os }}" = "ubuntu-latest"; then
             for candidate in /usr/bin/bwrap /bin/bwrap; do
-              if test -x "$candidate"; then bwrap="$candidate"; break; fi
+              if test -f "$candidate" && test -x "$candidate" && test "$(realpath "$candidate")" = "$candidate"; then
+                bwrap="$candidate"
+                break
+              fi
             done
             if test -z "$bwrap"; then
               echo "no usable fixed bwrap; refusing an unsandboxed fallback"
@@ -59,7 +62,9 @@ jobs:
             fi
             echo "trusted fixed bwrap: $bwrap"
           else
-            if test -x /usr/bin/sandbox-exec; then sandbox_exec=/usr/bin/sandbox-exec; fi
+            if test -f /usr/bin/sandbox-exec && test -x /usr/bin/sandbox-exec && test "$(realpath /usr/bin/sandbox-exec)" = /usr/bin/sandbox-exec; then
+              sandbox_exec=/usr/bin/sandbox-exec
+            fi
             if test -z "$sandbox_exec"; then
               echo "no usable fixed sandbox-exec; refusing an unsandboxed fallback"
               exit 1
@@ -67,7 +72,9 @@ jobs:
             echo "trusted fixed sandbox-exec: $sandbox_exec"
           fi
           shellcheck=""
-          if test -x /usr/bin/shellcheck; then shellcheck=/usr/bin/shellcheck; fi
+          if test -f /usr/bin/shellcheck && test -x /usr/bin/shellcheck && test "$(realpath /usr/bin/shellcheck)" = /usr/bin/shellcheck; then
+            shellcheck=/usr/bin/shellcheck
+          fi
           if test -z "$shellcheck"; then
             echo "ShellCheck is unavailable; refusing to claim shell validation"
             exit 1

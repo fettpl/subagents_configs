@@ -39,6 +39,30 @@ Commit: final `HEAD` (`fix: enforce casefolded validation isolation policy`)
 - `sh -n ./*.sh`: passed.
 - `git diff --check`: passed.
 
+## Fix round 2/5
+
+Status: complete (review findings addressed)
+
+### TDD record
+
+- RED: cleanup spying showed a nonzero child result passed `primary=None`; the smoke decorator could skip before required-mode logic; CI candidate checks only required executability.
+- GREEN: cleanup now receives stable `child_failed` primary status for nonzero results while returning the exact `ValidationResult`; smoke selection is performed inside the test and required mode fails; CI requires regular canonical executable files.
+
+### Changes and review mapping
+
+- Added `_failure_for_result()` so child returncode `23` and every other nonzero result mark cleanup primary presence without changing return code, output, or cleanup evidence.
+- Removed the smoke `skipUnless` decorator. Fixed backend discovery now verifies canonical root-owned regular executable identity; optional mode skips unavailable/denied hosts, while required mode fails.
+- CI backend and ShellCheck selection now checks `-f`, `-x`, and canonical `realpath` identity. Added CI contract assertions for those checks.
+
+### Fix-round verification
+
+- Focused: 76 tests passed, 1 explicit local optional smoke skip.
+- Full discovery: 396 tests passed, 1 explicit local optional smoke skip.
+- `ruff check scripts tests`: passed.
+- `ruff format --check scripts tests`: passed.
+- `sh -n ./*.sh`: passed.
+- `git diff --check`: passed.
+
 ## Fix round 1/5
 
 Status: complete (review findings addressed)

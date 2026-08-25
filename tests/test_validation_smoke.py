@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -9,6 +10,29 @@ from pathlib import Path, PurePosixPath
 from unittest.mock import patch
 
 from tests.validation_isolated_test_support import git, make_repository
+
+
+def _fixed_backend_path() -> Path | None:
+    candidates = (
+        (Path("/usr/bin/bwrap"), Path("/bin/bwrap"))
+        if sys.platform.startswith("linux")
+        else (Path("/usr/bin/sandbox-exec"),)
+    )
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+            item = os.lstat(candidate)
+        except (OSError, RuntimeError):
+            continue
+        if (
+            resolved == candidate
+            and stat.S_ISREG(item.st_mode)
+            and item.st_uid == 0
+            and stat.S_IMODE(item.st_mode) & 0o022 == 0
+            and item.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        ):
+            return candidate
+    return None
 
 
 class ValidationInventorySmokeTests(unittest.TestCase):
@@ -120,13 +144,18 @@ class RunnerCleanupPrecedenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             repository = make_repository(Path(temporary))
             process_calls = []
+            cleanup_primary = []
 
             def process_runner(argv, cwd, env, timeout):
                 del cwd, env, timeout
                 process_calls.append(tuple(argv))
                 return subprocess.CompletedProcess(argv, child_returncode, "", "")
 
-            cleanup = runner.CleanupResult("cleanup_failed", False)
+            def cleanup_validation_root(root, *, primary):
+                del root
+                cleanup_primary.append(primary)
+                return runner.CleanupResult("cleanup_failed", primary is not None)
+
             with (
                 patch.object(runner, "select_backend", return_value=self._backend()),
                 patch.object(runner, "verify_backend"),
@@ -139,7 +168,11 @@ class RunnerCleanupPrecedenceTests(unittest.TestCase):
                         args[1], args[2], args[3], args[4]
                     ),
                 ),
-                patch.object(runner, "cleanup_validation_root", return_value=cleanup),
+                patch.object(
+                    runner,
+                    "cleanup_validation_root",
+                    side_effect=cleanup_validation_root,
+                ),
             ):
                 if probe_error is None:
                     result = runner.run_isolated(
@@ -153,40 +186,45 @@ class RunnerCleanupPrecedenceTests(unittest.TestCase):
                             ("false",), repository, "darwin", process_runner
                         )
                     result = None
-            return result, process_calls
+            return result, process_calls, cleanup_primary
 
     def test_successful_child_reports_typed_cleanup_failure(self):
-        result, process_calls = self._run_with_cleanup_failure(0)
+        result, process_calls, cleanup_primary = self._run_with_cleanup_failure(0)
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result.returncode, 0)
         self.assertIn("cleanup=cleanup_failed", result.evidence)
         self.assertEqual(len(process_calls), 1)
+        self.assertEqual(cleanup_primary, [None])
 
     def test_nonzero_child_result_wins_over_cleanup_failure(self):
-        result, process_calls = self._run_with_cleanup_failure(23)
+        result, process_calls, cleanup_primary = self._run_with_cleanup_failure(23)
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result.returncode, 23)
         self.assertIn("cleanup=cleanup_failed", result.evidence)
         self.assertEqual(len(process_calls), 1)
+        self.assertEqual(len(cleanup_primary), 1)
+        self.assertIsNotNone(cleanup_primary[0])
 
     def test_backend_failure_wins_over_cleanup_failure_and_child_never_starts(self):
-        result, process_calls = self._run_with_cleanup_failure(
+        result, process_calls, cleanup_primary = self._run_with_cleanup_failure(
             0, probe_error=ValueError("backend credentials and raw diagnostics")
         )
         self.assertIsNone(result)
         self.assertEqual(process_calls, [])
+        self.assertEqual(len(cleanup_primary), 1)
+        self.assertIsNotNone(cleanup_primary[0])
 
 
 class RealValidationSmokeTests(unittest.TestCase):
-    @unittest.skipUnless(
-        (Path("/usr/bin/bwrap").is_file() or Path("/bin/bwrap").is_file())
-        if sys.platform.startswith("linux")
-        else Path("/usr/bin/sandbox-exec").is_file(),
-        "fixed validation backend is unavailable",
-    )
     def test_fixed_backend_enforces_six_smoke_properties(self):
+        mode = os.environ.get("VALIDATION_SMOKE_MODE", "optional")
+        backend_path = _fixed_backend_path()
+        if backend_path is None:
+            if mode == "optional":
+                self.skipTest("fixed validation backend is unavailable")
+            self.fail("required fixed validation backend is unavailable")
         with tempfile.TemporaryDirectory() as temporary:
             repository = make_repository(Path(temporary))
             child = (

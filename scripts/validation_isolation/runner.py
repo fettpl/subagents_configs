@@ -65,6 +65,12 @@ def _failure_for(exc: BaseException) -> ValidationFailure:
     return ValidationFailure("validation_failed", "validation was blocked")
 
 
+def _failure_for_result(result: ValidationResult) -> ValidationFailure | None:
+    if result.returncode == 0:
+        return None
+    return ValidationFailure("child_failed", "validation command returned nonzero")
+
+
 def cleanup_validation_root(
     root: Path, *, primary: ValidationFailure | None
 ) -> CleanupResult:
@@ -197,9 +203,10 @@ def run_isolated(
             mutation_error = exc
 
     primary_exception = mutation_error or primary_error
-    primary_for_cleanup = (
-        _failure_for(primary_exception) if primary_exception is not None else None
-    )
+    if primary_exception is not None:
+        primary_for_cleanup = _failure_for(primary_exception)
+    else:
+        primary_for_cleanup = None if result is None else _failure_for_result(result)
     cleanup_result = cleanup_validation_root(
         isolation_root,
         primary=primary_for_cleanup,

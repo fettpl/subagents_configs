@@ -130,6 +130,22 @@ class CiContractTests(unittest.TestCase):
         self.assertRegex(self.text, r"fail[- ]closed|unavailable|unusable")
         self.assertNotRegex(self.text.lower(), r"pip[^\n]*(?:bwrap|shellcheck)|wget")
 
+    def test_fixed_backend_and_shellcheck_candidates_are_regular_canonical_files(self):
+        self.assertIn('test -f "$candidate"', self.text)
+        self.assertIn('test "$(realpath "$candidate")" = "$candidate"', self.text)
+        self.assertIn(
+            "test -f /usr/bin/sandbox-exec && test -x /usr/bin/sandbox-exec",
+            self.text,
+        )
+        self.assertIn(
+            'test "$(realpath /usr/bin/sandbox-exec)" = /usr/bin/sandbox-exec',
+            self.text,
+        )
+        self.assertIn(
+            "test -f /usr/bin/shellcheck && test -x /usr/bin/shellcheck",
+            self.text,
+        )
+
     def test_action_lines_are_all_sha_pinned(self):
         for line in self.text.splitlines():
             if "uses:" in line:
