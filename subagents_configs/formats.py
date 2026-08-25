@@ -623,7 +623,9 @@ def _validate_source_spec(spec: SourceSpec) -> None:
         raise ValueError(f"unsafe source path: {spec.source}")
 
 
-def _read_source(repo_root: Path, spec: SourceSpec) -> bytes:
+def _read_source_with_evidence(
+    repo_root: Path, spec: SourceSpec
+) -> tuple[filesystem.IdentityEvidence, bytes]:
     """Read a source through pinned descriptor-relative no-follow handles."""
     _validate_source_spec(spec)
     # The temporary-test root may be exposed through macOS's /private alias;
@@ -663,18 +665,30 @@ def _read_source(repo_root: Path, spec: SourceSpec) -> bytes:
                     raise ValueError(f"source is not a regular file: {spec.source}")
                 if (result.st_dev, result.st_ino) != expected_identity:
                     raise ValueError(f"source changed during read: {spec.source}")
-                chunks: list[bytes] = []
-                while True:
-                    chunk = os.read(descriptor, 1024 * 1024)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                return b"".join(chunks)
+                evidence, content = filesystem.read_descriptor_with_evidence(
+                    descriptor, "source"
+                )
+                if (
+                    evidence.device != expected.st_dev
+                    or evidence.inode != expected.st_ino
+                    or evidence.size != expected.st_size
+                    or evidence.nlink != expected.st_nlink
+                    or evidence.mode != stat.S_IMODE(expected.st_mode)
+                ):
+                    raise ValueError(f"source changed while reading: {spec.source}")
+                return evidence, content
             finally:
                 os.close(descriptor)
         finally:
             for descriptor in reversed(opened):
                 os.close(descriptor)
+
+
+def _read_source(repo_root: Path, spec: SourceSpec) -> bytes:
+    """Read a source through the pinned reader without exposing evidence."""
+
+    _evidence, content = _read_source_with_evidence(repo_root, spec)
+    return content
 
 
 def validate_source_inventory(
@@ -683,6 +697,7 @@ def validate_source_inventory(
     specs: Sequence[SourceSpec],
     *,
     require_commit_pusher: bool = False,
+    cache: filesystem.CommandCache | None = None,
 ) -> tuple[ValidatedSource, ...]:
     """Validate every explicit source before returning any inventory item."""
     seen: set[str] = set()
@@ -705,7 +720,15 @@ def validate_source_inventory(
             if destination in destinations:
                 raise ValueError(f"duplicate source destination: {destination}")
             destinations.add(destination)
-        content = _read_source(repo_root, spec)
+        root = Path(os.path.realpath(normalized_absolute(repo_root)))
+        source_path = root / spec.source
+        if cache is None:
+            content = _read_source(repo_root, spec)
+        else:
+            content = cache.read_source(
+                source_path,
+                lambda spec=spec: _read_source_with_evidence(repo_root, spec),
+            )
         if not content.strip():
             raise ValueError(f"empty source: {spec.source}")
         placeholder = b"{{VALIDATION_HELPER}}"
@@ -768,7 +791,11 @@ def validate_source_inventory(
             ValidatedSource(
                 spec=spec,
                 content=content,
-                sha256=hashlib.sha256(content).hexdigest(),
+                sha256=(
+                    cache.hash_bytes(content)
+                    if cache
+                    else hashlib.sha256(content).hexdigest()
+                ),
                 parsed=parsed,
             )
         )

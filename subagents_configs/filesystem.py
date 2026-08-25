@@ -7,7 +7,9 @@ import hashlib
 import os
 import secrets
 import stat
+from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import TransactionError
@@ -111,6 +113,170 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _read_descriptor_bytes(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, _CHUNK_SIZE)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def read_bytes_with_evidence(path: Path, label: str) -> tuple[IdentityEvidence, bytes]:
+    """Read one regular file and derive its complete evidence from its fd."""
+
+    descriptor = _open_regular_read(path, label)
+    try:
+        return read_descriptor_with_evidence(descriptor, label)
+    finally:
+        os.close(descriptor)
+
+
+def read_descriptor_with_evidence(
+    descriptor: int, label: str
+) -> tuple[IdentityEvidence, bytes]:
+    """Read one already pinned descriptor and derive complete evidence."""
+
+    content = _read_descriptor_bytes(descriptor)
+    evidence = _evidence_from_descriptor(descriptor, label, known_content=content)
+    return evidence, content
+
+
+@dataclass(frozen=True)
+class StateInventory:
+    """Validated state objects captured together for one planning command."""
+
+    manifest: object | None
+    journal: object | None
+
+
+@dataclass(frozen=True)
+class ReadSnapshot:
+    """Immutable bytes tied to complete evidence for one normalized path."""
+
+    path: Path
+    evidence: IdentityEvidence
+    content: bytes
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, Path):
+            raise TypeError("read snapshot path must be a Path")
+        if not isinstance(self.evidence, IdentityEvidence):
+            raise TypeError("read snapshot evidence is required")
+        if type(self.content) is not bytes:
+            raise TypeError("read snapshot content must be bytes")
+        if self.evidence.size != len(self.content):
+            raise ValueError("read snapshot size does not match identity evidence")
+
+
+class CommandCache:
+    """Ephemeral read/hash/state cache owned by one preflight command."""
+
+    def __init__(self) -> None:
+        self._bytes: dict[Path, ReadSnapshot] = {}
+        self._hashes: dict[bytes, str] = {}
+        self._states: dict[tuple[Path, object], StateInventory] = {}
+
+    def __enter__(self) -> CommandCache:
+        return self
+
+    def __exit__(self, _type, _value, _traceback) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._bytes.clear()
+        self._hashes.clear()
+        self._states.clear()
+
+    def remember_bytes(
+        self, path: Path, evidence: IdentityEvidence, content: bytes
+    ) -> bytes:
+        if not isinstance(path, Path) or not isinstance(evidence, IdentityEvidence):
+            raise TypeError("cached bytes require a Path and identity evidence")
+        if type(content) is not bytes:
+            raise TypeError("cached bytes must be bytes")
+        digest = self._hashes.get(content)
+        if digest is None:
+            digest = sha256_bytes(content)
+            self._hashes[content] = digest
+        if evidence.size != len(content) or evidence.sha256 != digest:
+            raise ValueError("cached bytes disagree with identity evidence")
+        self._hashes[content] = evidence.sha256
+        key = normalized_absolute(path)
+        self._bytes[key] = ReadSnapshot(key, evidence, content)
+        return content
+
+    def read_bytes(self, path: Path, evidence: IdentityEvidence) -> bytes:
+        """Return bytes for evidence, reading and proving them on a cache miss."""
+
+        if not isinstance(path, Path) or not isinstance(evidence, IdentityEvidence):
+            raise TypeError("cached read requires a Path and identity evidence")
+        key = normalized_absolute(path)
+        cached = self._bytes.get(key)
+        if cached is not None and cached.evidence == evidence:
+            return cached.content
+        actual, content = read_bytes_with_evidence(key, "cached file")
+        if actual != evidence:
+            raise TransactionError("cached file identity evidence does not match")
+        self._bytes[key] = ReadSnapshot(key, actual, content)
+        return content
+
+    def read_regular(self, path: Path, label: str) -> ReadSnapshot:
+        """Read and revalidate a regular file against complete cached evidence."""
+
+        key = normalized_absolute(path)
+        cached = self._bytes.get(key)
+        if cached is None:
+            try:
+                evidence, content = read_bytes_with_evidence(key, label)
+            except FileNotFoundError:
+                raise
+            self._hashes[content] = evidence.sha256
+            snapshot = ReadSnapshot(key, evidence, content)
+            self._bytes[key] = snapshot
+            return snapshot
+        evidence, content = read_bytes_with_evidence(key, label)
+        if evidence != cached.evidence:
+            raise TransactionError("cached regular file identity changed")
+        return cached
+
+    def read_source(
+        self, path: Path, reader: Callable[[], tuple[IdentityEvidence, bytes]]
+    ) -> bytes:
+        """Read a pinned source once, then reuse its validated immutable buffer."""
+
+        key = normalized_absolute(path)
+        cached = self._bytes.get(key)
+        if cached is None:
+            evidence, content = reader()
+            self._hashes[content] = evidence.sha256
+            self.remember_bytes(key, evidence, content)
+            return content
+        return cached.content
+
+    def hash_bytes(self, content: bytes) -> str:
+        if type(content) is not bytes:
+            raise TypeError("hash input must be bytes")
+        digest = self._hashes.get(content)
+        if digest is None:
+            digest = sha256_bytes(content)
+            self._hashes[content] = digest
+        return digest
+
+    def inventory_state(self, home: Path, descriptor) -> StateInventory:
+        key = (normalized_absolute(home), descriptor.target)
+        cached = self._states.get(key)
+        if cached is not None:
+            return cached
+        from .state import load_state
+
+        manifest, journal = load_state(key[0], descriptor)
+        result = StateInventory(manifest, journal)
+        self._states[key] = result
+        return result
+
+
 def _evidence_from_descriptor(
     descriptor: int, label: str, *, known_content: bytes | None = None
 ) -> IdentityEvidence:
@@ -127,7 +293,7 @@ def _evidence_from_descriptor(
             digest.update(chunk)
         sha256 = digest.hexdigest()
     else:
-        sha256 = hashlib.sha256(known_content).hexdigest()
+        sha256 = sha256_bytes(known_content)
     after = os.fstat(descriptor)
     if (
         result.st_dev,

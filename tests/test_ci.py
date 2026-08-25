@@ -235,10 +235,6 @@ class CiContractTests(unittest.TestCase):
         )
         for command in (
             "scripts/validate-catalogs.py",
-            "tests.test_readme_contract",
-            "tests.test_docs",
-            "tests.test_ci",
-            "tests.test_security_static",
             "tests.test_validation_backend.BackendIntegrationTests",
             "unittest discover -s tests -p 'test_*.py'",
             "ruff check claude-code subagents_configs scripts tests",
@@ -263,6 +259,17 @@ class CiContractTests(unittest.TestCase):
             self.assertIn(wrapper, self.text)
         self.assertRegex(self.text, r"fail[- ]closed|unavailable|unusable")
         self.assertNotRegex(self.text.lower(), r"pip[^\n]*(?:bwrap|shellcheck)|wget")
+
+    def test_equivalent_unittest_discovery_is_not_repeated(self):
+        self.assertEqual(
+            self.text.count("python -m unittest discover -s tests -p 'test_*.py'"), 1
+        )
+        self.assertNotIn(
+            "python -m unittest tests.test_readme_contract tests.test_docs "
+            "tests.test_ci",
+            self.text,
+        )
+        self.assertNotIn("python -m unittest tests.test_security_static", self.text)
 
     def test_fixed_backend_and_shellcheck_candidates_are_regular_canonical_files(self):
         self.assertIn('test -f "$candidate"', self.text)

@@ -40,7 +40,7 @@ from .paths import (
     lstat_existing,
     normalized_absolute,
 )
-from .state import encode_manifest, load_journal, load_manifest
+from .state import encode_manifest
 from .targets import descriptor_for, selected_sources, targets_for_request
 
 
@@ -92,8 +92,20 @@ _LEGACY_STATE_NAMES = {
 }
 
 
-def _digest(content: bytes) -> str:
+def _digest(content: bytes, cache: filesystem.CommandCache | None = None) -> str:
+    if cache is not None:
+        return cache.hash_bytes(content)
     return hashlib.sha256(content).hexdigest()
+
+
+def source_hash(source: ValidatedSource, cache: filesystem.CommandCache) -> str:
+    """Hash an already validated source buffer without touching its pathname."""
+
+    if not isinstance(source, ValidatedSource):
+        raise TypeError("source hash requires a ValidatedSource")
+    if not isinstance(cache, filesystem.CommandCache):
+        raise TypeError("source hash requires a CommandCache")
+    return cache.hash_bytes(source.content)
 
 
 def _path(home: Path, relative: str) -> Path:
@@ -102,7 +114,20 @@ def _path(home: Path, relative: str) -> Path:
     return candidate
 
 
-def _read_regular(path: Path, label: str) -> tuple[bytes, int]:
+def _read_regular(
+    path: Path,
+    label: str,
+    cache: filesystem.CommandCache | None = None,
+    *,
+    snapshot: filesystem.ReadSnapshot | None = None,
+) -> tuple[bytes, int]:
+    if snapshot is not None:
+        if normalized_absolute(path) != snapshot.path:
+            raise ValueError("read snapshot path does not match requested path")
+        return snapshot.content, snapshot.evidence.mode
+    if cache is not None:
+        result = cache.read_regular(path, label)
+        return result.content, result.evidence.mode
     result = lstat_existing(path, label)
     if result is None:
         raise FileNotFoundError(path)
@@ -143,11 +168,12 @@ def _entry_for_file(
     backup_hash: str | None = None,
     original_mode: int | None = None,
     unresolved_reason: str | None = None,
+    cache: filesystem.CommandCache | None = None,
 ) -> ManifestEntry:
     return ManifestEntry(
         identifier=identifier,
         relative_path=relative_path,
-        installed_hash=_digest(content),
+        installed_hash=_digest(content, cache),
         installed_mode=mode,
         ownership=ownership,
         backup_path=backup_path,
@@ -171,11 +197,12 @@ def _entry_for_block(
     backup_hash: str | None = None,
     original_mode: int | None = None,
     unresolved_reason: str | None = None,
+    cache: filesystem.CommandCache | None = None,
 ) -> ManifestEntry:
     return ManifestEntry(
         identifier=identifier,
         relative_path=relative_path,
-        installed_hash=_digest(content),
+        installed_hash=_digest(content, cache),
         installed_mode=mode,
         ownership=ownership,
         backup_path=backup_path,
@@ -192,7 +219,7 @@ def _block_from_file(content: bytes, block_id: str) -> ManagedBlock | None:
 
 
 def _selected_sources(
-    repo_root: Path, request: Request
+    repo_root: Path, request: Request, cache: filesystem.CommandCache
 ) -> dict[Target, tuple[ValidatedSource, ...]]:
     inventories: dict[Target, tuple[ValidatedSource, ...]] = {}
     for target in targets_for_request(request.targets, False):
@@ -204,6 +231,7 @@ def _selected_sources(
                 target,
                 specs,
                 require_commit_pusher=request.include_commit_pusher,
+                cache=cache,
             )
         except ValidationBlockedError:
             raise
@@ -288,9 +316,10 @@ def _make_file_operation(
     *,
     backup_required: bool,
     after_mode: int = 0o600,
+    cache: filesystem.CommandCache | None = None,
 ) -> PlannedOperation | None:
-    after_hash = _digest(after)
-    before_hash = _digest(before) if before is not None else None
+    after_hash = _digest(after, cache)
+    before_hash = _digest(before, cache) if before is not None else None
     if before is not None and before_hash == after_hash and before_mode is not None:
         if before_mode & ~0o600:
             return PlannedOperation(
@@ -331,6 +360,7 @@ def _plan_regular_source(
     source: ValidatedSource,
     prior: ManifestEntry | None,
     conflicts: list[str],
+    cache: filesystem.CommandCache,
 ) -> tuple[PlannedOperation | None, ManifestEntry | None]:
     if source.spec.destination is None:
         raise ValueError(f"source has no managed destination: {source.spec.identifier}")
@@ -347,13 +377,13 @@ def _plan_regular_source(
     installed_mode = 0o700 if source.spec.kind == "command-gate" else 0o600
     existing: tuple[bytes, int] | None
     try:
-        existing = _read_regular(destination, source.spec.identifier)
+        existing = _read_regular(destination, source.spec.identifier, cache)
     except FileNotFoundError:
         existing = None
     if prior is not None and existing is not None:
         current, current_mode = existing
         if (
-            _digest(current) != prior.installed_hash
+            _digest(current, cache) != prior.installed_hash
             or current_mode != prior.installed_mode
         ):
             reason = f"drift in managed destination {relative}"
@@ -361,7 +391,7 @@ def _plan_regular_source(
             return None, ManifestEntry(
                 **{**prior.__dict__, "unresolved_reason": reason}
             )
-        if _digest(proposed) == _digest(current):
+        if _digest(proposed, cache) == _digest(current, cache):
             return None, ManifestEntry(**{**prior.__dict__, "unresolved_reason": None})
         if prior.ownership == "preexisting":
             reason = f"source update conflicts with preexisting destination {relative}"
@@ -381,6 +411,7 @@ def _plan_regular_source(
             prior.ownership,
             backup_required=True,
             after_mode=installed_mode,
+            cache=cache,
         )
         return operation, _entry_for_file(
             source.spec.identifier,
@@ -391,6 +422,7 @@ def _plan_regular_source(
             backup_path=prior.backup_path,
             backup_hash=prior.backup_hash,
             original_mode=prior.original_mode,
+            cache=cache,
         )
     if prior is not None and existing is None:
         reason = f"managed destination is missing: {relative}"
@@ -407,13 +439,19 @@ def _plan_regular_source(
             "created",
             backup_required=False,
             after_mode=installed_mode,
+            cache=cache,
         )
         return operation, _entry_for_file(
-            source.spec.identifier, relative, proposed, installed_mode, "created"
+            source.spec.identifier,
+            relative,
+            proposed,
+            installed_mode,
+            "created",
+            cache=cache,
         )
     current, current_mode = existing
-    current_hash = _digest(current)
-    proposed_hash = _digest(proposed)
+    current_hash = _digest(current, cache)
+    proposed_hash = _digest(proposed, cache)
     if current_hash == proposed_hash:
         if current_mode & ~installed_mode:
             reason = f"identical preexisting destination has broad mode {relative}"
@@ -425,6 +463,7 @@ def _plan_regular_source(
             current,
             current_mode,
             "preexisting",
+            cache=cache,
         )
     operation = _make_file_operation(
         target,
@@ -436,6 +475,7 @@ def _plan_regular_source(
         "replaced",
         backup_required=True,
         after_mode=installed_mode,
+        cache=cache,
     )
     backup_path = _backup_name(source.spec.identifier, current_hash)
     return operation, _entry_for_file(
@@ -447,6 +487,7 @@ def _plan_regular_source(
         backup_path=backup_path,
         backup_hash=current_hash,
         original_mode=current_mode,
+        cache=cache,
     )
 
 
@@ -468,6 +509,9 @@ def _plan_block(
     body: bytes,
     prior: ManifestEntry | None,
     conflicts: list[str],
+    cache: filesystem.CommandCache,
+    *,
+    snapshot: filesystem.ReadSnapshot | None = None,
 ) -> tuple[PlannedOperation | None, ManifestEntry | None]:
     from .blocks import render_managed_block
 
@@ -481,7 +525,7 @@ def _plan_block(
         conflicts.append(reason)
         return None, ManifestEntry(**{**prior.__dict__, "unresolved_reason": reason})
     try:
-        existing = _read_regular(destination, identifier)
+        existing = _read_regular(destination, identifier, cache, snapshot=snapshot)
     except FileNotFoundError:
         existing = None
     if prior is not None and existing is None:
@@ -492,7 +536,7 @@ def _plan_block(
         current, current_mode = existing
         current_block = _block_from_file(current, identifier)
         prior_exact = prior is not None and (
-            _digest(current) == prior.installed_hash
+            _digest(current, cache) == prior.installed_hash
             and current_mode == prior.installed_mode
         )
         if prior is not None and not prior_exact:
@@ -518,8 +562,8 @@ def _plan_block(
                         identifier,
                         "write-block",
                         relative,
-                        _digest(current),
-                        _digest(updated),
+                        _digest(current, cache),
+                        _digest(updated, cache),
                         current_mode,
                         0o600,
                         updated,
@@ -537,6 +581,7 @@ def _plan_block(
                         backup_path=prior.backup_path,
                         backup_hash=prior.backup_hash,
                         original_mode=prior.original_mode,
+                        cache=cache,
                     )
                 reason = f"managed block {identifier} differs from proposed bytes"
                 conflicts.append(reason)
@@ -560,6 +605,7 @@ def _plan_block(
                 "preexisting",
                 block.sha256,
                 original_mode=current_mode,
+                cache=cache,
             )
         updated = insert_or_replace_block(current, block)
         operation = PlannedOperation(
@@ -567,8 +613,8 @@ def _plan_block(
             identifier,
             "write-block",
             relative,
-            _digest(current),
-            _digest(updated),
+            _digest(current, cache),
+            _digest(updated, cache),
             current_mode,
             0o600,
             updated,
@@ -576,7 +622,7 @@ def _plan_block(
             True,
             identifier,
         )
-        backup_path = _backup_name(identifier, _digest(current))
+        backup_path = _backup_name(identifier, _digest(current, cache))
         return operation, _entry_for_block(
             identifier,
             relative,
@@ -585,8 +631,9 @@ def _plan_block(
             "replaced",
             block.sha256,
             backup_path=backup_path,
-            backup_hash=_digest(current),
+            backup_hash=_digest(current, cache),
             original_mode=current_mode,
+            cache=cache,
         )
     updated = insert_or_replace_block(b"", block)
     operation = PlannedOperation(
@@ -595,7 +642,7 @@ def _plan_block(
         "write-block",
         relative,
         None,
-        _digest(updated),
+        _digest(updated, cache),
         None,
         0o600,
         updated,
@@ -610,6 +657,7 @@ def _plan_block(
         0o600,
         "created",
         block.sha256,
+        cache=cache,
     )
 
 
@@ -637,13 +685,14 @@ def _plan_manifest_operation(
     home: Path,
     current: Manifest | None,
     resulting: Manifest | None,
+    cache: filesystem.CommandCache,
 ) -> PlannedOperation | None:
     relative = ".subagents_configs/manifest.json"
     destination = _path(home, relative)
     current_bytes: bytes | None = None
     current_mode: int | None = None
     try:
-        current_bytes, current_mode = _read_regular(destination, "manifest")
+        current_bytes, current_mode = _read_regular(destination, "manifest", cache)
     except FileNotFoundError:
         pass
     after = encode_manifest(resulting) if resulting is not None else None
@@ -654,8 +703,8 @@ def _plan_manifest_operation(
         "state/manifest",
         "write-manifest",
         relative,
-        _digest(current_bytes) if current_bytes is not None else None,
-        _digest(after) if after is not None else None,
+        _digest(current_bytes, cache) if current_bytes is not None else None,
+        _digest(after, cache) if after is not None else None,
         current_mode,
         0o600 if after is not None else None,
         after,
@@ -671,6 +720,7 @@ def _stale_install(
     prior: ManifestEntry,
     operations: list[PlannedOperation],
     conflicts: list[str],
+    cache: filesystem.CommandCache,
 ) -> ManifestEntry | None:
     try:
         destination = _safe_destination(home, prior.relative_path, prior.identifier)
@@ -679,12 +729,12 @@ def _stale_install(
         conflicts.append(reason)
         return ManifestEntry(**{**prior.__dict__, "unresolved_reason": reason})
     try:
-        current, current_mode = _read_regular(destination, prior.identifier)
+        current, current_mode = _read_regular(destination, prior.identifier, cache)
     except FileNotFoundError:
         reason = f"stale managed path missing: {prior.relative_path}"
         conflicts.append(reason)
         return ManifestEntry(**{**prior.__dict__, "unresolved_reason": reason})
-    current_hash = _digest(current)
+    current_hash = _digest(current, cache)
     if current_hash != prior.installed_hash or current_mode != prior.installed_mode:
         reason = f"drift in stale managed path: {prior.relative_path}"
         conflicts.append(reason)
@@ -706,15 +756,15 @@ def _stale_install(
             return ManifestEntry(**{**prior.__dict__, "unresolved_reason": reason})
         if prior.ownership == "replaced":
             backup = _path(home, f".subagents_configs/{prior.backup_path}")
-            restored, _ = _read_regular(backup, "backup")
-            if _digest(restored) != prior.backup_hash:
+            restored, _ = _read_regular(backup, "backup", cache)
+            if _digest(restored, cache) != prior.backup_hash:
                 raise ValueError("stale managed block backup hash mismatch")
             final_bytes = restored
-            after_hash = _digest(restored)
+            after_hash = _digest(restored, cache)
             after_mode = prior.original_mode
         else:
             final_bytes = updated if updated else None
-            after_hash = _digest(updated) if updated else None
+            after_hash = _digest(updated, cache) if updated else None
             after_mode = current_mode if updated else None
         operations.append(
             PlannedOperation(
@@ -753,8 +803,8 @@ def _stale_install(
         return None
     if prior.ownership == "replaced":
         backup = _path(home, f".subagents_configs/{prior.backup_path}")
-        backup_bytes, _backup_mode = _read_regular(backup, "backup")
-        if _digest(backup_bytes) != prior.backup_hash:
+        backup_bytes, _backup_mode = _read_regular(backup, "backup", cache)
+        if _digest(backup_bytes, cache) != prior.backup_hash:
             raise ValueError("verified backup changed during planning")
         operations.append(
             PlannedOperation(
@@ -763,7 +813,7 @@ def _stale_install(
                 "restore",
                 prior.relative_path,
                 current_hash,
-                _digest(backup_bytes),
+                _digest(backup_bytes, cache),
                 current_mode,
                 prior.original_mode,
                 backup_bytes,
@@ -783,14 +833,16 @@ def _target_install(
     request: Request,
     target: Target,
     inventory: tuple[ValidatedSource, ...],
+    cache: filesystem.CommandCache,
 ) -> TargetPlan:
     descriptor = descriptor_for(target)
     home = normalized_absolute(request.homes[target])
     assert_safe_home(home)
     _reject_legacy_state(home, target)
-    if load_journal(home, descriptor) is not None:
+    state = cache.inventory_state(home, descriptor)
+    if state.journal is not None:
         raise ValueError(f"existing transaction journal blocks {target.value}")
-    prior_manifest = load_manifest(home, descriptor)
+    prior_manifest = state.manifest
     prior = _existing_manifest_by_path(prior_manifest)
     operations: list[PlannedOperation] = []
     entries: dict[str, ManifestEntry] = {}
@@ -806,6 +858,7 @@ def _target_install(
             source,
             prior.get(source.spec.destination.as_posix()),
             conflicts,
+            cache,
         )
         if operation is not None:
             operations.append(operation)
@@ -813,10 +866,10 @@ def _target_install(
             entries[entry.relative_path] = entry
 
     instruction = _safe_destination(home, descriptor.global_filename, "instructions")
+    instruction_snapshot: filesystem.ReadSnapshot | None = None
     try:
-        instruction_bytes, _instruction_mode = _read_regular(
-            instruction, "instructions"
-        )
+        instruction_snapshot = cache.read_regular(instruction, "instructions")
+        instruction_bytes = instruction_snapshot.content
     except FileNotFoundError:
         pass
     else:
@@ -832,6 +885,8 @@ def _target_install(
             _block_body(inventory, "routing"),
             prior.get(descriptor.global_filename),
             conflicts,
+            cache,
+            snapshot=instruction_snapshot,
         )
         if operation is not None:
             operations.append(operation)
@@ -846,8 +901,11 @@ def _target_install(
         config = _safe_destination(
             home, descriptor.config_filename or "config.toml", "config"
         )
+        config_snapshot: filesystem.ReadSnapshot | None = None
         try:
-            existing_config, config_mode = _read_regular(config, "config")
+            config_snapshot = cache.read_regular(config, "config")
+            existing_config = config_snapshot.content
+            config_mode = config_snapshot.evidence.mode
         except FileNotFoundError:
             existing_config, config_mode = None, None
         config_identifier = descriptor.config_filename or "config.toml"
@@ -858,7 +916,7 @@ def _target_install(
             exact_managed_config = (
                 prior_config.identifier == "codex-multi-agent-v2"
                 and prior_config.managed_block_id == "codex-multi-agent-v2"
-                and _digest(existing_config) == prior_config.installed_hash
+                and _digest(existing_config, cache) == prior_config.installed_hash
                 and config_mode == prior_config.installed_mode
                 and current_block is not None
                 and current_block.sha256 == prior_config.installed_block_hash
@@ -889,6 +947,8 @@ def _target_install(
                 config_body,
                 prior_config,
                 conflicts,
+                cache,
+                snapshot=config_snapshot,
             )
             if operation is not None:
                 try:
@@ -904,14 +964,14 @@ def _target_install(
     for prior_entry in prior_manifest.entries if prior_manifest else ():
         if prior_entry.relative_path in entries:
             continue
-        stale = _stale_install(target, home, prior_entry, operations, conflicts)
+        stale = _stale_install(target, home, prior_entry, operations, conflicts, cache)
         if stale is not None:
             entries[stale.relative_path] = stale
 
     resulting_entries = tuple(entries[key] for key in sorted(entries))
     resulting = Manifest(2, target, resulting_entries)
     manifest_operation = _plan_manifest_operation(
-        target, home, prior_manifest, resulting
+        target, home, prior_manifest, resulting, cache
     )
     if manifest_operation is not None:
         operations.append(manifest_operation)
@@ -926,15 +986,17 @@ def _target_uninstall(
     request: Request,
     target: Target,
     inventory: tuple[ValidatedSource, ...],
+    cache: filesystem.CommandCache,
 ) -> TargetPlan:
     del repo_root, inventory
     descriptor = descriptor_for(target)
     home = normalized_absolute(request.homes[target])
     assert_safe_home(home)
     _reject_legacy_state(home, target)
-    if load_journal(home, descriptor) is not None:
+    state = cache.inventory_state(home, descriptor)
+    if state.journal is not None:
         raise ValueError(f"existing transaction journal blocks {target.value}")
-    manifest = load_manifest(home, descriptor)
+    manifest = state.manifest
     if manifest is None:
         return TargetPlan(target, home, (), None, ())
     operations: list[PlannedOperation] = []
@@ -948,7 +1010,7 @@ def _target_uninstall(
             continue
         try:
             destination = _safe_destination(home, prior.relative_path, prior.identifier)
-            current_result = _read_regular(destination, prior.identifier)
+            current_result = _read_regular(destination, prior.identifier, cache)
             if current_result is None:
                 raise FileNotFoundError(destination)
             current, current_mode = current_result
@@ -1014,30 +1076,30 @@ def _target_uninstall(
                 continue
             if prior.ownership == "replaced":
                 backup = _path(home, f".subagents_configs/{prior.backup_path}")
-                backup_result = _read_regular(backup, "backup")
+                backup_result = _read_regular(backup, "backup", cache)
                 if backup_result is None:
                     raise FileNotFoundError(backup)
                 backup_bytes, backup_mode = backup_result
                 if backup_mode & ~0o600:
                     raise ValueError("uninstall managed block backup is not private")
-                if _digest(backup_bytes) != prior.backup_hash:
+                if _digest(backup_bytes, cache) != prior.backup_hash:
                     raise ValueError("uninstall managed block backup hash mismatch")
                 # The permanent backup proves ownership and original mode; it
                 # must not replace current user edits surrounding this block.
-                if not updated and _digest(current) == prior.installed_hash:
+                if not updated and _digest(current, cache) == prior.installed_hash:
                     final_bytes = backup_bytes
-                    after_hash = _digest(final_bytes)
+                    after_hash = _digest(final_bytes, cache)
                     after_mode = prior.original_mode
                 else:
                     # An edited file can legitimately have empty surrounding
                     # bytes. Keep that regular file present; only an exact
                     # installed full-file match may restore the backup bytes.
                     final_bytes = updated
-                    after_hash = _digest(final_bytes)
+                    after_hash = _digest(final_bytes, cache)
                     after_mode = prior.original_mode
             else:
                 final_bytes = updated if updated else None
-                after_hash = _digest(updated) if updated else None
+                after_hash = _digest(updated, cache) if updated else None
                 after_mode = current_mode if updated else None
             operations.append(
                 PlannedOperation(
@@ -1045,7 +1107,7 @@ def _target_uninstall(
                     prior.identifier,
                     "remove-block",
                     prior.relative_path,
-                    _digest(current),
+                    _digest(current, cache),
                     after_hash,
                     current_mode,
                     after_mode,
@@ -1057,7 +1119,7 @@ def _target_uninstall(
             )
             continue
         if (
-            _digest(current) != prior.installed_hash
+            _digest(current, cache) != prior.installed_hash
             or current_mode != prior.installed_mode
         ):
             reason = f"uninstall preserved drifted {prior.relative_path}"
@@ -1086,8 +1148,8 @@ def _target_uninstall(
             continue
         if prior.ownership == "replaced":
             backup = _path(home, f".subagents_configs/{prior.backup_path}")
-            backup_bytes, _ = _read_regular(backup, "backup")
-            if _digest(backup_bytes) != prior.backup_hash:
+            backup_bytes, _ = _read_regular(backup, "backup", cache)
+            if _digest(backup_bytes, cache) != prior.backup_hash:
                 raise ValueError("uninstall backup hash mismatch")
             operations.append(
                 PlannedOperation(
@@ -1095,8 +1157,8 @@ def _target_uninstall(
                     prior.identifier,
                     "restore",
                     prior.relative_path,
-                    _digest(current),
-                    _digest(backup_bytes),
+                    _digest(current, cache),
+                    _digest(backup_bytes, cache),
                     current_mode,
                     prior.original_mode,
                     backup_bytes,
@@ -1113,7 +1175,7 @@ def _target_uninstall(
         2, target, tuple(sorted(entries, key=lambda item: item.relative_path))
     )
     manifest_operation = _plan_manifest_operation(
-        target, home, manifest, resulting if entries else None
+        target, home, manifest, resulting if entries else None, cache
     )
     if manifest_operation is not None:
         operations.append(manifest_operation)
@@ -1187,22 +1249,24 @@ def validate_lifecycle(request: Request, descriptor) -> None:
 def preflight_install(repo_root: Path, request: Request) -> TransactionPlan:
     _validate_request(request, "install")
     root = normalized_absolute(repo_root)
-    inventories = _selected_sources(root, request)
-    target_plans = tuple(
-        _target_install(root, request, target, inventories[target])
-        for target in targets_for_request(request.targets, False)
-    )
+    with filesystem.CommandCache() as cache:
+        inventories = _selected_sources(root, request, cache)
+        target_plans = tuple(
+            _target_install(root, request, target, inventories[target], cache)
+            for target in targets_for_request(request.targets, False)
+        )
     return TransactionPlan("install", target_plans)
 
 
 def preflight_uninstall(repo_root: Path, request: Request) -> TransactionPlan:
     _validate_request(request, "uninstall")
     root = normalized_absolute(repo_root)
-    inventories = _selected_sources(root, request)
-    target_plans = tuple(
-        _target_uninstall(root, request, target, inventories[target])
-        for target in targets_for_request(request.targets, False)
-    )
+    with filesystem.CommandCache() as cache:
+        inventories = _selected_sources(root, request, cache)
+        target_plans = tuple(
+            _target_uninstall(root, request, target, inventories[target], cache)
+            for target in targets_for_request(request.targets, False)
+        )
     return TransactionPlan("uninstall", target_plans)
 
 
