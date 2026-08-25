@@ -8,6 +8,7 @@ import os
 import secrets
 import stat
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import TransactionError
@@ -111,6 +112,138 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _read_descriptor_bytes(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, _CHUNK_SIZE)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def read_bytes_with_evidence(path: Path, label: str) -> tuple[IdentityEvidence, bytes]:
+    """Read one regular file and derive its complete evidence from its fd."""
+
+    descriptor = _open_regular_read(path, label)
+    try:
+        content = _read_descriptor_bytes(descriptor)
+        evidence = _evidence_from_descriptor(descriptor, label, known_content=content)
+        return evidence, content
+    finally:
+        os.close(descriptor)
+
+
+@dataclass(frozen=True)
+class StateInventory:
+    """Validated state objects captured together for one planning command."""
+
+    manifest: object | None
+    journal: object | None
+
+
+class CommandCache:
+    """Ephemeral read/hash/state cache owned by one preflight command."""
+
+    def __init__(self) -> None:
+        self._bytes: dict[Path, tuple[IdentityEvidence, bytes]] = {}
+        self._hashes: dict[bytes, str] = {}
+        self._states: dict[tuple[Path, object], StateInventory] = {}
+
+    def __enter__(self) -> CommandCache:
+        return self
+
+    def __exit__(self, _type, _value, _traceback) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._bytes.clear()
+        self._hashes.clear()
+        self._states.clear()
+
+    def remember_bytes(
+        self, path: Path, evidence: IdentityEvidence, content: bytes
+    ) -> bytes:
+        if not isinstance(path, Path) or not isinstance(evidence, IdentityEvidence):
+            raise TypeError("cached bytes require a Path and identity evidence")
+        if type(content) is not bytes:
+            raise TypeError("cached bytes must be bytes")
+        if evidence.size != len(content) or evidence.sha256 != self.hash_bytes(content):
+            raise ValueError("cached bytes disagree with identity evidence")
+        self._bytes[normalized_absolute(path)] = (evidence, content)
+        return content
+
+    def read_bytes(self, path: Path, evidence: IdentityEvidence) -> bytes:
+        """Return bytes for evidence, reading and proving them on a cache miss."""
+
+        if not isinstance(path, Path) or not isinstance(evidence, IdentityEvidence):
+            raise TypeError("cached read requires a Path and identity evidence")
+        key = normalized_absolute(path)
+        cached = self._bytes.get(key)
+        if cached is not None and cached[0] == evidence:
+            return cached[1]
+        actual, content = read_bytes_with_evidence(key, "cached file")
+        if actual != evidence:
+            raise TransactionError("cached file identity evidence does not match")
+        self._bytes[key] = (actual, content)
+        return content
+
+    def read_regular(self, path: Path, label: str) -> tuple[bytes, int]:
+        """Read a regular file once while reusing unchanged evidence in scope."""
+
+        key = normalized_absolute(path)
+        cached = self._bytes.get(key)
+        if cached is None:
+            try:
+                evidence, content = read_bytes_with_evidence(key, label)
+            except FileNotFoundError:
+                raise
+            self._bytes[key] = (evidence, content)
+            return content, evidence.mode
+        try:
+            current = _metadata_evidence(key, label)
+        except FileNotFoundError:
+            raise
+        if (
+            current.device,
+            current.inode,
+            current.size,
+            current.nlink,
+            current.mode,
+        ) != (
+            cached[0].device,
+            cached[0].inode,
+            cached[0].size,
+            cached[0].nlink,
+            cached[0].mode,
+        ):
+            evidence, content = read_bytes_with_evidence(key, label)
+            self._bytes[key] = (evidence, content)
+            return content, evidence.mode
+        return cached[1], cached[0].mode
+
+    def hash_bytes(self, content: bytes) -> str:
+        if type(content) is not bytes:
+            raise TypeError("hash input must be bytes")
+        digest = self._hashes.get(content)
+        if digest is None:
+            digest = sha256_bytes(content)
+            self._hashes[content] = digest
+        return digest
+
+    def inventory_state(self, home: Path, descriptor) -> StateInventory:
+        key = (normalized_absolute(home), descriptor.target)
+        cached = self._states.get(key)
+        if cached is not None:
+            return cached
+        from .state import load_state
+
+        manifest, journal = load_state(key[0], descriptor)
+        result = StateInventory(manifest, journal)
+        self._states[key] = result
+        return result
+
+
 def _evidence_from_descriptor(
     descriptor: int, label: str, *, known_content: bytes | None = None
 ) -> IdentityEvidence:
@@ -151,6 +284,24 @@ def _evidence_from_descriptor(
         mode=stat.S_IMODE(result.st_mode),
         sha256=sha256,
     )
+
+
+def _metadata_evidence(path: Path, label: str) -> IdentityEvidence:
+    """Capture identity metadata without rereading bytes already in a cache."""
+
+    descriptor = _open_regular_read(path, label, operation="metadata")
+    try:
+        result = os.fstat(descriptor)
+        return IdentityEvidence(
+            device=result.st_dev,
+            inode=result.st_ino,
+            size=result.st_size,
+            nlink=result.st_nlink,
+            mode=stat.S_IMODE(result.st_mode),
+            sha256="",
+        )
+    finally:
+        os.close(descriptor)
 
 
 def capture_evidence(path: Path, label: str) -> IdentityEvidence | None:

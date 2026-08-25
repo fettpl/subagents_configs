@@ -1261,6 +1261,12 @@ def _apply_operation(
     before_identity = operation.expected_before_evidence
     if operation.expected_before_hash is not None and before_identity is None:
         raise TransactionError("transaction target lacks prepared identity evidence")
+    # Planning evidence is never trusted across the mutation boundary.  Take
+    # a fresh descriptor-relative capture immediately before CAS, including
+    # create operations where the expected state is absence.
+    current_identity = capture_evidence(path, "transaction mutation")
+    if current_identity != before_identity:
+        raise TransactionError(f"transaction target identity changed: {path}")
     if operation.expected_after_hash is None:
         result = filesystem.compare_and_swap(
             path, before_identity, None, None, "unlink"

@@ -683,6 +683,7 @@ def validate_source_inventory(
     specs: Sequence[SourceSpec],
     *,
     require_commit_pusher: bool = False,
+    cache: filesystem.CommandCache | None = None,
 ) -> tuple[ValidatedSource, ...]:
     """Validate every explicit source before returning any inventory item."""
     seen: set[str] = set()

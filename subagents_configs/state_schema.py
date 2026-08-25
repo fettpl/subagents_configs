@@ -1044,7 +1044,28 @@ def load_state(
     """Load manifest and journal metadata through one stable public seam."""
     if not isinstance(home, Path) or not isinstance(descriptor, TargetDescriptor):
         raise TypeError("state load requires a Path and TargetDescriptor")
-    return load_manifest(home, descriptor), load_journal(home, descriptor)
+    try:
+        raw = _read_state_files(home, descriptor)
+        manifest_raw = raw["manifest.json"]
+        journal_raw = raw["journal.json"]
+        if manifest_raw is None:
+            manifest = None
+        elif isinstance(manifest_raw, dict) and manifest_raw.get("schema_version") == 1:
+            manifest = migrate_manifest_schema(manifest_raw, descriptor, home)
+        else:
+            manifest = decode_manifest(manifest_raw, descriptor, home)
+        if journal_raw is None:
+            journal = None
+        elif isinstance(journal_raw, dict) and journal_raw.get("schema_version") == 1:
+            inspect_legacy_journal(journal_raw, descriptor, home)
+            journal = None
+        else:
+            journal = decode_journal(journal_raw, descriptor, home)
+        return manifest, journal
+    except ValueError as exc:
+        raise ValueError(
+            f"unsafe or legacy state; manual recovery is required: {exc}"
+        ) from exc
 
 
 @dataclass(frozen=True)

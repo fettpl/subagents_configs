@@ -112,8 +112,6 @@ jobs:
 
           python scripts/validate-catalogs.py
           python -m unittest discover -s tests -p 'test_*.py' -q
-          python -m unittest tests.test_readme_contract tests.test_docs tests.test_ci -q
-          python -m unittest tests.test_security_static -q
           python -m unittest tests.test_validation_backend.BackendIntegrationTests -v
           python -m unittest tests.test_validation_smoke -v
           ruff check claude-code subagents_configs scripts tests

@@ -159,6 +159,32 @@ class FullInstallMatrixTests(unittest.TestCase):
         }
         return self._expected_commitment_files_from_payloads(payloads)
 
+    def test_each_install_command_gets_a_fresh_scoped_cache(self):
+        from subagents_configs import filesystem, planning
+
+        created: list[filesystem.CommandCache] = []
+
+        class CountingCache(filesystem.CommandCache):
+            def __init__(self):
+                super().__init__()
+                created.append(self)
+
+        with (
+            private_tempdir() as temporary,
+            patch.object(planning.filesystem, "CommandCache", CountingCache),
+        ):
+            root = Path(temporary)
+            home = root / "home"
+            home.mkdir(mode=0o700)
+            request = planning_request(
+                "install", {Target.CODEX: home}, targets=(Target.CODEX,)
+            )
+            preflight_install(self.repository, request)
+            preflight_install(self.repository, request)
+
+        self.assertEqual(len(created), 2)
+        self.assertIsNot(created[0], created[1])
+
     def test_rendered_agent_files_remain_parseable_with_home_path_spaces(self):
         from subagents_configs.formats import validate_toml_agent, validate_yaml_agent
 

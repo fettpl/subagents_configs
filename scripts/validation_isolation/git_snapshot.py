@@ -55,6 +55,18 @@ _CACHE_COMPONENTS = frozenset(
 )
 
 
+def _hash_descriptor(descriptor: int) -> str:
+    """Hash an already pinned descriptor through one streaming seam."""
+
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(descriptor, _CHUNK_SIZE)
+        if not chunk:
+            break
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
 def is_protected_component(name: str) -> bool:
     """Return whether one relative-path component is never source input.
 
@@ -545,12 +557,7 @@ def _snapshot_file(
         opened = os.fstat(descriptor)
         if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
             raise UnsafePathError("source path changed before read")
-        digest = hashlib.sha256()
-        while True:
-            chunk = os.read(descriptor, _CHUNK_SIZE)
-            if not chunk:
-                break
-            digest.update(chunk)
+        sha256 = _hash_descriptor(descriptor)
         after_fd = os.fstat(descriptor)
         after_path = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
         identity = (before.st_dev, before.st_ino)
@@ -574,9 +581,7 @@ def _snapshot_file(
                 "source parent",
                 ancestor_identities,
             )
-        return SnapshotFile(
-            relative, True, digest.hexdigest(), stat.S_IMODE(before.st_mode)
-        )
+        return SnapshotFile(relative, True, sha256, stat.S_IMODE(before.st_mode))
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -685,12 +690,7 @@ def _verify_destination_file(
     )
     try:
         opened = os.fstat(verifier)
-        digest = hashlib.sha256()
-        while True:
-            chunk = os.read(verifier, _CHUNK_SIZE)
-            if not chunk:
-                break
-            digest.update(chunk)
+        sha256 = _hash_descriptor(verifier)
         after = os.fstat(verifier)
         final = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
         if (
@@ -700,7 +700,7 @@ def _verify_destination_file(
             or after.st_nlink != 1
             or stat.S_IMODE(after.st_mode) != mode
             or after.st_size != size
-            or digest.hexdigest() != expected.sha256
+            or sha256 != expected.sha256
         ):
             raise UnsafePathError("destination final content changed")
     finally:
@@ -794,12 +794,7 @@ def _copy_one(
         )
         try:
             verify_stat = os.fstat(verify_descriptor)
-            verify_digest = hashlib.sha256()
-            while True:
-                chunk = os.read(verify_descriptor, _CHUNK_SIZE)
-                if not chunk:
-                    break
-                verify_digest.update(chunk)
+            verify_sha256 = _hash_descriptor(verify_descriptor)
             verify_after = os.fstat(verify_descriptor)
             final_after = os.stat(
                 name, dir_fd=destination_parent, follow_symlinks=False
@@ -814,7 +809,7 @@ def _copy_one(
                 or verify_after.st_nlink != 1
                 or stat.S_IMODE(verify_after.st_mode) != destination_mode
                 or verify_after.st_size != copied_size
-                or verify_digest.hexdigest() != expected.sha256
+                or verify_sha256 != expected.sha256
             ):
                 raise UnsafePathError("destination content changed")
         finally:
