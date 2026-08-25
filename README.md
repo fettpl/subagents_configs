@@ -150,7 +150,8 @@ receives a managed `PreToolUse` Bash hook at
 installed `code-validator` agent frontmatter. The hook is a technical gate: it
 parses the Bash event as untrusted JSON and allows only the exact argv shape
 `python3 <installed-helper> -- <safe-relative-arguments>`. It never executes
-the command, and direct unrestricted Bash remains denied by the role policy.
+the command. The native hook entry is an executable command path with
+`args: []`; direct unrestricted Bash remains denied by the role policy.
 
 ## Command line
 
@@ -329,10 +330,10 @@ fail-closed backend behavior. Local verification includes:
 ```sh
 python3 scripts/validate-catalogs.py
 python3 -m unittest discover -s tests -p 'test_*.py' -v
-ruff check subagents_configs scripts tests
-ruff format --check subagents_configs scripts tests
+ruff check claude-code subagents_configs scripts tests
+ruff format --check claude-code subagents_configs scripts tests
 shellcheck install.sh uninstall.sh install-codex.sh uninstall-codex.sh install-opencode.sh uninstall-opencode.sh install-claude-code.sh uninstall-claude-code.sh
-python3 -m compileall -q subagents_configs scripts tests
+python3 -m compileall -q claude-code subagents_configs scripts tests
 git diff --check
 ```
 

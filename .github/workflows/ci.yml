@@ -86,11 +86,11 @@ jobs:
           python -m unittest tests.test_security_static -q
           python -m unittest tests.test_validation_backend.BackendIntegrationTests -v
           python -m unittest tests.test_validation_smoke -v
-          ruff check subagents_configs scripts tests
-          ruff format --check subagents_configs scripts tests
+          ruff check claude-code subagents_configs scripts tests
+          ruff format --check claude-code subagents_configs scripts tests
           sh -n ./*.sh
           "$shellcheck" install.sh uninstall.sh install-codex.sh uninstall-codex.sh install-opencode.sh uninstall-opencode.sh install-claude-code.sh uninstall-claude-code.sh
-          python -m compileall -q subagents_configs scripts tests
+          python -m compileall -q claude-code subagents_configs scripts tests
           git diff --check
           if ! checkout_status="$(git status --short)"; then
             echo "Unable to determine checkout status; refusing to claim a clean checkout"

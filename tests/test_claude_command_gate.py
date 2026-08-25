@@ -45,6 +45,9 @@ class ClaudeCommandGateTests(unittest.TestCase):
                 "tool_input": {"command": command},
                 "tool_use_id": "tool-1",
                 "agent_type": "code-validator",
+                "prompt_id": "prompt-1",
+                "effort": "medium",
+                "permission_mode": "default",
             }
         ).encode()
 
@@ -57,7 +60,10 @@ class ClaudeCommandGateTests(unittest.TestCase):
                     "hook_event_name": "PreToolUse",
                     "tool_name": "Bash",
                     "tool_input": {
-                        "command": "python3 /abs/helper -- unittest tests/test_x.py"
+                        "command": "python3 /abs/helper -- unittest tests/test_x.py",
+                        "description": "run focused tests",
+                        "timeout": 120000,
+                        "run_in_background": False,
                     },
                     "tool_use_id": "tool-1",
                     "permission_mode": "default",
@@ -92,6 +98,9 @@ class ClaudeCommandGateTests(unittest.TestCase):
             ("permission_mode", 1),
             ("agent_id", 1),
             ("agent_type", "implementer"),
+            ("permission_mode", "unsafe"),
+            ("effort", "maximum"),
+            ("prompt_id", "bad\nvalue"),
         ):
             invalid = dict(valid)
             invalid[key] = value
@@ -106,14 +115,27 @@ class ClaudeCommandGateTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             self.hook.parse_pretooluse_event(duplicate)
+        malformed_input = json.loads(
+            self._event("python3 /abs/helper -- unittest").decode()
+        )
+        malformed_input["tool_input"]["timeout"] = True
+        with self.assertRaises(ValueError):
+            self.hook.parse_pretooluse_event(json.dumps(malformed_input).encode())
 
     def test_validator_command_returns_fixed_argv_for_safe_data(self):
-        self.assertEqual(
-            self.hook.validate_validator_command(
-                "python3 /abs/helper -- unittest tests/test_x.py", "/abs/helper"
-            ),
-            ("python3", "/abs/helper", "--", "unittest", "tests/test_x.py"),
-        )
+        for command in (
+            "python3 /abs/helper -- unittest tests/test_x.py",
+            "python3 /abs/helper -- pytest tests/test_x.py",
+            "python3 /abs/helper -- ruff check subagents_configs",
+            "python3 /abs/helper -- python3 -m unittest discover -s tests",
+            "python3 /abs/helper -- python3 -m compileall -q subagents_configs",
+            "python3 /abs/helper -- shellcheck install.sh",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self.hook.validate_validator_command(command, "/abs/helper")[0:3],
+                    ("python3", "/abs/helper", "--"),
+                )
 
     def test_validator_command_rejects_shell_authority_and_unsafe_paths(self):
         commands = (
@@ -136,6 +158,14 @@ class ClaudeCommandGateTests(unittest.TestCase):
             "python3 /abs/helper -- unittest tests/?.py",
             "python3 /abs/helper -- unittest ~/tests.py",
             "python3 /abs/helper -- xargs unittest tests/test_x.py",
+            "python3 /abs/helper -- rm tests/test_x.py",
+            "python3 /abs/helper -- curl https://example.test",
+            "python3 /abs/helper -- git status",
+            "python3 /abs/helper -- sed -n 1p tests/test_x.py",
+            "python3 /abs/helper -- busybox sh",
+            "python3 /abs/helper -- python3 -c id",
+            "python3 /abs/helper -- python3 -m pip install x",
+            "python3 /abs/helper -- unknown-tool tests/test_x.py",
             "python3 /abs/helper -- unittest\ntests/test_x.py",
         )
         for command in commands:
@@ -196,7 +226,7 @@ class ClaudeCommandGateTests(unittest.TestCase):
         with private_tempdir() as temporary:
             root = Path(temporary)
             repository = planning_repository(root)
-            home = root / "claude-home"
+            home = root / "home with $ and (spaces)"
             home.mkdir(mode=0o700)
             plan = preflight_install(
                 repository,
@@ -205,6 +235,7 @@ class ClaudeCommandGateTests(unittest.TestCase):
             apply_transaction(plan)
             validator = (home / "agents/code-validator.md").read_text()
             self.assertIn("PreToolUse:", validator)
+            self.assertIn("args: []", validator)
             self.assertIn(
                 str(
                     home

@@ -9,6 +9,7 @@ hooks:
       hooks:
         - type: command
           command: "{{CLAUDE_HOOK}}"
+          args: []
 ---
 # Code Validator (Read-Only Verification Runner)
 

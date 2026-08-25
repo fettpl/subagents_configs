@@ -17,6 +17,10 @@ from .models import SourceSpec, Target
 from .paths import normalized_absolute, strict_relative_path
 from .targets import DESCRIPTORS, selected_sources
 
+_COMMAND_GATE_SHA256 = (
+    "9af7bace6c3db49b672497566fee72d6653b2daf28daf62a4790e3c7d7f0201e"
+)
+
 
 @dataclass(frozen=True)
 class ValidatedSource:
@@ -295,6 +299,8 @@ def _validate_command_gate_source(content: bytes, source: Path) -> None:
         raise ValueError("command gate hook does not validate events")
     if not {0, 2} <= returns:
         raise ValueError("command gate hook lacks fixed allow/deny statuses")
+    if hashlib.sha256(content).hexdigest() != _COMMAND_GATE_SHA256:
+        raise ValueError("command gate source digest is not pinned")
 
 
 def validate_agent_semantics(
@@ -484,7 +490,7 @@ def validate_agent_semantics(
                     {
                         "matcher": "Bash",
                         "hooks": [
-                            {"type": "command", "command": hook_path},
+                            {"type": "command", "command": hook_path, "args": []},
                         ],
                     }
                 ]

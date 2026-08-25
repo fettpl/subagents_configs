@@ -28,6 +28,11 @@ class PreToolUseEvent:
     permission_mode: str | None = None
     agent_id: str | None = None
     agent_type: str | None = None
+    prompt_id: str | None = None
+    effort: str | None = None
+    description: str | None = None
+    timeout: int | None = None
+    run_in_background: bool | None = None
 
 
 _EVENT_REQUIRED_KEYS = {
@@ -38,9 +43,20 @@ _EVENT_REQUIRED_KEYS = {
     "tool_input",
     "tool_use_id",
 }
-_EVENT_OPTIONAL_KEYS = {"transcript_path", "permission_mode", "agent_id", "agent_type"}
+_EVENT_OPTIONAL_KEYS = {
+    "transcript_path",
+    "permission_mode",
+    "agent_id",
+    "agent_type",
+    "prompt_id",
+    "effort",
+}
 _TOP_KEYS = _EVENT_REQUIRED_KEYS | _EVENT_OPTIONAL_KEYS
-_INPUT_KEYS = {"command"}
+_INPUT_KEYS = {"command", "description", "timeout", "run_in_background"}
+_PERMISSION_MODES = frozenset(
+    {"default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"}
+)
+_EFFORTS = frozenset({"low", "medium", "high"})
 _EVENT_NAME = "PreToolUse"
 _TOOL_NAME = "Bash"
 _SHELL_META = frozenset(
@@ -104,6 +120,8 @@ _BLOCKED_EXECUTABLES = frozenset(
         "make",
     }
 )
+_DIRECT_VALIDATORS = frozenset({"unittest", "pytest", "ruff", "shellcheck"})
+_PYTHON_VALIDATOR_MODULES = frozenset({"unittest", "compileall", "pytest"})
 
 
 def _reject_duplicate_pairs(pairs: list[tuple[object, object]]) -> dict[object, object]:
@@ -133,6 +151,20 @@ def _contains_command_syntax(value: str) -> bool:
     )
 
 
+def _safe_text(value: object, *, max_length: int = 4096) -> bool:
+    return (
+        type(value) is str
+        and bool(value)
+        and len(value) <= max_length
+        and not any(
+            ord(character) < 0x20
+            or ord(character) == 0x7F
+            or unicodedata.category(character) in {"Cc", "Cf"}
+            for character in value
+        )
+    )
+
+
 def parse_pretooluse_event(raw: bytes) -> PreToolUseEvent:
     """Parse one exact Claude Bash event without exposing input in errors."""
 
@@ -158,24 +190,42 @@ def parse_pretooluse_event(raw: bytes) -> PreToolUseEvent:
     top = decoded
     if any(key not in top for key in _EVENT_REQUIRED_KEYS):
         raise ValueError("invalid event")
-    strings = ("session_id", "cwd", "tool_use_id")
-    if any(
-        type(top[key]) is not str or not top[key] or len(top[key]) > 4096
-        for key in strings
-    ):
+    if any(not _safe_text(top[key]) for key in ("session_id", "cwd", "tool_use_id")):
         raise ValueError("invalid event")
     if top["hook_event_name"] != _EVENT_NAME:
         raise ValueError("invalid event")
     if top["tool_name"] != _TOOL_NAME:
         raise ValueError("invalid event")
-    for key in _EVENT_OPTIONAL_KEYS:
-        if key in top and (
-            type(top[key]) is not str or not top[key] or len(top[key]) > 4096
-        ):
+    for key in {"transcript_path", "agent_id", "agent_type", "prompt_id"}:
+        if key in top and not _safe_text(top[key]):
             raise ValueError("invalid event")
+    if "permission_mode" in top and top["permission_mode"] not in _PERMISSION_MODES:
+        raise ValueError("invalid event")
+    if "effort" in top and top["effort"] not in _EFFORTS:
+        raise ValueError("invalid event")
     if "agent_type" in top and top["agent_type"] != "code-validator":
         raise ValueError("invalid event")
-    tool_input = _object(top["tool_input"], _INPUT_KEYS)
+    tool_input = top["tool_input"]
+    if (
+        type(tool_input) is not dict
+        or not isinstance(tool_input.get("command"), str)
+        or set(tool_input) - _INPUT_KEYS
+        or any(type(key) is not str for key in tool_input)
+    ):
+        raise ValueError("invalid event")
+    for key in ("description",):
+        if key in tool_input and not _safe_text(tool_input[key]):
+            raise ValueError("invalid event")
+    if "timeout" in tool_input and (
+        type(tool_input["timeout"]) is not int
+        or not 0 <= tool_input["timeout"] <= 86_400_000
+    ):
+        raise ValueError("invalid event")
+    if (
+        "run_in_background" in tool_input
+        and type(tool_input["run_in_background"]) is not bool
+    ):
+        raise ValueError("invalid event")
     command = tool_input["command"]
     if (
         type(command) is not str
@@ -183,8 +233,6 @@ def parse_pretooluse_event(raw: bytes) -> PreToolUseEvent:
         or len(command) > 16_384
         or _contains_command_syntax(command)
     ):
-        raise ValueError("invalid event")
-    if _contains_command_syntax(command):
         raise ValueError("invalid event")
     return PreToolUseEvent(
         session_id=top["session_id"],
@@ -195,6 +243,11 @@ def parse_pretooluse_event(raw: bytes) -> PreToolUseEvent:
         permission_mode=top.get("permission_mode"),
         agent_id=top.get("agent_id"),
         agent_type=top.get("agent_type"),
+        prompt_id=top.get("prompt_id"),
+        effort=top.get("effort"),
+        description=tool_input.get("description"),
+        timeout=tool_input.get("timeout"),
+        run_in_background=tool_input.get("run_in_background"),
     )
 
 
@@ -202,7 +255,7 @@ def _safe_relative_argument(value: str) -> bool:
     if (
         not value
         or "\x00" in value
-        or value in {".", ".."}
+        or value == ".."
         or any(character in _GLOB_META or character == "\\" for character in value)
     ):
         return False
@@ -235,13 +288,31 @@ def validate_validator_command(command: str, helper: str) -> tuple[str, ...]:
         raise ValueError("validation command denied") from None
     if len(argv) < 4 or argv[:3] != ("python3", helper, "--"):
         raise ValueError("validation command denied")
-    for index, value in enumerate(argv[3:]):
+    payload = argv[3:]
+    executable = payload[0]
+    if executable in _DIRECT_VALIDATORS:
+        if executable == "ruff" and (
+            len(payload) < 2 or payload[1] not in {"check", "format"}
+        ):
+            raise ValueError("validation command denied")
+    elif (
+        executable == "python3"
+        and len(payload) >= 3
+        and payload[1] == "-m"
+        and payload[2] in _PYTHON_VALIDATOR_MODULES
+    ):
+        pass
+    else:
+        raise ValueError("validation command denied")
+    for index, value in enumerate(payload):
         if not _safe_relative_argument(value):
             raise ValueError("validation command denied")
         if _ASSIGNMENT.match(value):
             raise ValueError("validation command denied")
         basename = PurePosixPath(value).name.lower()
-        if value.lower() in _BLOCKED_EXECUTABLES or basename in _BLOCKED_EXECUTABLES:
+        if index > 0 and (
+            value.lower() in _BLOCKED_EXECUTABLES or basename in _BLOCKED_EXECUTABLES
+        ):
             raise ValueError("validation command denied")
         if index == 0 and ("/" in value or value.startswith("-")):
             raise ValueError("validation command denied")

@@ -118,3 +118,46 @@ Commit: pending `fix: scope Claude command gate to validator agent`
 - Claude installations on versions without agent-frontmatter hooks must be
   rejected by future compatibility validation rather than silently falling
   back to a global hook; no global authority-changing fallback is retained.
+
+## Fix round 2/5 — native exec form, strict event schema, and pinned source
+
+Status: complete
+Commit: pending `fix: harden Claude validator hook contract`
+
+### TDD record
+
+- RED: native `args: []` was absent, realistic optional event/tool-input fields
+  were rejected, broad post-`--` commands (`rm`, `curl`, `git`, `sed`,
+  `busybox`, and unknown PATH tools) were accepted, and the finite Python
+  module validator forms were rejected.
+- GREEN: the focused suite passes after implementing the native exec form,
+  bounded optional schema, finite command grammar, and canonical hook digest
+  contract.
+
+### Review mapping
+
+- Validator frontmatter now requires the exact native command path plus
+  `args: []`; rendered hostile home paths remain data and cannot become shell
+  syntax.
+- PreToolUse parsing accepts documented `prompt_id`, `effort`, permission,
+  transcript, agent, and Bash description/timeout/background fields only with
+  strict types, enums, bounds, control rejection, duplicate rejection, and
+  validator-agent scoping.
+- Command authority is finite: direct `unittest`, `pytest`, `ruff`, and
+  `shellcheck`, or `python3 -m unittest|compileall|pytest`; arbitrary PATH
+  executables, shells, interpreters, launchers, package/network/destructive
+  tools, globbing, tilde, traversal, and assignments are denied.
+- The command-gate source is checked against a canonical SHA-256 digest in
+  addition to its fail-closed AST contract, so every byte mutation is rejected.
+- CI and README Ruff/format/compileall commands include `claude-code`.
+
+### Fix-round verification
+
+- Focused: 55 tests passed.
+- Full discovery: 407 tests passed, 1 explicit unsupported-host validation
+  smoke skip.
+- `scripts/validate-catalogs.py`: passed.
+- Ruff check and format check over `claude-code subagents_configs scripts tests`:
+  passed.
+- Compileall over `claude-code subagents_configs scripts tests`: passed.
+- `git diff --check`: passed.

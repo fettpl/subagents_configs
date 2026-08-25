@@ -107,10 +107,10 @@ class CiContractTests(unittest.TestCase):
             "tests.test_security_static",
             "tests.test_validation_backend.BackendIntegrationTests",
             "unittest discover -s tests -p 'test_*.py'",
-            "ruff check subagents_configs scripts tests",
-            "ruff format --check subagents_configs scripts tests",
+            "ruff check claude-code subagents_configs scripts tests",
+            "ruff format --check claude-code subagents_configs scripts tests",
             "shellcheck",
-            "compileall -q subagents_configs scripts tests",
+            "compileall -q claude-code subagents_configs scripts tests",
             "git diff --check",
         ):
             self.assertIn(command, self.text)
