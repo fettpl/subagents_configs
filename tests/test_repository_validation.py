@@ -460,6 +460,78 @@ class CanonicalValidatorTests(unittest.TestCase):
         self.assertEqual(len(result.stderr.sha256), 64)
         self.assertNotIn("o" * (validator._CAPTURE_LIMIT + 1), result.stdout.text)
 
+    def test_eof_waits_for_successful_child_instead_of_false_timeout(self):
+        validator = _load_validator()
+
+        class FakeStream:
+            def __init__(self, descriptor):
+                self.descriptor = descriptor
+                self.closed = False
+
+            def fileno(self):
+                return self.descriptor
+
+            def close(self):
+                self.closed = True
+
+        class FakeKey:
+            def __init__(self, fileobj, data):
+                self.fileobj = fileobj
+                self.data = data
+
+        class FakeSelector:
+            def __init__(self):
+                self.keys = {}
+
+            def register(self, fileobj, _events, data):
+                self.keys[fileobj.fileno()] = FakeKey(fileobj, data)
+
+            def unregister(self, fileobj):
+                del self.keys[fileobj.fileno()]
+
+            def get_map(self):
+                return self.keys
+
+            def select(self, _timeout):
+                return [
+                    (key, validator.selectors.EVENT_READ) for key in self.keys.values()
+                ]
+
+            def close(self):
+                pass
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdout = FakeStream(11)
+                self.stderr = FakeStream(12)
+                self.returncode = None
+                self.wait_calls = []
+                self.kill_calls = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.wait_calls.append(timeout)
+                self.returncode = 0
+                return self.returncode
+
+            def kill(self):
+                self.kill_calls += 1
+
+        process = FakeProcess()
+        with (
+            patch.object(validator.subprocess, "Popen", return_value=process),
+            patch.object(
+                validator.selectors, "DefaultSelector", return_value=FakeSelector()
+            ),
+            patch.object(validator.os, "read", side_effect=lambda _fd, _size: b""),
+        ):
+            result = validator._run(("/usr/bin/true",), env={}, cwd=ROOT)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(process.kill_calls, 0)
+        self.assertEqual(len(process.wait_calls), 1)
+
     def test_direct_check_timeout_kills_child_and_returns_bounded_result(self):
         validator = _load_validator()
         command = (

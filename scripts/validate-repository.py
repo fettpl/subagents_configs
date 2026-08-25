@@ -178,6 +178,7 @@ def _run(argv: Sequence[str], *, env: dict[str, str], cwd: Path) -> _CheckResult
     selector = selectors.DefaultSelector()
     read_failed = False
     timed_out = False
+    reaped = False
     for stream, accumulator in streams:
         if stream is None:
             read_failed = True
@@ -209,15 +210,28 @@ def _run(argv: Sequence[str], *, env: dict[str, str], cwd: Path) -> _CheckResult
                     selector.unregister(key.fileobj)
                     key.fileobj.close()
     finally:
-        if process.poll() is None:
-            timed_out = True
+        if not timed_out:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                timed_out = True
+            else:
+                try:
+                    # EOF only says that both captured streams are closed; the
+                    # child may still be completing.  Observe its exit within
+                    # the same overall deadline before classifying a timeout.
+                    process.wait(timeout=remaining)
+                    reaped = True
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+        if timed_out and process.poll() is None:
             process.kill()
         selector.close()
-        try:
-            process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+        if not reaped:
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
         for stream, _ in streams:
             if stream is not None and not stream.closed:
                 stream.close()
