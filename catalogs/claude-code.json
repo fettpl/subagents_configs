@@ -1,6 +1,6 @@
 {
   "agent_directory": "claude-code/agents",
-  "catalog_sha256": "1c19326391fb31ab91df3f61b840d9cdda922fcdc7739834164b2ad411c489dc",
+  "catalog_sha256": "abb6de5ab4ffad33447616efc659462333ae73452243d10d84e4a35324ad01c7",
   "external_lifecycle": null,
   "global_instruction": {
     "block_id": "routing-claude-code",
@@ -121,7 +121,7 @@
   "schema_version": 1,
   "semantic_validator": "agent",
   "source_format": "yaml-frontmatter",
-  "source_sha256": "10540419ea9353d7f5f9d82846db41b36182e431cea5faaa595bc327ec295545",
+  "source_sha256": "4b15f8e21774121e49a5ab2dcbdbf47964bb859d90d1fdbde58cb9c2d03cf62c",
   "sources": [
     {
       "destination": "agents/code-explorer.md",
@@ -182,7 +182,7 @@
       "identifier": "claude/code-validator-command-gate",
       "kind": "command-gate",
       "optional_role": null,
-      "sha256": "ee2b44eded42988c64168081cff225bdc2bcdb14f38462708effd3897d7777fa",
+      "sha256": "76100fdb730e9e350b861834e7b741401ea5ba1956047a520d600ec6baa8660b",
       "source": "claude-code/hooks/code-validator-pretooluse.py",
       "source_format": "python"
     },

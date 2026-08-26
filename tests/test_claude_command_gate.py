@@ -225,6 +225,14 @@ class ClaudeCommandGateTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.hook.validate_validator_command(command, helper)
 
+    def test_validator_command_rejects_glob_syntax_in_helper_path(self):
+        for glob in ("*", "?", "[ab]"):
+            helper = f"/private/tmp/claude home/run-validation-isolated.py{glob}"
+            command = f"python3 {shlex.quote(helper)} -- unittest tests/test_x.py"
+            with self.subTest(glob=glob):
+                with self.assertRaises(ValueError):
+                    self.hook.validate_validator_command(command, helper)
+
     def test_validator_command_rejects_shell_authority_and_unsafe_paths(self):
         commands = (
             "bash -c 'touch x'",
