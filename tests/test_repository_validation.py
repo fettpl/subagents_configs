@@ -419,6 +419,221 @@ class CanonicalValidatorTests(unittest.TestCase):
         self.assertNotIn("PRIVATE", message)
         self.assertNotIn("/Users/pawel", message)
 
+    def test_unit_failure_diagnostic_keeps_only_safe_identifiers_and_reasons(self):
+        validator = _load_validator()
+        stderr = """\
+FAIL: test_safe (tests.test_safe.SafeTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+AssertionError: API_KEY=super-secret\nhttps://example.invalid/token
+ERROR: test_broken (tests.test_broken.BrokenTests)
+----------------------------------------------------------------------
+ValueError: /Users/private/checkout/prompt.txt
+"""
+        diagnostic = validator._diagnostic(
+            "unit test discovery", "exit-1", validator._result(1, stderr=stderr)
+        )
+
+        self.assertIn(
+            "unit-failures=FAIL:test_safe (tests.test_safe.SafeTests),"
+            "ERROR:test_broken (tests.test_broken.BrokenTests)",
+            diagnostic,
+        )
+        self.assertIn("unit-reasons=assertion,exception", diagnostic)
+        for field in (
+            "stdout-bytes=",
+            "stdout-sha256=",
+            "stderr-bytes=",
+            "stderr-sha256=",
+        ):
+            self.assertIn(field, diagnostic)
+        for secret in (
+            "API_KEY=super-secret",
+            "https://example.invalid/token",
+            "/Users/private/checkout/prompt.txt",
+            "most recent call",
+        ):
+            self.assertNotIn(secret, diagnostic)
+
+    def test_unit_parser_accepts_real_python_314_failure_error_and_subtest(
+        self,
+    ):
+        validator = _load_validator()
+        # Captured from Python 3.14 unittest TextTestRunner output.  The
+        # traceback/source lines are intentionally included to prove the
+        # parser does not need to inspect arbitrary test output.
+        stderr = """\
+testCamelCase (__main__.T.testCamelCase) ... ERROR
+test_plain (__main__.T.test_plain) ... FAIL
+test_sub (__main__.T.test_sub) ...
+  test_sub (__main__.T.test_sub) (case=0) ... FAIL
+
+======================================================================
+ERROR: testCamelCase (__main__.T.testCamelCase)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<string>", line 4, in testCamelCase
+    def testCamelCase(self): 1/0
+ZeroDivisionError: division by zero
+
+======================================================================
+FAIL: test_plain (__main__.T.test_plain)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<string>", line 3, in test_plain
+    def test_plain(self): self.fail("x")
+AssertionError: x
+
+======================================================================
+FAIL: test_sub (__main__.T.test_sub) (case=0)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<string>", line 7, in test_sub
+    with self.subTest(case=i): self.fail("x")
+AssertionError: x
+"""
+        diagnostic = validator._diagnostic(
+            "unit test discovery", "exit-1", validator._result(1, stderr=stderr)
+        )
+
+        self.assertIn(
+            "unit-failures=ERROR:testCamelCase (__main__.T.testCamelCase),"
+            "FAIL:test_plain (__main__.T.test_plain),"
+            "FAIL:test_sub (__main__.T.test_sub)",
+            diagnostic,
+        )
+        self.assertNotIn("(case=0)", diagnostic)
+        self.assertIn("unit-reasons=exception,assertion", diagnostic)
+
+    def test_unit_parser_accepts_real_exact_test_method_identifier(self):
+        validator = _load_validator()
+        # Captured from Python 3.14 unittest output for def test(self).
+        stderr = """\
+======================================================================
+FAIL: test (__main__.T.test)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<string>", line 2, in test
+AssertionError: x
+"""
+        diagnostic = validator._diagnostic(
+            "unit test discovery", "exit-1", validator._result(1, stderr=stderr)
+        )
+
+        self.assertIn("unit-failures=FAIL:test (__main__.T.test)", diagnostic)
+
+    def test_unit_parser_ignores_nested_subtest_suffix_and_secret(self):
+        validator = _load_validator()
+        # Captured from Python 3.14 unittest output for a nested subTest value.
+        stderr = """\
+======================================================================
+FAIL: test_sub (__main__.T.test_sub) (case='x (secret)')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<string>", line 4, in test_sub
+AssertionError: x
+"""
+        diagnostic = validator._diagnostic(
+            "unit test discovery", "exit-1", validator._result(1, stderr=stderr)
+        )
+
+        self.assertIn("unit-failures=FAIL:test_sub (__main__.T.test_sub)", diagnostic)
+        self.assertIn("unit-reasons=assertion", diagnostic)
+        self.assertNotIn("case=", diagnostic)
+        self.assertNotIn("x (secret)", diagnostic)
+        self.assertNotIn("SECRET", diagnostic)
+
+    def test_unit_failure_parser_rejects_malicious_headers_reasons_and_controls(self):
+        validator = _load_validator()
+        stderr = (
+            "FAIL: test_safe (tests.test_safe.SafeTests)\n"
+            "FAIL: test_suffix (__main__.T) "
+            "(API_KEY=secret https://evil.invalid/token /private/prompt)\n"
+            "FAIL: test_scope_secret (SECRET)\n"
+            "FAIL: test_scope_dots (pkg..SECRET.)\n"
+            "FAIL: test_control (__main__.T.test_control) (case=\x00)\n"
+            "FAIL: test_unicode (__main__.T.test_unicode) (case=é)\n"
+            "FAIL: SECRET (pkg.C)\n"
+            "ERROR: helper (pkg.C)\n"
+            "FAIL: test_evil; API_KEY=secret (tests.test_evil.Evil)\n"
+            "ERROR: test_path (../../private)\n"
+            "AssertionError: prompt=do-not-share\x00\x1b[31m\n"
+            "not a unittest report\n"
+        )
+        diagnostic = validator._diagnostic(
+            "unit test discovery", "exit-1", validator._result(1, stderr=stderr)
+        )
+
+        self.assertIn(
+            "unit-failures=FAIL:test_safe (tests.test_safe.SafeTests)", diagnostic
+        )
+        self.assertNotIn("test_evil", diagnostic)
+        self.assertNotIn("test_path", diagnostic)
+        self.assertNotIn("test_scope_secret", diagnostic)
+        self.assertNotIn("test_scope_dots", diagnostic)
+        self.assertNotIn("test_control", diagnostic)
+        self.assertNotIn("test_unicode", diagnostic)
+        self.assertNotIn("SECRET", diagnostic)
+        self.assertNotIn("helper", diagnostic)
+        self.assertNotIn("API_KEY", diagnostic)
+        self.assertNotIn("https://evil.invalid/token", diagnostic)
+        self.assertNotIn("/private/prompt", diagnostic)
+        self.assertNotIn("prompt=do-not-share", diagnostic)
+        self.assertNotRegex(diagnostic, r"[\x00-\x1f\x7f]")
+
+    def test_unit_parser_rejects_secret_and_malformed_dotted_scopes(self):
+        validator = _load_validator()
+        stderr = "FAIL: test_safe (SECRET)\nFAIL: test_safe (pkg..SECRET.)\n"
+        diagnostic = validator._diagnostic(
+            "unit test discovery", "exit-1", validator._result(1, stderr=stderr)
+        )
+
+        self.assertNotIn("unit-failures=", diagnostic)
+        self.assertNotIn("SECRET", diagnostic)
+
+    def test_unit_failure_parser_is_bounded_and_malformed_output_is_omitted(self):
+        validator = _load_validator()
+        headers = "\n".join(
+            f"FAIL: test_{index:03d} (tests.test_many.Case)" for index in range(40)
+        )
+        diagnostic = validator._diagnostic(
+            "unit test discovery", "exit-1", validator._result(1, stderr=headers)
+        )
+        self.assertLessEqual(diagnostic.count("unit-failures="), 1)
+        failure_field = diagnostic.split("unit-failures=", 1)[1].split("; ", 1)[0]
+        self.assertLessEqual(
+            len(failure_field.split(",")), validator._UNIT_DIAGNOSTIC_MAX_ITEMS
+        )
+        self.assertLessEqual(
+            max(map(len, failure_field.split(","))),
+            validator._UNIT_DIAGNOSTIC_MAX_ITEM_LENGTH,
+        )
+
+        malformed = validator._diagnostic(
+            "unit test discovery",
+            "exit-1",
+            validator._result(1, stderr="FAIL: \x00 arbitrary output SECRET"),
+        )
+        self.assertNotIn("unit-failures=", malformed)
+        self.assertNotIn("arbitrary output", malformed)
+        self.assertNotIn("SECRET", malformed)
+
+    def test_non_unit_failure_diagnostic_remains_hash_only(self):
+        validator = _load_validator()
+        diagnostic = validator._diagnostic(
+            "Ruff check",
+            "exit-1",
+            validator._result(
+                1,
+                stdout="FAIL: test_safe (tests.test_safe.SafeTests)",
+                stderr="AssertionError: SECRET /private/path",
+            ),
+        )
+        self.assertNotIn("unit-failures=", diagnostic)
+        self.assertNotIn("unit-reasons=", diagnostic)
+        self.assertNotIn("test_safe", diagnostic)
+        self.assertNotIn("SECRET", diagnostic)
+
     def test_failure_fingerprints_distinguish_secret_free_failures(self):
         validator = _load_validator()
         tools = tuple(
