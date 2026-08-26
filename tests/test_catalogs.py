@@ -94,6 +94,143 @@ class CatalogTests(unittest.TestCase):
             parsed = tomllib.loads((ROOT / "agents" / f"{role}.toml").read_text())
             self.assertEqual(parsed["sandbox_mode"], "read-only")
 
+    def test_codex_semantics_reject_unknown_authority_and_benign_fields(self):
+        import tomllib
+
+        from subagents_configs import formats
+
+        parsed = tomllib.loads((ROOT / "agents/code-explorer.toml").read_text())
+        for field, value in {
+            "approval_policy": "never",
+            "permissions": {},
+            "display_color": "blue",
+        }.items():
+            candidate = dict(parsed)
+            candidate[field] = value
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    ValueError, "unknown codex agent frontmatter field"
+                ):
+                    formats.validate_agent_semantics(
+                        Target.CODEX,
+                        "code-explorer",
+                        candidate,
+                        "read-only body",
+                    )
+
+    def test_codex_semantics_rejects_unsupported_config_fields_even_when_empty(self):
+        import tomllib
+
+        from subagents_configs import formats
+
+        parsed = tomllib.loads((ROOT / "agents/code-explorer.toml").read_text())
+        unsupported = {
+            "mcp_servers": ({}, {"docs": {}}),
+            "skills": ({}, {"config": []}),
+            "nickname_candidates": ([], ["Scout"]),
+            "permissions": ({}, {"workspace": "allow"}),
+            "hooks": ({}, {"after_turn": []}),
+            "features": ({}, {"multi_agent": True}),
+            "model_provider": ("openai", {"name": "openai"}),
+            "review_model": ("gpt-5.6-luna", ["gpt-5.6-luna"]),
+        }
+        for field, values in unsupported.items():
+            for value in values:
+                candidate = dict(parsed)
+                candidate[field] = value
+                with self.subTest(field=field, value=value):
+                    with self.assertRaisesRegex(
+                        ValueError, "unknown codex agent frontmatter field"
+                    ):
+                        formats.validate_agent_semantics(
+                            Target.CODEX,
+                            "code-explorer",
+                            candidate,
+                            "read-only body",
+                        )
+
+    def test_codex_semantics_rejects_non_string_catalog_fields(self):
+        import tomllib
+
+        from subagents_configs import formats
+
+        parsed = tomllib.loads((ROOT / "agents/code-explorer.toml").read_text())
+        invalid_types = {
+            "description": False,
+            "developer_instructions": True,
+            "model": {"name": "gpt-5.6-luna"},
+            "model_reasoning_effort": ["low"],
+            "sandbox_mode": False,
+        }
+        for field, value in invalid_types.items():
+            candidate = dict(parsed)
+            candidate[field] = value
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    ValueError, "Codex agent field must be a string"
+                ):
+                    formats.validate_agent_semantics(
+                        Target.CODEX,
+                        "code-explorer",
+                        candidate,
+                        "read-only body",
+                    )
+
+    def test_codex_semantics_requires_description_and_instructions(self):
+        import tomllib
+
+        from subagents_configs import formats
+
+        parsed = tomllib.loads((ROOT / "agents/code-explorer.toml").read_text())
+        for field in ("description", "developer_instructions"):
+            candidate = dict(parsed)
+            del candidate[field]
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    ValueError, "Codex agent field is required"
+                ):
+                    formats.validate_agent_semantics(
+                        Target.CODEX,
+                        "code-explorer",
+                        candidate,
+                        "read-only body",
+                    )
+
+    def test_codex_semantics_rejects_empty_required_fields(self):
+        import tomllib
+
+        from subagents_configs import formats
+
+        parsed = tomllib.loads((ROOT / "agents/code-explorer.toml").read_text())
+        for field in ("description", "developer_instructions"):
+            for value in ("", " \t\n"):
+                candidate = dict(parsed)
+                candidate[field] = value
+                with self.subTest(field=field, value=repr(value)):
+                    with self.assertRaisesRegex(
+                        ValueError, "Codex agent field must be non-empty"
+                    ):
+                        formats.validate_agent_semantics(
+                            Target.CODEX,
+                            "code-explorer",
+                            candidate,
+                            "read-only body",
+                        )
+
+    def test_codex_semantics_accepts_exact_catalog_agent_fields(self):
+        import tomllib
+
+        from subagents_configs import formats
+
+        for path in sorted((ROOT / "agents").glob("*.toml")):
+            parsed = tomllib.loads(path.read_text())
+            formats.validate_agent_semantics(
+                Target.CODEX,
+                parsed["name"],
+                parsed,
+                path.read_text(),
+            )
+
     def test_opencode_read_roles_deny_edit_bash_external_directory_webfetch_task(self):
         for role in ("code-explorer", "code-reviewer"):
             parsed, _ = _yaml_frontmatter(ROOT / "opencode" / "agents" / f"{role}.md")
