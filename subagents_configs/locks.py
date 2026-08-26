@@ -107,6 +107,38 @@ def _lock_anchor_path_identity(
         raise ValueError("target lock anchor identity changed")
 
 
+def _unlock_and_close(descriptor: int, unlock: bool) -> list[BaseException]:
+    errors: list[BaseException] = []
+    if unlock:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except BaseException as exc:
+            errors.append(exc)
+    try:
+        os.close(descriptor)
+    except BaseException as exc:
+        errors.append(exc)
+    return errors
+
+
+def _report_cleanup_errors(
+    primary: BaseException | None, errors: list[BaseException]
+) -> None:
+    if not errors:
+        return
+    notes = "; ".join(repr(error) for error in errors)
+    if primary is not None:
+        primary.add_note(f"lock cleanup failed: {notes}")
+        return
+    first, *additional = errors
+    if additional:
+        first.add_note(
+            "additional lock cleanup failures: "
+            + "; ".join(repr(error) for error in additional)
+        )
+    raise first
+
+
 def _after_home_validation(home: Path) -> None:
     """Race-test seam between lexical validation and descriptor traversal."""
 
@@ -518,6 +550,7 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
     home_lock_descriptors: list[int] = []
     anchor_registrations: list[tuple[Path, object]] = []
     home_identities: dict[Path, tuple[int, int]] = {}
+    primary_error: BaseException | None = None
     try:
         for target in targets:
             home = normalized[target]
@@ -531,8 +564,10 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
                 )
             except OSError as exc:
                 home_descriptors.pop()
-                os.close(home_descriptor)
-                raise ValueError("cannot open target lock anchor") from exc
+                primary = ValueError("cannot open target lock anchor")
+                cleanup_errors = _unlock_and_close(home_descriptor, False)
+                _report_cleanup_errors(primary, cleanup_errors)
+                raise primary from exc
             anchor_token = None
             home_flocked = False
             flocked = False
@@ -554,16 +589,16 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
                 flocked = True
                 _lock_anchor_path_identity(home_descriptor, anchor_identity)
-            except BaseException:
-                if flocked:
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
-                if anchor_token is not None:
-                    _release_anchor(home, anchor_token)
-                os.close(descriptor)
-                if home_flocked:
-                    fcntl.flock(home_descriptor, fcntl.LOCK_UN)
+            except BaseException as primary:
                 home_descriptors.pop()
-                os.close(home_descriptor)
+                cleanup_errors = _unlock_and_close(descriptor, flocked)
+                if anchor_token is not None:
+                    try:
+                        _release_anchor(home, anchor_token)
+                    except BaseException as exc:
+                        cleanup_errors.append(exc)
+                cleanup_errors.extend(_unlock_and_close(home_descriptor, home_flocked))
+                _report_cleanup_errors(primary, cleanup_errors)
                 raise
             anchor_registrations.append((home, anchor_token))
             home_lock_descriptors.append(home_descriptor)
@@ -575,20 +610,31 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
         finally:
             lease.released = True
             _LOCK_LEASE.reset(lease_token)
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
+        cleanup_errors: list[BaseException] = []
         for descriptor in reversed(descriptors):
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            finally:
-                os.close(descriptor)
+            cleanup_errors.extend(_unlock_and_close(descriptor, True))
         try:
             for descriptor in reversed(home_lock_descriptors):
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
         finally:
             for home, token in reversed(anchor_registrations):
-                _release_anchor(home, token)
+                try:
+                    _release_anchor(home, token)
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
         for descriptor in reversed(home_descriptors):
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        _report_cleanup_errors(primary_error, cleanup_errors)
 
 
 def capture_evidence(path: Path, label: str) -> IdentityEvidence | None:

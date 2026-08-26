@@ -438,6 +438,97 @@ with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
             self.assertTrue((home / ".subagents_configs.lock").is_file())
             self.assertTrue((home / ".detached-lock").is_file())
 
+    def test_cleanup_closes_home_descriptor_when_unlock_fails(self):
+        with private_tempdir() as temporary:
+            home = Path(temporary) / "home"
+            home.mkdir(mode=0o700)
+            real_flock = locks.fcntl.flock
+            real_close = locks.os.close
+            flock_calls = []
+            close_calls = []
+            cleanup_close_calls = []
+            unlocks = 0
+
+            def flaky_flock(descriptor, operation):
+                nonlocal unlocks
+                flock_calls.append((descriptor, operation))
+                result = real_flock(descriptor, operation)
+                if operation == locks.fcntl.LOCK_UN:
+                    unlocks += 1
+                    if unlocks == 2:
+                        raise OSError("injected home unlock failure")
+                return result
+
+            def recording_close(descriptor):
+                close_calls.append(descriptor)
+                if unlocks:
+                    cleanup_close_calls.append(descriptor)
+                return real_close(descriptor)
+
+            with (
+                patch.object(locks.fcntl, "flock", side_effect=flaky_flock),
+                patch.object(locks.os, "close", side_effect=recording_close),
+            ):
+                with self.assertRaisesRegex(OSError, "home unlock failure"):
+                    with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                        pass
+            home_descriptor = flock_calls[0][0]
+            anchor_descriptor = flock_calls[1][0]
+            self.assertIn(home_descriptor, cleanup_close_calls)
+            self.assertIn(anchor_descriptor, cleanup_close_calls)
+            self.assertGreaterEqual(len(close_calls), 2)
+            with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                pass
+
+    def test_acquisition_cleanup_releases_all_descriptors_when_unlock_fails(self):
+        with private_tempdir() as temporary:
+            home = Path(temporary) / "home"
+            home.mkdir(mode=0o700)
+            real_identity_check = locks._lock_anchor_path_identity
+            real_flock = locks.fcntl.flock
+            real_close = locks.os.close
+            flock_calls = []
+            close_calls = []
+            unlocks = 0
+            identity_checks = 0
+
+            def fail_identity_check(home_descriptor, anchor_identity):
+                nonlocal identity_checks
+                identity_checks += 1
+                if identity_checks == 3:
+                    raise ValueError("primary anchor identity failure")
+                return real_identity_check(home_descriptor, anchor_identity)
+
+            def flaky_flock(descriptor, operation):
+                nonlocal unlocks
+                flock_calls.append((descriptor, operation))
+                result = real_flock(descriptor, operation)
+                if operation == locks.fcntl.LOCK_UN:
+                    unlocks += 1
+                    if unlocks == 1:
+                        raise OSError("injected anchor unlock failure")
+                return result
+
+            def recording_close(descriptor):
+                if unlocks:
+                    close_calls.append(descriptor)
+                return real_close(descriptor)
+
+            with (
+                patch.object(
+                    locks, "_lock_anchor_path_identity", side_effect=fail_identity_check
+                ),
+                patch.object(locks.fcntl, "flock", side_effect=flaky_flock),
+                patch.object(locks.os, "close", side_effect=recording_close),
+            ):
+                with self.assertRaisesRegex(ValueError, "primary anchor identity"):
+                    with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                        pass
+            self.assertIn(flock_calls[0][0], close_calls)
+            self.assertIn(flock_calls[1][0], close_calls)
+            with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                pass
+
     def test_lock_rejects_noncanonical_or_duplicate_target_sequences(self):
         with private_tempdir() as temporary:
             homes = {
