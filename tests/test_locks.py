@@ -222,6 +222,38 @@ class LockAndEvidenceTests(unittest.TestCase):
             self.assertTrue(temporary_entries[0].is_symlink())
             self.assertEqual(temporary_entries[0].resolve(), replacement)
 
+    def test_absent_home_temp_real_directory_swap_before_open_fails_closed(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            parent = root / "parent"
+            parent.mkdir(mode=0o700)
+            home = parent / "home"
+            real_open = locks.os.open
+            swapped = False
+
+            def swap_before_open(path, *args, **kwargs):
+                nonlocal swapped
+                if isinstance(path, str) and path.startswith(".home.tmp-"):
+                    temporary_entry = next(
+                        entry for entry in parent.iterdir() if ".tmp-" in entry.name
+                    )
+                    temporary_entry.rmdir()
+                    temporary_entry.mkdir(mode=0o700)
+                    swapped = True
+                return real_open(path, *args, **kwargs)
+
+            with patch.object(locks.os, "open", side_effect=swap_before_open):
+                with self.assertRaises(ValueError):
+                    with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                        pass
+            self.assertTrue(swapped)
+            self.assertFalse(home.exists())
+            temporary_entries = [
+                entry for entry in parent.iterdir() if ".tmp-" in entry.name
+            ]
+            self.assertEqual(len(temporary_entries), 1)
+            self.assertTrue(temporary_entries[0].is_dir())
+
     def test_home_and_ancestor_symlinks_are_rejected_without_redirected_lock(self):
         with private_tempdir() as temporary:
             root = Path(temporary)

@@ -196,9 +196,12 @@ def _create_and_publish_home(
         temporary_identity = (created.st_dev, created.st_ino)
         descriptor = os.open(temporary_name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
         result = os.fstat(descriptor)
+        opened_identity = (result.st_dev, result.st_ino)
+        if opened_identity != temporary_identity:
+            raise ValueError("temporary home identity changed")
         if not stat.S_ISDIR(result.st_mode) or result.st_uid != os.getuid():
             raise ValueError("target home ownership is invalid")
-        identity = (result.st_dev, result.st_ino)
+        identity = opened_identity
         _after_home_mkdir(normalized)
         try:
             _rename_noreplace(parent_fd, temporary_name, normalized.name)
