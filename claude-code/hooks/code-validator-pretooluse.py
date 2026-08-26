@@ -77,9 +77,6 @@ _SHELL_META = frozenset(
         "]",
         "!",
         "#",
-        "'",
-        '"',
-        "\\",
     }
 )
 _GLOB_META = frozenset({"*", "?", "~"})
