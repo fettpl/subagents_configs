@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import errno
 import fcntl
 import os
+import platform
+import secrets
 import stat
+import sys
 import threading
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
@@ -62,6 +66,154 @@ def _after_home_validation(home: Path) -> None:
 
 def _after_home_mkdir(home: Path) -> None:
     """Race-test seam between creating and opening an absent final home."""
+
+
+def _after_home_publish(home: Path) -> None:
+    """Race-test seam after exclusive publication and before final proof."""
+
+
+def _rename_noreplace(parent_fd: int, source: str, destination: str) -> None:
+    """Publish one directory entry without replacing an existing destination."""
+
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        function = getattr(libc, "renameatx_np", None)
+        if function is None:
+            raise ValueError("exclusive home publication is unavailable")
+        function.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        function.restype = ctypes.c_int
+        result = function(
+            parent_fd,
+            source_bytes,
+            parent_fd,
+            destination_bytes,
+            0x00000004,
+        )
+    elif sys.platform == "linux":
+        function = getattr(libc, "renameat2", None)
+        if function is not None:
+            function.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            function.restype = ctypes.c_int
+            result = function(
+                parent_fd,
+                source_bytes,
+                parent_fd,
+                destination_bytes,
+                0x00000001,
+            )
+        else:
+            syscall_numbers = {
+                "x86_64": 316,
+                "aarch64": 276,
+                "arm64": 276,
+                "riscv64": 276,
+            }
+            number = syscall_numbers.get(platform.machine())
+            syscall = getattr(libc, "syscall", None)
+            if number is None or syscall is None:
+                raise ValueError("exclusive home publication is unavailable")
+            syscall.argtypes = [
+                ctypes.c_long,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            syscall.restype = ctypes.c_long
+            result = syscall(
+                number,
+                parent_fd,
+                source_bytes,
+                parent_fd,
+                destination_bytes,
+                0x00000001,
+            )
+    else:
+        raise ValueError("exclusive home publication is unavailable")
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        raise FileExistsError(destination)
+    if error in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP):
+        raise ValueError("exclusive home publication is unavailable")
+    raise OSError(error, "exclusive home publication failed")
+
+
+def _cleanup_owned_directory(
+    parent_fd: int, name: str, identity: tuple[int, int]
+) -> None:
+    """Remove only an empty directory whose identity we captured ourselves."""
+
+    try:
+        result = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(result.st_mode) and (result.st_dev, result.st_ino) == identity:
+        os.rmdir(name, dir_fd=parent_fd)
+
+
+def _create_and_publish_home(
+    parent_fd: int, normalized: Path
+) -> tuple[int, tuple[int, int]]:
+    """Create, bind, and exclusively publish an absent final home directory."""
+
+    temporary_name = None
+    for _attempt in range(16):
+        candidate = f".{normalized.name}.tmp-{secrets.token_hex(16)}"
+        try:
+            os.mkdir(candidate, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            continue
+        temporary_name = candidate
+        break
+    if temporary_name is None:
+        raise ValueError("cannot allocate private home publication")
+
+    descriptor = None
+    identity = None
+    published = False
+    try:
+        descriptor = os.open(temporary_name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+        result = os.fstat(descriptor)
+        if not stat.S_ISDIR(result.st_mode) or result.st_uid != os.getuid():
+            raise ValueError("target home ownership is invalid")
+        identity = (result.st_dev, result.st_ino)
+        _after_home_mkdir(normalized)
+        try:
+            _rename_noreplace(parent_fd, temporary_name, normalized.name)
+        except FileExistsError as exc:
+            raise ValueError("target home appeared during publication") from exc
+        published = True
+        _after_home_publish(normalized)
+        final = os.stat(normalized.name, dir_fd=parent_fd, follow_symlinks=False)
+        if stat.S_ISLNK(final.st_mode) or not stat.S_ISDIR(final.st_mode):
+            raise ValueError("target home must be a private directory")
+        if (final.st_dev, final.st_ino) != identity:
+            raise ValueError("target home identity changed")
+        return descriptor, identity
+    except BaseException:
+        if identity is not None:
+            cleanup_name = normalized.name if published else temporary_name
+            _cleanup_owned_directory(parent_fd, cleanup_name, identity)
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
 
 
 def lock_held() -> bool:
@@ -239,14 +391,7 @@ def _prepare_home(home: Path) -> tuple[int, tuple[int, int]]:
                 raise ValueError("target home identity changed")
         except FileNotFoundError:
             try:
-                os.mkdir(normalized.name, 0o700, dir_fd=parent_descriptor)
-                created = os.stat(
-                    normalized.name, dir_fd=parent_descriptor, follow_symlinks=False
-                )
-                if stat.S_ISLNK(created.st_mode) or not stat.S_ISDIR(created.st_mode):
-                    raise ValueError("target home must be a private directory")
-                expected_home_identity = (created.st_dev, created.st_ino)
-                _after_home_mkdir(normalized)
+                return _create_and_publish_home(parent_descriptor, normalized)
             except FileExistsError:
                 existing = os.stat(
                     normalized.name, dir_fd=parent_descriptor, follow_symlinks=False

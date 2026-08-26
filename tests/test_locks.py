@@ -111,8 +111,6 @@ class LockAndEvidenceTests(unittest.TestCase):
             home = parent / "home"
 
             def swap(_home):
-                detached = parent / "detached-home"
-                home.rename(detached)
                 home.mkdir(mode=0o700)
 
             with patch("subagents_configs.locks._after_home_mkdir", swap):
@@ -120,8 +118,53 @@ class LockAndEvidenceTests(unittest.TestCase):
                     with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
                         pass
             self.assertFalse((home / ".subagents_configs.lock").exists())
-            self.assertFalse(
-                (parent / "detached-home" / ".subagents_configs.lock").exists()
+            self.assertEqual(
+                [entry.name for entry in parent.iterdir() if ".tmp-" in entry.name],
+                [],
+            )
+
+    def test_absent_home_swap_after_publication_fails_before_lock_creation(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            parent = root / "parent"
+            parent.mkdir(mode=0o700)
+            home = parent / "home"
+
+            def swap(_home):
+                home.rmdir()
+                home.mkdir(mode=0o700)
+
+            with patch("subagents_configs.locks._after_home_publish", swap):
+                with self.assertRaises(ValueError):
+                    with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                        pass
+            self.assertTrue(home.is_dir())
+            self.assertFalse((home / ".subagents_configs.lock").exists())
+            self.assertEqual(
+                [entry.name for entry in parent.iterdir() if ".tmp-" in entry.name],
+                [],
+            )
+
+    def test_absent_home_publication_unavailable_fails_without_temp_leak(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            parent = root / "parent"
+            parent.mkdir(mode=0o700)
+            home = parent / "home"
+
+            with patch(
+                "subagents_configs.locks._rename_noreplace",
+                side_effect=ValueError("exclusive home publication is unavailable"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "exclusive home publication is unavailable"
+                ):
+                    with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                        pass
+            self.assertFalse(home.exists())
+            self.assertEqual(
+                [entry.name for entry in parent.iterdir() if ".tmp-" in entry.name],
+                [],
             )
 
     def test_home_and_ancestor_symlinks_are_rejected_without_redirected_lock(self):
