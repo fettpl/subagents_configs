@@ -30,6 +30,9 @@ _DIRECTORY_FLAGS = (
     os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 )
 
+_ANCHOR_REGISTRY_GUARD = threading.Lock()
+_HELD_ANCHORS: dict[Path, dict[object, tuple[int, int]]] = {}
+
 
 class _LockLease:
     def __init__(
@@ -59,6 +62,49 @@ def _current_lease() -> _LockLease | None:
     if lease.released or lease.owner != _execution_owner():
         return None
     return lease
+
+
+def _reserve_anchor(path: Path, identity: tuple[int, int]) -> object:
+    """Reserve one pathname identity while its descriptor lock is held."""
+
+    with _ANCHOR_REGISTRY_GUARD:
+        registrations = _HELD_ANCHORS.setdefault(path, {})
+        if any(existing != identity for existing in registrations.values()):
+            raise ValueError("target lock anchor identity changed")
+        token = object()
+        registrations[token] = identity
+        return token
+
+
+def _release_anchor(path: Path, token: object) -> None:
+    with _ANCHOR_REGISTRY_GUARD:
+        registrations = _HELD_ANCHORS.get(path)
+        if registrations is None:
+            return
+        registrations.pop(token, None)
+        if not registrations:
+            _HELD_ANCHORS.pop(path, None)
+
+
+def _lock_anchor_path_identity(
+    home_descriptor: int, descriptor_identity: tuple[int, int]
+) -> None:
+    try:
+        result = os.stat(
+            ".subagents_configs.lock",
+            dir_fd=home_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        raise ValueError("target lock anchor identity changed") from exc
+    if (
+        not stat.S_ISREG(result.st_mode)
+        or stat.S_IMODE(result.st_mode) != 0o600
+        or result.st_uid != os.getuid()
+        or result.st_nlink != 1
+        or (result.st_dev, result.st_ino) != descriptor_identity
+    ):
+        raise ValueError("target lock anchor identity changed")
 
 
 def _after_home_validation(home: Path) -> None:
@@ -469,6 +515,8 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
         raise ValueError("incompatible nested target lock set")
     descriptors: list[int] = []
     home_descriptors: list[int] = []
+    home_lock_descriptors: list[int] = []
+    anchor_registrations: list[tuple[Path, object]] = []
     home_identities: dict[Path, tuple[int, int]] = {}
     try:
         for target in targets:
@@ -482,7 +530,12 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
                     ".subagents_configs.lock", flags, 0o600, dir_fd=home_descriptor
                 )
             except OSError as exc:
+                home_descriptors.pop()
+                os.close(home_descriptor)
                 raise ValueError("cannot open target lock anchor") from exc
+            anchor_token = None
+            home_flocked = False
+            flocked = False
             try:
                 result = os.fstat(descriptor)
                 if (
@@ -492,10 +545,28 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
                     or result.st_nlink != 1
                 ):
                     raise ValueError("target lock anchor identity is invalid")
+                anchor_identity = (result.st_dev, result.st_ino)
+                _lock_anchor_path_identity(home_descriptor, anchor_identity)
+                anchor_token = _reserve_anchor(home, anchor_identity)
+                fcntl.flock(home_descriptor, fcntl.LOCK_EX)
+                home_flocked = True
+                _lock_anchor_path_identity(home_descriptor, anchor_identity)
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
+                flocked = True
+                _lock_anchor_path_identity(home_descriptor, anchor_identity)
             except BaseException:
+                if flocked:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                if anchor_token is not None:
+                    _release_anchor(home, anchor_token)
                 os.close(descriptor)
+                if home_flocked:
+                    fcntl.flock(home_descriptor, fcntl.LOCK_UN)
+                home_descriptors.pop()
+                os.close(home_descriptor)
                 raise
+            anchor_registrations.append((home, anchor_token))
+            home_lock_descriptors.append(home_descriptor)
             descriptors.append(descriptor)
         lease = _LockLease(_execution_owner(), normalized, home_identities)
         lease_token = _LOCK_LEASE.set(lease)
@@ -510,6 +581,12 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
             finally:
                 os.close(descriptor)
+        try:
+            for descriptor in reversed(home_lock_descriptors):
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            for home, token in reversed(anchor_registrations):
+                _release_anchor(home, token)
         for descriptor in reversed(home_descriptors):
             os.close(descriptor)
 

@@ -1,7 +1,10 @@
 import asyncio
 import errno
 import stat
+import subprocess
+import sys
 import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -354,6 +357,86 @@ class LockAndEvidenceTests(unittest.TestCase):
             thread.join(2)
             contender_thread.join(2)
             self.assertTrue(contender_acquired.is_set())
+
+    def test_replaced_persistent_anchor_rejects_second_context(self):
+        with private_tempdir() as temporary:
+            home = Path(temporary) / "home"
+            home.mkdir(mode=0o700)
+            result = []
+            with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                anchor = home / ".subagents_configs.lock"
+                detached = home / ".detached-lock"
+                anchor.rename(detached)
+                anchor.write_bytes(b"")
+                anchor.chmod(0o600)
+
+                def contender():
+                    try:
+                        with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                            result.append("entered")
+                    except ValueError:
+                        result.append("rejected")
+
+                thread = threading.Thread(target=contender)
+                thread.start()
+                thread.join(2)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(result, ["rejected"])
+                self.assertTrue(anchor.is_file())
+                self.assertTrue(detached.is_file())
+
+    def test_replaced_persistent_anchor_blocks_independent_process(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            home.mkdir(mode=0o700)
+            ready = root / "ready"
+            gate = root / "gate"
+            entered = root / "entered"
+            script = """
+import sys
+import time
+from pathlib import Path
+from subagents_configs.locks import locked_target_homes
+from subagents_configs.models import Target
+
+home, ready, gate, entered = map(Path, sys.argv[1:])
+ready.write_text("ready")
+while not gate.exists():
+    time.sleep(0.01)
+with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+    entered.write_text("entered")
+"""
+            with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                process = subprocess.Popen(  # noqa: S603
+                    [
+                        sys.executable,
+                        "-c",
+                        script,
+                        str(home),
+                        str(ready),
+                        str(gate),
+                        str(entered),
+                    ]
+                )
+                try:
+                    deadline = time.monotonic() + 5
+                    while not ready.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(ready.exists())
+                    anchor = home / ".subagents_configs.lock"
+                    detached = home / ".detached-lock"
+                    anchor.rename(detached)
+                    anchor.write_bytes(b"")
+                    anchor.chmod(0o600)
+                    gate.write_text("go")
+                    time.sleep(0.5)
+                    self.assertFalse(entered.exists())
+                finally:
+                    process.terminate()
+                    process.wait(timeout=5)
+            self.assertTrue((home / ".subagents_configs.lock").is_file())
+            self.assertTrue((home / ".detached-lock").is_file())
 
     def test_lock_rejects_noncanonical_or_duplicate_target_sequences(self):
         with private_tempdir() as temporary:
