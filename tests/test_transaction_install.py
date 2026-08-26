@@ -1880,9 +1880,7 @@ class TransactionInstallTests(unittest.TestCase):
         def record_recovery(received_homes, targets):
             calls.append((received_homes, targets))
 
-        with patch.object(
-            recovery, "recover_transaction", side_effect=record_recovery
-        ):
+        with patch.object(recovery, "recover_transaction", side_effect=record_recovery):
             with patch.object(recovery, "recover_participants_impl") as implementation:
                 transaction.recover_participants(homes)
 
