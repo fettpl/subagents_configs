@@ -63,15 +63,17 @@ class RunnerTests(unittest.TestCase):
                     },
                 )()
                 with patch("scripts.validation_isolation.runner.probe_backend"):
-                    result = run_isolated(
-                        ("python3", "-c", "print('a b')", "--"),
-                        repository,
-                        "darwin",
-                        process_runner,
-                    )
+                    with self.assertRaisesRegex(
+                        ValueError, "validation cleanup failed"
+                    ) as raised:
+                        run_isolated(
+                            ("python3", "-c", "print('a b')", "--"),
+                            repository,
+                            "darwin",
+                            process_runner,
+                        )
 
-            self.assertEqual(result.returncode, 0)
-            self.assertEqual(result.stdout, "ok\n")
+            self.assertEqual(raised.exception.cleanup.code, "cleanup_failed")
             self.assertEqual(len(calls), 1)
             self.assertIn("print('a b')", calls[0][0])
             self.assertEqual(calls[0][1].name, "snapshot")
@@ -169,14 +171,15 @@ class RunnerTests(unittest.TestCase):
                     )(),
                 ) as select,
             ):
-                runner.run_isolated(
-                    ("false",),
-                    repository,
-                    sys.platform,
-                    lambda argv, cwd, env, timeout: subprocess.CompletedProcess(
-                        argv, 0, "", ""
-                    ),
-                )
+                with self.assertRaisesRegex(ValueError, "validation cleanup failed"):
+                    runner.run_isolated(
+                        ("false",),
+                        repository,
+                        sys.platform,
+                        lambda argv, cwd, env, timeout: subprocess.CompletedProcess(
+                            argv, 0, "", ""
+                        ),
+                    )
             self.assertEqual(select.call_args.args[3], fixed)
             self.assertNotEqual(select.call_args.args[3], hosted)
 
@@ -382,8 +385,8 @@ class RunnerTests(unittest.TestCase):
                 patch("scripts.validation_isolation.runner.probe_backend"),
                 patch(
                     "scripts.validation_isolation.runner.shutil.rmtree",
-                    side_effect=lambda path, ignore_errors: cleanup.append(
-                        (path, ignore_errors)
+                    side_effect=lambda path, ignore_errors=False, **kwargs: cleanup.append(
+                        (path, ignore_errors, kwargs)
                     ),
                 ),
             ):

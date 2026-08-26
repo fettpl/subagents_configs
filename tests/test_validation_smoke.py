@@ -114,14 +114,14 @@ class ValidationCleanupContractTests(unittest.TestCase):
             self.assertNotIn("secret", repr(result).lower())
             self.assertNotIn("credentials", repr(result).lower())
 
-    def test_cleanup_success_reports_stable_code(self):
+    def test_cleanup_without_atomic_final_removal_reports_stable_code(self):
         from scripts.validation_isolation.runner import cleanup_validation_root
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "root"
             root.mkdir(mode=0o700)
             result = cleanup_validation_root(root, primary=None)
-            self.assertEqual(result.code, "cleaned")
+            self.assertEqual(result.code, "cleanup_failed")
             self.assertFalse(result.primary_present)
 
     def test_cleanup_rejects_validation_root_substitution(self):
@@ -156,16 +156,16 @@ class ValidationCleanupContractTests(unittest.TestCase):
             raced = False
             real_rename = os.rename
 
-            def swap_before_cleanup(source, destination):
+            def swap_before_cleanup(source, destination, **kwargs):
                 nonlocal raced
-                if Path(source) == root and not raced:
+                if Path(source).name == root.name and not raced:
                     real_rename(root, displaced)
                     root.mkdir(mode=0o700)
                     (root / "replacement").write_text(
                         "replacement", encoding="utf-8"
                     )
                     raced = True
-                return real_rename(source, destination)
+                return real_rename(source, destination, **kwargs)
 
             with patch.object(
                 runner.os, "rename", side_effect=swap_before_cleanup
@@ -177,6 +177,80 @@ class ValidationCleanupContractTests(unittest.TestCase):
             self.assertEqual(result.code, "cleanup_root_changed")
             self.assertTrue((root / "replacement").exists())
             self.assertTrue((displaced / "original").exists())
+
+    def test_cleanup_preserves_post_quarantine_replacement(self):
+        from scripts.validation_isolation import runner
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            root.mkdir(mode=0o700)
+            (root / "original").write_text("original", encoding="utf-8")
+            identity = runner.CleanupRootIdentity.from_path(root)
+            displaced = root.with_name("quarantine-displaced")
+            real_cleanup = runner._cleanup_directory_fd
+
+            def swap_quarantine_path(descriptor):
+                quarantine = next(
+                    path
+                    for path in root.parent.iterdir()
+                    if path.name.startswith("subagents-validation-cleanup-")
+                )
+                quarantine.rename(displaced)
+                quarantine.mkdir(mode=0o700)
+                (quarantine / "replacement").write_text(
+                    "replacement", encoding="utf-8"
+                )
+                real_cleanup(descriptor)
+
+            with patch.object(
+                runner, "_cleanup_directory_fd", side_effect=swap_quarantine_path
+            ):
+                result = runner.cleanup_validation_root(
+                    root, primary=None, expected_identity=identity
+                )
+
+            self.assertEqual(result.code, "cleanup_failed")
+            self.assertTrue(displaced.exists())
+            replacement = next(
+                path
+                for path in root.parent.iterdir()
+                if path.name.startswith("subagents-validation-cleanup-")
+            )
+            self.assertTrue((replacement / "replacement").exists())
+
+    def test_cleanup_fails_closed_when_final_entry_is_swapped(self):
+        from scripts.validation_isolation import runner
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            root.mkdir(mode=0o700)
+            identity = runner.CleanupRootIdentity.from_path(root)
+            displaced = root.with_name("final-quarantine-displaced")
+
+            def swap_final_entry(parent_descriptor, name):
+                os.rename(
+                    name,
+                    displaced.name,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                )
+                os.mkdir(name, mode=0o700, dir_fd=parent_descriptor)
+
+            with patch.object(
+                runner, "_before_final_cleanup", side_effect=swap_final_entry
+            ):
+                result = runner.cleanup_validation_root(
+                    root, primary=None, expected_identity=identity
+                )
+
+            self.assertEqual(result.code, "cleanup_failed")
+            self.assertTrue(displaced.exists())
+            replacements = [
+                path
+                for path in root.parent.iterdir()
+                if path.name.startswith("subagents-validation-cleanup-")
+            ]
+            self.assertEqual(len(replacements), 1)
 
 
 class RunnerCleanupPrecedenceTests(unittest.TestCase):
