@@ -117,10 +117,28 @@ def cleanup_validation_root(
 ) -> CleanupResult:
     """Remove a private validation root and return only stable typed evidence."""
 
-    if expected_identity is not None and not expected_identity.matches(root):
-        return CleanupResult("cleanup_root_changed", primary is not None)
     try:
-        shutil.rmtree(root, ignore_errors=False)
+        quarantine = Path(
+            tempfile.mkdtemp(prefix="subagents-validation-cleanup-", dir=root.parent)
+        )
+        os.rmdir(quarantine)
+    except BaseException:
+        return CleanupResult("cleanup_failed", primary is not None)
+
+    try:
+        os.rename(root, quarantine)
+    except OSError:
+        return CleanupResult("cleanup_root_changed", primary is not None)
+
+    if expected_identity is not None and not expected_identity.matches(quarantine):
+        try:
+            os.rename(quarantine, root)
+        except OSError:
+            pass
+        return CleanupResult("cleanup_root_changed", primary is not None)
+
+    try:
+        shutil.rmtree(quarantine, ignore_errors=False)
     except BaseException:
         return CleanupResult("cleanup_failed", primary is not None)
     return CleanupResult("cleaned", primary is not None)

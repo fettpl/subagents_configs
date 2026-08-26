@@ -144,6 +144,40 @@ class ValidationCleanupContractTests(unittest.TestCase):
             self.assertTrue(root.exists())
             self.assertTrue(displaced.exists())
 
+    def test_cleanup_quarantines_pinned_root_before_deleting_under_race(self):
+        from scripts.validation_isolation import runner
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            root.mkdir(mode=0o700)
+            (root / "original").write_text("original", encoding="utf-8")
+            identity = runner.CleanupRootIdentity.from_path(root)
+            displaced = root.with_name("root-displaced")
+            raced = False
+            real_rename = os.rename
+
+            def swap_before_cleanup(source, destination):
+                nonlocal raced
+                if Path(source) == root and not raced:
+                    real_rename(root, displaced)
+                    root.mkdir(mode=0o700)
+                    (root / "replacement").write_text(
+                        "replacement", encoding="utf-8"
+                    )
+                    raced = True
+                return real_rename(source, destination)
+
+            with patch.object(
+                runner.os, "rename", side_effect=swap_before_cleanup
+            ):
+                result = runner.cleanup_validation_root(
+                    root, primary=None, expected_identity=identity
+                )
+
+            self.assertEqual(result.code, "cleanup_root_changed")
+            self.assertTrue((root / "replacement").exists())
+            self.assertTrue((displaced / "original").exists())
+
 
 class RunnerCleanupPrecedenceTests(unittest.TestCase):
     @staticmethod
