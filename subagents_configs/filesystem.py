@@ -352,6 +352,34 @@ def _evidence_from_descriptor(
     )
 
 
+@dataclass(frozen=True)
+class _FullDescriptorEvidence:
+    identity: IdentityEvidence
+    file_type: int
+    mtime_ns: int
+
+
+def _full_descriptor_evidence(
+    descriptor: int, label: str, *, known_content: bytes | None = None
+) -> _FullDescriptorEvidence:
+    before = os.fstat(descriptor)
+    identity = _evidence_from_descriptor(descriptor, label, known_content=known_content)
+    after = os.fstat(descriptor)
+    if (
+        stat.S_IFMT(before.st_mode),
+        before.st_mtime_ns,
+    ) != (
+        stat.S_IFMT(after.st_mode),
+        after.st_mtime_ns,
+    ):
+        raise TransactionError(f"{label} changed while collecting full evidence")
+    return _FullDescriptorEvidence(
+        identity,
+        stat.S_IFMT(after.st_mode),
+        after.st_mtime_ns,
+    )
+
+
 def capture_evidence(path: Path, label: str) -> IdentityEvidence | None:
     """Capture six identity fields from one pinned, no-following descriptor."""
 
@@ -458,16 +486,28 @@ def compare_and_swap(
                 os.close(descriptor)
             if revalidated != before:
                 raise TransactionError("target identity changed before unlink")
-            quarantine = _quarantine_path(target.parent, target).name
+            quarantine, quarantine_slot = _reserve_quarantine(
+                parent_fd, target.parent, target
+            )
+            moved = False
             try:
+                _validate_quarantine_slot(parent_fd, quarantine, quarantine_slot)
                 os.rename(
                     target.name,
                     quarantine,
                     src_dir_fd=parent_fd,
                     dst_dir_fd=parent_fd,
                 )
-            except OSError as exc:
-                raise TransactionError("target disappeared during unlink") from exc
+                moved = True
+            except BaseException as exc:
+                if not moved:
+                    try:
+                        _remove_quarantine_slot(parent_fd, quarantine, quarantine_slot)
+                    except (OSError, TransactionError):
+                        pass
+                if isinstance(exc, OSError):
+                    raise TransactionError("target disappeared during unlink") from exc
+                raise
             detached = None
             try:
                 descriptor = os.open(
@@ -488,6 +528,8 @@ def compare_and_swap(
             except BaseException:
                 if detached != before:
                     _restore_quarantine(parent_fd, quarantine, target.name, before)
+                if not moved:
+                    _remove_quarantine_slot(parent_fd, quarantine, quarantine_slot)
                 raise
             _sync_parent_directory_fd(parent_fd)
             if capture_evidence(target, "unlinked target") is not None:
@@ -523,6 +565,7 @@ def compare_and_swap(
         descriptor = None
         created = False
         installed = False
+        temporary_full_evidence: _FullDescriptorEvidence | None = None
         try:
             descriptor = os.open(
                 temporary.name,
@@ -534,9 +577,10 @@ def compare_and_swap(
             _write_all(descriptor, after_content)
             os.fchmod(descriptor, after_mode)
             os.fsync(descriptor)
-            temporary_evidence = _evidence_from_descriptor(
+            temporary_full_evidence = _full_descriptor_evidence(
                 descriptor, "CAS temporary", known_content=after_content
             )
+            temporary_evidence = temporary_full_evidence.identity
             if action == "create":
                 _before_create_mutation(target.parent)
                 current = _stat_at(parent_fd, target.name, "create target")
@@ -579,17 +623,23 @@ def compare_and_swap(
                     raise TransactionError(
                         "create target appeared during mutation"
                     ) from exc
+                _after_create_link(target.parent, target, temporary)
                 installed = True
             else:
-                quarantine = _quarantine_path(target.parent, target).name
+                quarantine, quarantine_slot = _reserve_quarantine(
+                    parent_fd, target.parent, target
+                )
+                moved = False
                 detached: IdentityEvidence | None = None
                 try:
+                    _validate_quarantine_slot(parent_fd, quarantine, quarantine_slot)
                     os.rename(
                         target.name,
                         quarantine,
                         src_dir_fd=parent_fd,
                         dst_dir_fd=parent_fd,
                     )
+                    moved = True
                     descriptor_target = os.open(
                         quarantine,
                         os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
@@ -620,32 +670,33 @@ def compare_and_swap(
                 except BaseException:
                     if not installed and detached == before:
                         _restore_quarantine(parent_fd, quarantine, target.name, before)
+                    if not moved:
+                        _remove_quarantine_slot(parent_fd, quarantine, quarantine_slot)
                     raise
 
-            _remove_owned_temp(parent_fd, temporary.name, temporary_evidence)
+            _remove_owned_temp(
+                parent_fd,
+                temporary.name,
+                temporary_full_evidence,
+                allowed_nlinks=(temporary_evidence.nlink, temporary_evidence.nlink + 1),
+                parent=target.parent,
+            )
             _sync_parent_directory_fd(parent_fd)
         except OSError as exc:
             raise TransactionError("compare-and-swap replacement failed") from exc
         finally:
             if descriptor is not None:
                 os.close(descriptor)
-            if created and not installed:
+            if created and not installed and temporary_full_evidence is not None:
                 try:
-                    temporary_stat = _stat_at_no_follow(parent_fd, temporary.name)
-                    if temporary_stat is not None:
-                        descriptor_temp = os.open(
-                            temporary.name,
-                            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                            dir_fd=parent_fd,
-                        )
-                        try:
-                            owned_temp = _evidence_from_descriptor(
-                                descriptor_temp, "CAS temporary cleanup"
-                            )
-                        finally:
-                            os.close(descriptor_temp)
-                        if owned_temp.sha256 == sha256_bytes(after_content):
-                            os.unlink(temporary.name, dir_fd=parent_fd)
+                    _before_failed_temp_cleanup(target.parent, temporary)
+                    _remove_owned_temp(
+                        parent_fd,
+                        temporary.name,
+                        temporary_full_evidence,
+                        allowed_nlinks=(temporary_full_evidence.identity.nlink,),
+                        parent=target.parent,
+                    )
                 except OSError:
                     pass
         if action == "create" and not installed:
@@ -659,7 +710,12 @@ def compare_and_swap(
             result = _evidence_from_descriptor(descriptor, f"{action} target")
         finally:
             os.close(descriptor)
-        if result.sha256 != sha256_bytes(after_content) or result.mode != after_mode:
+        if (
+            result.device != temporary_evidence.device
+            or result.inode != temporary_evidence.inode
+            or result.sha256 != sha256_bytes(after_content)
+            or result.mode != after_mode
+        ):
             raise TransactionError("replacement postcondition could not be proved")
         return result
 
@@ -829,6 +885,65 @@ def _quarantine_path(parent: Path, target: Path) -> Path:
     return parent / f".{target.name}.cas-{secrets.token_hex(16)}"
 
 
+def _reserve_quarantine(
+    parent_fd: int, parent: Path, target: Path
+) -> tuple[str, IdentityEvidence]:
+    """Reserve a quarantine name without overwriting an unowned entry."""
+
+    for _attempt in range(16):
+        candidate = _quarantine_path(parent, target).name
+        try:
+            descriptor = os.open(
+                candidate,
+                os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=parent_fd,
+            )
+        except FileExistsError:
+            continue
+        try:
+            try:
+                os.fchmod(descriptor, 0o600)
+                os.fsync(descriptor)
+                evidence = _evidence_from_descriptor(descriptor, "CAS quarantine slot")
+            except BaseException:
+                try:
+                    os.unlink(candidate, dir_fd=parent_fd)
+                except OSError:
+                    pass
+                raise
+        finally:
+            os.close(descriptor)
+        return candidate, evidence
+    raise TransactionError("could not reserve a private CAS quarantine name")
+
+
+def _validate_quarantine_slot(
+    parent_fd: int, quarantine: str, expected: IdentityEvidence
+) -> None:
+    descriptor = os.open(
+        quarantine,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=parent_fd,
+    )
+    try:
+        actual = _evidence_from_descriptor(descriptor, "CAS quarantine slot")
+    finally:
+        os.close(descriptor)
+    if actual != expected:
+        raise TransactionError("CAS quarantine slot identity changed")
+
+
+def _remove_quarantine_slot(
+    parent_fd: int, quarantine: str, expected: IdentityEvidence
+) -> None:
+    try:
+        _validate_quarantine_slot(parent_fd, quarantine, expected)
+        os.unlink(quarantine, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return
+
+
 def _before_create_mutation(_parent: Path) -> None:
     """Stable seam immediately before a no-overwrite create."""
 
@@ -843,6 +958,18 @@ def _before_unlink_mutation(_parent: Path) -> None:
 
 def _before_chmod_mutation(_parent: Path) -> None:
     """Stable seam immediately before a chmod revalidation."""
+
+
+def _after_create_link(_parent: Path, _target: Path, _temporary: Path) -> None:
+    """Stable seam after a create link, before final target evidence."""
+
+
+def _before_failed_temp_cleanup(_parent: Path, _temporary: Path) -> None:
+    """Stable seam before identity-bound cleanup of an owned temporary."""
+
+
+def _before_temp_unlink_mutation(_parent: Path, _temporary: Path) -> None:
+    """Stable seam immediately before temporary unlink revalidation."""
 
 
 def _link_no_replace(parent_fd: int, source: str, target: str) -> None:
@@ -901,7 +1028,12 @@ def _remove_owned_quarantine(
 
 
 def _remove_owned_temp(
-    parent_fd: int, temporary: str, expected: IdentityEvidence
+    parent_fd: int,
+    temporary: str,
+    expected: _FullDescriptorEvidence,
+    *,
+    allowed_nlinks: tuple[int, ...],
+    parent: Path,
 ) -> None:
     descriptor = os.open(
         temporary,
@@ -909,21 +1041,52 @@ def _remove_owned_temp(
         dir_fd=parent_fd,
     )
     try:
-        actual = _evidence_from_descriptor(descriptor, "CAS temporary cleanup")
+        actual = _full_descriptor_evidence(descriptor, "CAS temporary cleanup")
+    finally:
+        os.close(descriptor)
+    if actual.file_type != expected.file_type or actual.mtime_ns != expected.mtime_ns:
+        raise TransactionError("CAS temporary identity changed")
+    if actual.identity.nlink not in allowed_nlinks or (
+        actual.identity.device,
+        actual.identity.inode,
+        actual.identity.size,
+        actual.identity.mode,
+        actual.identity.sha256,
+    ) != (
+        expected.identity.device,
+        expected.identity.inode,
+        expected.identity.size,
+        expected.identity.mode,
+        expected.identity.sha256,
+    ):
+        raise TransactionError("CAS temporary identity changed")
+    _before_temp_unlink_mutation(parent, parent / temporary)
+    descriptor = os.open(
+        temporary,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=parent_fd,
+    )
+    try:
+        revalidated = _full_descriptor_evidence(descriptor, "CAS temporary boundary")
     finally:
         os.close(descriptor)
     if (
-        actual.device,
-        actual.inode,
-        actual.size,
-        actual.mode,
-        actual.sha256,
+        revalidated.file_type != expected.file_type
+        or revalidated.mtime_ns != expected.mtime_ns
+    ):
+        raise TransactionError("CAS temporary identity changed")
+    if revalidated.identity.nlink not in allowed_nlinks or (
+        revalidated.identity.device,
+        revalidated.identity.inode,
+        revalidated.identity.size,
+        revalidated.identity.mode,
+        revalidated.identity.sha256,
     ) != (
-        expected.device,
-        expected.inode,
-        expected.size,
-        expected.mode,
-        expected.sha256,
+        expected.identity.device,
+        expected.identity.inode,
+        expected.identity.size,
+        expected.identity.mode,
+        expected.identity.sha256,
     ):
         raise TransactionError("CAS temporary identity changed")
     os.unlink(temporary, dir_fd=parent_fd)

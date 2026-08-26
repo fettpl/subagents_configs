@@ -24,6 +24,99 @@ TEMP_DIR = "/private/tmp" if Path("/private/tmp").is_dir() else None
 
 
 class FilesystemTests(unittest.TestCase):
+    def test_quarantine_collision_preserves_unowned_entry(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+            collision = root / ".managed.cas-collision"
+            collision.write_bytes(b"unowned quarantine")
+            collision.chmod(0o600)
+
+            with patch.object(filesystem, "_quarantine_path", return_value=collision):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, before, b"installer bytes", 0o600, "replace")
+            self.assertEqual(path.read_bytes(), b"original")
+            self.assertEqual(collision.read_bytes(), b"unowned quarantine")
+
+    def test_failed_cas_cleanup_preserves_same_content_different_inode_temp(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+
+            def create_target(_parent):
+                path.write_bytes(b"installer bytes")
+                path.chmod(0o600)
+
+            def replace_temp(_parent, temporary_path):
+                replacement = temporary_path.with_name("replacement-temp")
+                replacement.write_bytes(b"installer bytes")
+                replacement.chmod(0o600)
+                temporary_path.unlink()
+                replacement.rename(temporary_path)
+
+            with (
+                patch.object(
+                    filesystem,
+                    "_before_create_mutation",
+                    create_target,
+                    create=True,
+                ),
+                patch.object(
+                    filesystem,
+                    "_before_failed_temp_cleanup",
+                    replace_temp,
+                    create=True,
+                ),
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, None, b"installer bytes", 0o600, "create")
+            self.assertEqual(path.read_bytes(), b"installer bytes")
+            self.assertEqual(
+                len(list(root.glob(".managed.tmp-*"))),
+                1,
+                "same-content replacement temp must not be unlinked",
+            )
+
+    def test_create_rejects_same_content_mode_replacement_inode_after_link(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+
+            def replace_after_link(_parent, target, _temporary):
+                replacement = target.with_name("replacement-target")
+                replacement.write_bytes(b"installer bytes")
+                replacement.chmod(0o600)
+                target.unlink()
+                replacement.rename(target)
+
+            with patch.object(
+                filesystem, "_after_create_link", replace_after_link, create=True
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, None, b"installer bytes", 0o600, "create")
+            self.assertEqual(path.read_bytes(), b"installer bytes")
+
+    def test_temp_unlink_boundary_preserves_same_content_replacement(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+
+            def replace_temp(_parent, temporary_path):
+                replacement = temporary_path.with_name("replacement-temp")
+                replacement.write_bytes(b"installer bytes")
+                replacement.chmod(0o600)
+                temporary_path.unlink()
+                replacement.rename(temporary_path)
+
+            with patch.object(filesystem, "_before_temp_unlink_mutation", replace_temp):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, None, b"installer bytes", 0o600, "create")
+            self.assertEqual(path.read_bytes(), b"installer bytes")
+            self.assertEqual(len(list(root.glob(".managed.tmp-*"))), 1)
+
     def test_create_race_preserves_late_target_and_fails(self):
         with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
             root = Path(temporary)
