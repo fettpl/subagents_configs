@@ -35,6 +35,7 @@ from .transaction import (
     IncompleteRollbackError,
     TransactionError,
     apply_transaction,
+    validate_cleanup_survivors,
     validate_transaction_commitment,
 )
 
@@ -252,18 +253,21 @@ def _journal_groups(
             raise ValueError(
                 f"recovery requires selected homes for participants: {names}"
             )
+        group_homes = {target: homes[target] for target in participants}
         if set(transaction_journals) != set(participants):
             missing = set(participants) - set(transaction_journals)
             if missing:
-                names = ", ".join(
-                    target.value
-                    for target in sorted(missing, key=lambda item: item.value)
+                if any(target in journals for target in missing):
+                    raise ValueError("cleanup participant transaction IDs disagree")
+                survivors = tuple(
+                    transaction_journals[target]
+                    for target in participants
+                    if target in transaction_journals
                 )
-                raise ValueError(
-                    f"recovery participant journals are incomplete: {names}"
-                )
+                validate_cleanup_survivors(survivors, group_homes)
+                groups.append((group_homes, survivors))
+                continue
             raise ValueError("recovery participant journal mapping is not exact")
-        group_homes = {target: homes[target] for target in participants}
         group_journals: list[Journal] = []
         for target in participants:
             participant = journals.get(target)
@@ -271,7 +275,7 @@ def _journal_groups(
                 raise ValueError(f"missing participant journal for {target.value}")
             group_journals.append(participant)
         ordered = tuple(group_journals)
-        validate_transaction_commitment(ordered, group_homes)
+        ordered = validate_transaction_commitment(ordered, group_homes)
         groups.append((group_homes, ordered))
     return tuple(groups)
 
@@ -282,7 +286,9 @@ def _recovery_action(journals: tuple[Journal, ...]) -> str:
     statuses = {
         operation.status for journal in journals for operation in journal.operations
     }
-    complete = all(journal.rollback_status == "complete" for journal in journals)
+    complete = all(
+        journal.rollback_status in {"complete", "cleanup"} for journal in journals
+    )
     if complete and statuses in ({"applied"}, {"rolled-back"}):
         return "cleanup"
     return "rollback"
@@ -400,8 +406,15 @@ def _recovery_fingerprint(
                             operation.expected_after_mode,
                             _evidence_fingerprint(operation.expected_before_evidence),
                             _evidence_fingerprint(operation.expected_after_evidence),
+                            _evidence_fingerprint(operation.backup_identity_evidence),
+                            _evidence_fingerprint(operation.cleanup_backup_evidence),
                         )
                         for operation in journal.operations
+                    ),
+                    journal.cleanup_participant_digests,
+                    tuple(
+                        _evidence_fingerprint(item)
+                        for item in journal.cleanup_commitment_evidence
                     ),
                 )
             )

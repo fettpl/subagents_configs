@@ -242,6 +242,140 @@ class StateTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     decode_journal(invalid, descriptor, Path(temporary))
 
+    def test_cleanup_phase_strictly_allows_only_intentionally_removed_backups(self):
+        from subagents_configs.state import decode_journal, encode_journal
+
+        descriptor = descriptor_for(Target.CODEX)
+        operation = self._journal_operation("replace")
+        operation.update(
+            identifier="code-explorer",
+            backup_path="backups/already-cleaned",
+            backup_hash=operation["expected_before_hash"],
+            status="applied",
+        )
+        raw = self._journal_raw("replace", operation)
+        raw["schema_version"] = 3
+        raw["rollback_status"] = "cleanup"
+        raw["cleanup_participant_digests"] = ["c" * 64]
+        anchor_evidence = {
+            **raw["operations"][0]["expected_before_evidence"],
+            "size": 4096,
+        }
+        raw["cleanup_commitment_evidence"] = [
+            anchor_evidence,
+            {**anchor_evidence, "inode": 2},
+            {**anchor_evidence, "inode": 3},
+        ]
+        raw["operations"][0]["backup_identity_evidence"] = raw["operations"][0][
+            "expected_before_evidence"
+        ]
+        raw["operations"][0]["cleanup_backup_evidence"] = raw["operations"][0][
+            "expected_before_evidence"
+        ]
+        with tempfile.TemporaryDirectory(dir=self._TEMP_DIR) as temporary:
+            home = Path(temporary)
+            journal = decode_journal(raw, descriptor, home)
+            self.assertEqual(json.loads(encode_journal(journal)), raw)
+            with self.assertRaises(ValueError):
+                decode_journal({**raw, "rollback_status": "complete"}, descriptor, home)
+            with self.assertRaises(ValueError):
+                decode_journal({**raw, "rollback_status": "cleaning"}, descriptor, home)
+            with self.assertRaises(ValueError):
+                decode_journal(
+                    {
+                        **raw,
+                        "operations": [{**raw["operations"][0], "status": "planned"}],
+                    },
+                    descriptor,
+                    home,
+                )
+            missing_cleanup_evidence = {
+                **raw,
+                "operations": [
+                    {
+                        key: value
+                        for key, value in raw["operations"][0].items()
+                        if key != "cleanup_backup_evidence"
+                    }
+                ],
+            }
+            with self.assertRaises(ValueError):
+                decode_journal(missing_cleanup_evidence, descriptor, home)
+            missing_backup_identity = {
+                **raw,
+                "operations": [
+                    {
+                        key: value
+                        for key, value in raw["operations"][0].items()
+                        if key != "backup_identity_evidence"
+                    }
+                ],
+            }
+            with self.assertRaises(ValueError):
+                decode_journal(missing_backup_identity, descriptor, home)
+            malformed_cleanup_evidence = {
+                **raw,
+                "operations": [
+                    {
+                        **raw["operations"][0],
+                        "cleanup_backup_evidence": {
+                            **raw["operations"][0]["cleanup_backup_evidence"],
+                            "nlink": 0,
+                        },
+                    }
+                ],
+            }
+            with self.assertRaises(ValueError):
+                decode_journal(malformed_cleanup_evidence, descriptor, home)
+            with self.assertRaises(ValueError):
+                decode_journal(
+                    {
+                        **raw,
+                        "operations": [
+                            {
+                                **raw["operations"][0],
+                                "cleanup_backup_evidence": {
+                                    **raw["operations"][0]["cleanup_backup_evidence"],
+                                    "inode": 2,
+                                },
+                            }
+                        ],
+                    },
+                    descriptor,
+                    home,
+                )
+            with self.assertRaises(ValueError):
+                decode_journal(
+                    {**raw, "cleanup_participant_digests": []}, descriptor, home
+                )
+            with self.assertRaises(ValueError):
+                decode_journal(
+                    {**raw, "cleanup_commitment_evidence": []}, descriptor, home
+                )
+            with self.assertRaises(ValueError):
+                decode_journal(
+                    {
+                        **raw,
+                        "cleanup_commitment_evidence": [
+                            {
+                                **raw["cleanup_commitment_evidence"][0],
+                                "nlink": 2,
+                            },
+                            raw["cleanup_commitment_evidence"][1],
+                            raw["cleanup_commitment_evidence"][2],
+                        ],
+                    },
+                    descriptor,
+                    home,
+                )
+            backups = home / ".subagents_configs/backups"
+            backups.mkdir(mode=0o700, parents=True)
+            outside = home / "outside-backup"
+            outside.write_bytes(b"outside\n")
+            (backups / "already-cleaned").symlink_to(outside)
+            with self.assertRaises(ValueError):
+                decode_journal(raw, descriptor, home)
+
     def test_encoders_reject_invalid_constructed_dataclasses(self):
         from subagents_configs.state import encode_journal, encode_manifest
 

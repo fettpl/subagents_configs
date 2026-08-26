@@ -12,6 +12,7 @@ from .planning import PlannedOperation, TargetPlan
 from .targets import descriptor_for, registry_target_order
 from .transaction import (
     IncompleteRollbackError,
+    TransactionError,
     backup_bytes,
     canonical_participant_order,
     canonical_path,
@@ -22,13 +23,17 @@ from .transaction import (
     journal_path,
     load_journal,
     read_regular,
+    remove_cleanup_commitment_markers,
     reverse_operation,
+    stage_cleanup_group,
     sync_and_remove_journal,
+    validate_cleanup_survivors,
     validate_transaction_commitment,
     validated_journal_evidence,
     verify_complete_journal,
     verify_rollback_complete_journal,
     write_journal,
+    write_progress_journal,
 )
 
 
@@ -46,7 +51,11 @@ def recover_participants_impl(homes: Mapping[Target, Path]) -> None:
         loaded_identity = capture_evidence(journal_path(home), "participant journal")
         journal = load_journal(home, descriptors[target])
         if journal is None:
-            raise ValueError(f"missing participant journal for {target.value}")
+            if loaded_identity is not None:
+                raise IncompleteRollbackError(
+                    "participant journal disappeared during validation"
+                )
+            continue
         validated_identity = capture_evidence(journal_path(home), "participant journal")
         if loaded_identity is None or validated_identity != loaded_identity:
             raise IncompleteRollbackError(
@@ -57,15 +66,14 @@ def recover_participants_impl(homes: Mapping[Target, Path]) -> None:
         _, backup_evidence_by_target[target] = validated_journal_evidence(
             home, journal, journal_identity=loaded_identity
         )
+    if not journals:
+        return
     first = next(iter(journals.values()))
     participants = first.participants
     canonical_participant_order(participants)
     if set(homes) != set(participants) or tuple(homes) != participants:
         raise ValueError("participant mapping does not exactly match journal set")
-    for target in participants:
-        journal = journals.get(target)
-        if journal is None:
-            raise ValueError("participant journal set is incomplete")
+    for target, journal in journals.items():
         if (
             journal.transaction_id != first.transaction_id
             or journal.operation != first.operation
@@ -73,39 +81,71 @@ def recover_participants_impl(homes: Mapping[Target, Path]) -> None:
             or journal.target is not target
         ):
             raise IncompleteRollbackError("participant journals disagree")
-    ordered_journals = tuple(journals[target] for target in participants)
+    ordered_journals = tuple(
+        journals[target] for target in participants if target in journals
+    )
+    partial_cleanup = set(journals) != set(participants)
     try:
-        validate_transaction_commitment(ordered_journals, homes)
+        if partial_cleanup:
+            validate_cleanup_survivors(ordered_journals, homes)
+        else:
+            ordered_journals = validate_transaction_commitment(ordered_journals, homes)
+            journals.update({journal.target: journal for journal in ordered_journals})
     except ValueError as exc:
         raise IncompleteRollbackError(
             "participant journal commitment is invalid"
         ) from exc
-    if all(journal.rollback_status == "complete" for journal in journals.values()):
-        statuses = {
-            operation.status
+    statuses = {
+        operation.status
+        for journal in journals.values()
+        for operation in journal.operations
+    }
+    sealing_transition = (
+        not partial_cleanup
+        and any(journal.rollback_status == "cleanup" for journal in journals.values())
+        and not all(
+            journal.rollback_status in {"complete", "cleanup"}
             for journal in journals.values()
-            for operation in journal.operations
-        }
-        if statuses == {"rolled-back"}:
-            for target in participants:
+        )
+        and statuses in ({"applied"}, {"rolled-back"})
+    )
+    if sealing_transition:
+        for target in participants:
+            if statuses == {"rolled-back"}:
                 verify_rollback_complete_journal(
                     homes[target],
                     descriptors[target],
                     journals[target],
                     ordered_journals,
+                    commitment_validated=True,
                 )
-        elif statuses == {"applied"}:
-            for target in participants:
+            else:
                 verify_complete_journal(
                     homes[target],
                     descriptors[target],
                     journals[target],
                     ordered_journals,
+                    commitment_validated=True,
                 )
-        else:
-            raise IncompleteRollbackError(
-                "participant journals have mixed final states"
+        sealing_journals = tuple(
+            journal
+            if journal.rollback_status == "cleanup"
+            else replace(journal, rollback_status="complete")
+            for journal in ordered_journals
+        )
+        try:
+            staged, staged_evidence = stage_cleanup_group(
+                homes,
+                sealing_journals,
+                journal_evidence=journal_evidence,
+                backup_evidence=backup_evidence_by_target,
             )
+        except (TransactionError, ValueError) as exc:
+            raise IncompleteRollbackError(
+                "cleanup sealing transition is invalid"
+            ) from exc
+        journals.update(staged)
+        journal_evidence.update(staged_evidence)
         for target in participants:
             sync_and_remove_journal(
                 homes[target],
@@ -113,8 +153,67 @@ def recover_participants_impl(homes: Mapping[Target, Path]) -> None:
                 journal_evidence=journal_evidence[target],
                 backup_evidence=backup_evidence_by_target[target],
             )
+        remove_cleanup_commitment_markers(
+            homes, tuple(journals[target] for target in participants)
+        )
         return
-    if any(journal.rollback_status == "complete" for journal in journals.values()):
+    if all(
+        journal.rollback_status in {"complete", "cleanup"}
+        for journal in journals.values()
+    ):
+        verification_options = {"commitment_validated": True} if partial_cleanup else {}
+        if statuses == {"rolled-back"}:
+            for target in journals:
+                verify_rollback_complete_journal(
+                    homes[target],
+                    descriptors[target],
+                    journals[target],
+                    ordered_journals,
+                    **verification_options,
+                )
+        elif statuses == {"applied"}:
+            for target in journals:
+                verify_complete_journal(
+                    homes[target],
+                    descriptors[target],
+                    journals[target],
+                    ordered_journals,
+                    **verification_options,
+                )
+        else:
+            raise IncompleteRollbackError(
+                "participant journals have mixed final states"
+            )
+        if not partial_cleanup:
+            try:
+                staged, staged_evidence = stage_cleanup_group(
+                    homes,
+                    ordered_journals,
+                    journal_evidence=journal_evidence,
+                    backup_evidence=backup_evidence_by_target,
+                )
+            except (TransactionError, ValueError) as exc:
+                raise IncompleteRollbackError(
+                    "cleanup group evidence is invalid"
+                ) from exc
+            journals.update(staged)
+            journal_evidence.update(staged_evidence)
+        for target in tuple(journals):
+            sync_and_remove_journal(
+                homes[target],
+                journals[target],
+                journal_evidence=journal_evidence[target],
+                backup_evidence=backup_evidence_by_target[target],
+            )
+        remove_cleanup_commitment_markers(
+            homes,
+            tuple(journals[target] for target in participants if target in journals),
+        )
+        return
+    if partial_cleanup or any(
+        journal.rollback_status in {"complete", "cleanup"}
+        for journal in journals.values()
+    ):
         raise ValueError("participant journals have mixed completion status")
     target_plans = {
         target: TargetPlan(
@@ -160,7 +259,7 @@ def recover_participants_impl(homes: Mapping[Target, Path]) -> None:
                     )
                 if after and operation.expected_before_hash is not None:
                     backup_bytes(homes[target], operation)
-            elif operation.status == "planned":
+            elif operation.status in {"planned", "rolled-back"}:
                 check_evidence(
                     path,
                     operation.expected_before_hash,
@@ -204,23 +303,40 @@ def recover_participants_impl(homes: Mapping[Target, Path]) -> None:
                         for position, item in enumerate(journal.operations)
                     ),
                 )
-                journals[target] = journal
-                journal_evidence[target] = write_journal(
-                    homes[target], journal, expected_before=journal_evidence[target]
+                current_journal = journals[target]
+                journal, journal_evidence[target] = write_progress_journal(
+                    homes[target],
+                    current_journal,
+                    journal,
+                    expected_before=journal_evidence[target],
                 )
+                journals[target] = journal
         for target in participants:
+            current_journal = journals[target]
             journal = replace(
-                journals[target],
+                current_journal,
                 operations=tuple(
                     replace(item, status="rolled-back")
-                    for item in journals[target].operations
+                    for item in current_journal.operations
                 ),
-                rollback_status="complete",
             )
+            if journal.operations != current_journal.operations:
+                journal, journal_evidence[target] = write_progress_journal(
+                    homes[target],
+                    current_journal,
+                    journal,
+                    expected_before=journal_evidence[target],
+                )
+            journal = replace(journal, rollback_status="complete")
             journals[target] = journal
-            journal_evidence[target] = write_journal(
-                homes[target], journal, expected_before=journal_evidence[target]
-            )
+        staged, staged_evidence = stage_cleanup_group(
+            homes,
+            tuple(journals[target] for target in participants),
+            journal_evidence=journal_evidence,
+            backup_evidence=backup_evidence_by_target,
+        )
+        journals.update(staged)
+        journal_evidence.update(staged_evidence)
         for target in participants:
             sync_and_remove_journal(
                 homes[target],
@@ -228,6 +344,9 @@ def recover_participants_impl(homes: Mapping[Target, Path]) -> None:
                 journal_evidence=journal_evidence[target],
                 backup_evidence=backup_evidence_by_target[target],
             )
+        remove_cleanup_commitment_markers(
+            homes, tuple(journals[target] for target in participants)
+        )
     except BaseException as primary:
         if not isinstance(primary, Exception):
             primary.add_note("participant rollback incomplete")

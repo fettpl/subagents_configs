@@ -57,6 +57,14 @@ class StateMigrationTests(unittest.TestCase):
             journal = decode_journal(raw, descriptor_for(Target.CODEX), Path(temporary))
         self.assertEqual(json.loads(encode_journal(journal)), raw)
 
+    def test_schema2_cleanup_without_full_backup_identity_is_rejected(self):
+        raw = self._v2_journal()
+        raw["rollback_status"] = "cleanup"
+        raw["operations"][0]["status"] = "applied"
+        with private_tempdir() as temporary:
+            with self.assertRaises(ValueError):
+                decode_journal(raw, descriptor_for(Target.CODEX), Path(temporary))
+
     def test_schema2_rejects_malformed_identity_evidence_objects(self):
         raw = self._v2_journal()
         evidence = raw["operations"][0]["expected_after_evidence"]

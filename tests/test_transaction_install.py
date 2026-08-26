@@ -32,6 +32,10 @@ class _FailBefore:
             raise RuntimeError("injected failure")
 
 
+class _SimulatedCleanupCrash(BaseException):
+    pass
+
+
 class TransactionInstallTests(unittest.TestCase):
     def setUp(self):
         self.temporary = private_tempdir()
@@ -61,6 +65,111 @@ class TransactionInstallTests(unittest.TestCase):
 
         with patch.object(transaction, "_sync_and_remove_journal"):
             transaction.apply_transaction(plan)
+
+    def _apply_leaving_unsealed_complete_journals(self, plan):
+        from subagents_configs import transaction
+
+        def persist_unsealed(prepared):
+            for target_plan in prepared.plan.targets:
+                target = target_plan.target
+                prepared.journal_evidence[target] = transaction._write_journal(
+                    target_plan.home,
+                    prepared.journals[target],
+                    expected_before=prepared.journal_evidence[target],
+                )
+
+        with (
+            patch.object(
+                transaction, "_stage_prepared_cleanup", side_effect=persist_unsealed
+            ),
+            patch.object(transaction, "_sync_and_remove_journal"),
+        ):
+            transaction.apply_transaction(plan)
+
+    def _cleanup_fixture(self):
+        from subagents_configs import transaction
+
+        home = self._home()
+        for name, content in (
+            ("code-explorer.toml", b"old explorer\n"),
+            ("code-reviewer.toml", b"old reviewer\n"),
+        ):
+            destination = home / "agents" / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(content)
+            destination.chmod(0o600)
+        self._apply_leaving_unsealed_complete_journals(self._plan(Target.CODEX))
+        journal = load_journal(home, descriptor_for(Target.CODEX))
+        journal_path = home / ".subagents_configs/journal.json"
+        journal_identity = transaction.capture_evidence(
+            journal_path, "cleanup test journal"
+        )
+        journal_identity, backup_evidence = transaction._validated_journal_evidence(
+            home,
+            journal,
+            journal_identity=journal_identity,
+        )
+        backup_paths = [
+            home / ".subagents_configs" / operation.backup_path
+            for operation in journal.operations
+            if operation.backup_path is not None
+        ]
+        self.assertGreaterEqual(len(backup_paths), 2)
+        return (
+            home,
+            journal,
+            journal_path,
+            journal_identity,
+            backup_evidence,
+            backup_paths,
+        )
+
+    def _cleanup(self, fixture):
+        from subagents_configs import transaction
+
+        home, journal, _path, journal_identity, backup_evidence, _backups = fixture
+        transaction._sync_and_remove_journal(
+            home,
+            journal,
+            journal_evidence=journal_identity,
+            backup_evidence=backup_evidence,
+        )
+
+    def _partial_group_cleanup_fixture(self):
+        from subagents_configs import transaction
+
+        plan = self._plan(Target.CODEX, Target.OPENCODE)
+        homes = {
+            Target.CODEX: self._home(Target.CODEX),
+            Target.OPENCODE: self._home(Target.OPENCODE),
+        }
+        journal_paths = {
+            target: home / ".subagents_configs/journal.json"
+            for target, home in homes.items()
+        }
+        real_cas = transaction.filesystem.compare_and_swap
+
+        def crash_after_first_journal(path, before, content, mode, action):
+            result = real_cas(path, before, content, mode, action)
+            if path == journal_paths[Target.CODEX] and action == "unlink":
+                raise _SimulatedCleanupCrash
+            return result
+
+        with patch.object(
+            transaction.filesystem,
+            "compare_and_swap",
+            side_effect=crash_after_first_journal,
+        ):
+            with self.assertRaises(transaction.TransactionError):
+                transaction.apply_transaction(plan)
+        self.assertFalse(journal_paths[Target.CODEX].exists())
+        self.assertEqual(
+            load_journal(
+                homes[Target.OPENCODE], descriptor_for(Target.OPENCODE)
+            ).rollback_status,
+            "cleanup",
+        )
+        return homes, journal_paths
 
     def test_apply_creates_private_state_files_and_managed_files(self):
         from subagents_configs.transaction import apply_transaction
@@ -208,7 +317,7 @@ class TransactionInstallTests(unittest.TestCase):
         from subagents_configs import transaction
 
         plan = self._plan(Target.CODEX)
-        self._apply_leaving_journals(plan)
+        self._apply_leaving_unsealed_complete_journals(plan)
         home = self._home()
         target = home / "agents/code-explorer.toml"
         original = target.read_bytes()
@@ -267,7 +376,7 @@ class TransactionInstallTests(unittest.TestCase):
         self.assertEqual(managed.stat().st_mtime_ns, before)
         backups = home / ".subagents_configs/backups"
         self.assertTrue(backups.exists())
-        self.assertTrue(
+        self.assertFalse(
             any(item.name.startswith("commitment-") for item in backups.iterdir())
         )
 
@@ -316,7 +425,7 @@ class TransactionInstallTests(unittest.TestCase):
             if path.is_file()
         }
         commitments = {path for path in backups if path not in permanent}
-        self.assertEqual(len(commitments), 1)
+        self.assertEqual(commitments, set())
         self.assertEqual(backups, permanent | commitments)
         backup = home / next(iter(permanent))
         self.assertEqual(backup.read_bytes(), original)
@@ -1126,15 +1235,17 @@ class TransactionInstallTests(unittest.TestCase):
         plan = self._plan(Target.CODEX)
         self._apply_leaving_journals(plan)
         journal = load_journal(self._home(), descriptor_for(Target.CODEX))
-        nonce, digest = journal.transaction_id.rsplit("-", 1)
+        nonce, _digest = journal.transaction_id.rsplit("-", 1)
         marker = self._home() / ".subagents_configs/backups" / f"commitment-{nonce}"
-        self.assertEqual(marker.read_bytes(), f"{nonce}:{digest}".encode())
+        self.assertEqual(
+            marker.read_bytes(), transaction._base_commitment_payload(journal)
+        )
         self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
         transaction.recover_incomplete_journal(
             self._home(), descriptor_for(Target.CODEX)
         )
         self.assertFalse((self._home() / ".subagents_configs/journal.json").exists())
-        self.assertTrue(marker.exists())
+        self.assertFalse(marker.exists())
 
     def test_recovery_rejects_self_rehashed_sparse_journal_and_preserves_marker(self):
         from dataclasses import replace
@@ -1425,6 +1536,1263 @@ class TransactionInstallTests(unittest.TestCase):
         )
         self.assertTrue((self._home() / ".subagents_configs/journal.json").exists())
 
+    def test_cleanup_second_backup_unlink_failure_is_resumable(self):
+        from subagents_configs import transaction
+
+        fixture = self._cleanup_fixture()
+        home, _journal, journal_path, _identity, _evidence, backups = fixture
+        real_cas = transaction.filesystem.compare_and_swap
+
+        def fail_second(path, before, content, mode, action):
+            if path == backups[1] and action == "unlink":
+                raise OSError("injected second backup unlink failure")
+            return real_cas(path, before, content, mode, action)
+
+        with patch.object(
+            transaction.filesystem, "compare_and_swap", side_effect=fail_second
+        ):
+            with self.assertRaises(transaction.TransactionError):
+                self._cleanup(fixture)
+        self.assertTrue(journal_path.exists())
+        self.assertFalse(backups[0].exists())
+        self.assertTrue(backups[1].exists())
+        self.assertEqual(
+            load_journal(home, descriptor_for(Target.CODEX)).rollback_status,
+            "cleanup",
+        )
+        transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertFalse(journal_path.exists())
+
+    def test_cleanup_exception_after_backup_unlink_is_resumable(self):
+        from subagents_configs import transaction
+
+        fixture = self._cleanup_fixture()
+        home, _journal, journal_path, _identity, _evidence, backups = fixture
+        real_cas = transaction.filesystem.compare_and_swap
+
+        def fail_after_unlink(path, before, content, mode, action):
+            result = real_cas(path, before, content, mode, action)
+            if path == backups[0] and action == "unlink":
+                raise OSError("injected post-unlink backup failure")
+            return result
+
+        with patch.object(
+            transaction.filesystem, "compare_and_swap", side_effect=fail_after_unlink
+        ):
+            with self.assertRaises(transaction.TransactionError):
+                self._cleanup(fixture)
+        self.assertTrue(journal_path.exists())
+        self.assertFalse(backups[0].exists())
+        transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertFalse(journal_path.exists())
+
+    def test_cleanup_exception_after_journal_unlink_restores_cleanup_journal(self):
+        from subagents_configs import transaction
+
+        fixture = self._cleanup_fixture()
+        home, _journal, journal_path, _identity, _evidence, _backups = fixture
+        real_cas = transaction.filesystem.compare_and_swap
+
+        def fail_after_unlink(path, before, content, mode, action):
+            result = real_cas(path, before, content, mode, action)
+            if path == journal_path and action == "unlink":
+                raise OSError("injected post-unlink journal failure")
+            return result
+
+        with patch.object(
+            transaction.filesystem, "compare_and_swap", side_effect=fail_after_unlink
+        ):
+            with self.assertRaises(transaction.TransactionError):
+                self._cleanup(fixture)
+        self.assertEqual(
+            load_journal(home, descriptor_for(Target.CODEX)).rollback_status,
+            "cleanup",
+        )
+        transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertFalse(journal_path.exists())
+
+    def test_cleanup_crash_after_phase_write_is_resumable(self):
+        from subagents_configs import transaction
+
+        fixture = self._cleanup_fixture()
+        home, _journal, journal_path, _identity, _evidence, _backups = fixture
+        real_write = transaction._write_journal
+
+        def crash_after_write(home, journal, **kwargs):
+            result = real_write(home, journal, **kwargs)
+            if journal.rollback_status == "cleanup":
+                raise _SimulatedCleanupCrash
+            return result
+
+        with patch.object(transaction, "_write_journal", side_effect=crash_after_write):
+            with self.assertRaises(_SimulatedCleanupCrash):
+                self._cleanup(fixture)
+        self.assertTrue(journal_path.exists())
+        transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertFalse(journal_path.exists())
+
+    def test_cleanup_crash_after_backup_unlink_is_resumable(self):
+        from subagents_configs import transaction
+
+        fixture = self._cleanup_fixture()
+        home, _journal, journal_path, _identity, _evidence, backups = fixture
+        real_cas = transaction.filesystem.compare_and_swap
+
+        def crash_after_unlink(path, before, content, mode, action):
+            result = real_cas(path, before, content, mode, action)
+            if path == backups[0] and action == "unlink":
+                raise _SimulatedCleanupCrash
+            return result
+
+        with patch.object(
+            transaction.filesystem, "compare_and_swap", side_effect=crash_after_unlink
+        ):
+            with self.assertRaises(_SimulatedCleanupCrash):
+                self._cleanup(fixture)
+        self.assertTrue(journal_path.exists())
+        self.assertFalse(backups[0].exists())
+        transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertFalse(journal_path.exists())
+
+    def test_cleanup_crash_after_all_backups_are_durable_is_resumable(self):
+        from subagents_configs import transaction
+
+        fixture = self._cleanup_fixture()
+        home, _journal, journal_path, _identity, _evidence, backups = fixture
+        backups_directory = home / ".subagents_configs/backups"
+        real_sync = transaction.filesystem.sync_directory
+
+        def crash_after_sync(path):
+            result = real_sync(path)
+            if path == backups_directory and all(
+                not backup.exists() for backup in backups
+            ):
+                raise _SimulatedCleanupCrash
+            return result
+
+        with patch.object(
+            transaction.filesystem, "sync_directory", side_effect=crash_after_sync
+        ):
+            with self.assertRaises(_SimulatedCleanupCrash):
+                self._cleanup(fixture)
+        self.assertTrue(journal_path.exists())
+        self.assertTrue(all(not backup.exists() for backup in backups))
+        transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertFalse(journal_path.exists())
+
+    def test_cleanup_crash_after_journal_unlink_is_already_complete(self):
+        from subagents_configs import transaction
+
+        fixture = self._cleanup_fixture()
+        home, _journal, journal_path, _identity, _evidence, _backups = fixture
+        real_cas = transaction.filesystem.compare_and_swap
+
+        def crash_after_unlink(path, before, content, mode, action):
+            result = real_cas(path, before, content, mode, action)
+            if path == journal_path and action == "unlink":
+                raise _SimulatedCleanupCrash
+            return result
+
+        with patch.object(
+            transaction.filesystem, "compare_and_swap", side_effect=crash_after_unlink
+        ):
+            with self.assertRaises(_SimulatedCleanupCrash):
+                self._cleanup(fixture)
+        self.assertFalse(journal_path.exists())
+        transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertFalse(journal_path.exists())
+
+    def test_cleanup_snapshot_rejects_backup_hardlink(self):
+        from subagents_configs import transaction
+
+        fixture = self._cleanup_fixture()
+        _home, _journal, journal_path, _identity, _evidence, backups = fixture
+        alias = self.root / "backup-hardlink"
+        alias.hardlink_to(backups[0])
+        with self.assertRaises(transaction.TransactionError):
+            self._cleanup(fixture)
+        self.assertEqual(
+            load_journal(self._home(), descriptor_for(Target.CODEX)).rollback_status,
+            "complete",
+        )
+        self.assertTrue(journal_path.exists())
+
+    def test_cleanup_recovery_rejects_backup_hardlink_before_staging(self):
+        from subagents_configs import transaction
+
+        fixture = self._cleanup_fixture()
+        home, _journal, journal_path, _identity, _evidence, backups = fixture
+        alias = self.root / "prestage-backup-hardlink"
+        alias.hardlink_to(backups[0])
+        with self.assertRaises(transaction.IncompleteRollbackError):
+            transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertTrue(journal_path.exists())
+
+    def test_cleanup_recovery_rejects_same_hash_inode_swap_before_staging(self):
+        from subagents_configs import transaction
+
+        fixture = self._cleanup_fixture()
+        home, _journal, journal_path, _identity, _evidence, backups = fixture
+        content = backups[0].read_bytes()
+        backups[0].unlink()
+        backups[0].write_bytes(content)
+        backups[0].chmod(0o600)
+        with self.assertRaises(transaction.IncompleteRollbackError):
+            transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertTrue(journal_path.exists())
+
+    def test_schema2_backup_journal_fails_closed_without_inode_evidence(self):
+        from dataclasses import replace
+
+        from subagents_configs import transaction
+
+        fixture = self._cleanup_fixture()
+        home, journal, journal_path, _identity, _evidence, _backups = fixture
+        nonce = journal.transaction_id.rsplit("-", 1)[0]
+        legacy = replace(
+            journal,
+            schema_version=2,
+            operations=tuple(
+                replace(
+                    operation,
+                    backup_identity_evidence=None,
+                    cleanup_backup_evidence=None,
+                )
+                for operation in journal.operations
+            ),
+            cleanup_participant_digests=(),
+            cleanup_commitment_evidence=(),
+        )
+        legacy = replace(
+            legacy,
+            transaction_id=transaction._committed_transaction_id(nonce, (legacy,)),
+        )
+        journal_path.write_bytes(encode_journal(legacy))
+        journal_path.chmod(0o600)
+        marker = home / ".subagents_configs/backups" / f"commitment-{nonce}"
+        marker.write_bytes(
+            f"{nonce}:{legacy.transaction_id.rsplit('-', 1)[1]}".encode()
+        )
+        marker.chmod(0o600)
+        with self.assertRaises(transaction.TransactionError):
+            transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertTrue(journal_path.exists())
+
+    def test_schema2_backup_free_journal_is_diagnostic_only_without_root_anchors(self):
+        from dataclasses import replace
+
+        from subagents_configs import transaction
+
+        plan = self._plan(Target.CODEX)
+        self._apply_leaving_unsealed_complete_journals(plan)
+        home = self._home()
+        descriptor = descriptor_for(Target.CODEX)
+        journal_path = home / ".subagents_configs/journal.json"
+        journal = load_journal(home, descriptor)
+        self.assertTrue(
+            all(operation.backup_path is None for operation in journal.operations)
+        )
+        nonce = journal.transaction_id.rsplit("-", 1)[0]
+        legacy = replace(
+            journal,
+            schema_version=2,
+            operations=tuple(
+                replace(
+                    operation,
+                    backup_identity_evidence=None,
+                    cleanup_backup_evidence=None,
+                )
+                for operation in journal.operations
+            ),
+            cleanup_participant_digests=(),
+            cleanup_commitment_evidence=(),
+        )
+        legacy = replace(
+            legacy,
+            transaction_id=transaction._committed_transaction_id(nonce, (legacy,)),
+        )
+        journal_path.write_bytes(encode_journal(legacy))
+        journal_path.chmod(0o600)
+
+        with self.assertRaises(transaction.IncompleteRollbackError):
+            transaction.recover_incomplete_journal(home, descriptor)
+        self.assertTrue(journal_path.exists())
+
+    def test_cleanup_restart_rejects_same_hash_backup_inode_replacement(self):
+        from subagents_configs import transaction
+
+        fixture = self._cleanup_fixture()
+        home, _journal, journal_path, _identity, _evidence, backups = fixture
+        real_write = transaction._write_journal
+
+        def crash_after_write(home, journal, **kwargs):
+            result = real_write(home, journal, **kwargs)
+            if journal.rollback_status == "cleanup":
+                raise _SimulatedCleanupCrash
+            return result
+
+        with patch.object(transaction, "_write_journal", side_effect=crash_after_write):
+            with self.assertRaises(_SimulatedCleanupCrash):
+                self._cleanup(fixture)
+        content = backups[0].read_bytes()
+        backups[0].unlink()
+        backups[0].write_bytes(content)
+        backups[0].chmod(0o600)
+        with self.assertRaises(transaction.IncompleteRollbackError):
+            transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertTrue(journal_path.exists())
+
+    def test_cleanup_restart_rejects_backup_hardlink_alias(self):
+        from subagents_configs import transaction
+
+        fixture = self._cleanup_fixture()
+        home, _journal, journal_path, _identity, _evidence, backups = fixture
+        real_write = transaction._write_journal
+
+        def crash_after_write(home, journal, **kwargs):
+            result = real_write(home, journal, **kwargs)
+            if journal.rollback_status == "cleanup":
+                raise _SimulatedCleanupCrash
+            return result
+
+        with patch.object(transaction, "_write_journal", side_effect=crash_after_write):
+            with self.assertRaises(_SimulatedCleanupCrash):
+                self._cleanup(fixture)
+        alias = self.root / "restart-backup-hardlink"
+        alias.hardlink_to(backups[0])
+        with self.assertRaises(transaction.IncompleteRollbackError):
+            transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertTrue(journal_path.exists())
+
+    def test_multi_target_partial_cleanup_journal_deletion_is_resumable(self):
+        from subagents_configs import transaction
+
+        homes, journal_paths = self._partial_group_cleanup_fixture()
+        transaction.recover_participants(homes)
+        self.assertTrue(all(not path.exists() for path in journal_paths.values()))
+
+    def test_multi_target_crash_during_cleanup_journal_staging_is_resumable(self):
+        from subagents_configs import transaction
+
+        plan = self._plan(Target.CODEX, Target.OPENCODE)
+        real_write = transaction._write_journal
+        cleanup_writes = 0
+
+        def crash_after_first_cleanup_write(home, journal, **kwargs):
+            nonlocal cleanup_writes
+            result = real_write(home, journal, **kwargs)
+            if journal.rollback_status == "cleanup":
+                cleanup_writes += 1
+                if cleanup_writes == 1:
+                    raise _SimulatedCleanupCrash
+            return result
+
+        with patch.object(
+            transaction, "_write_journal", side_effect=crash_after_first_cleanup_write
+        ):
+            with self.assertRaises(transaction.TransactionError):
+                transaction.apply_transaction(plan)
+        homes = {
+            Target.CODEX: self._home(Target.CODEX),
+            Target.OPENCODE: self._home(Target.OPENCODE),
+        }
+        transaction.recover_participants(homes)
+        self.assertTrue(
+            all(
+                not (home / ".subagents_configs/journal.json").exists()
+                for home in homes.values()
+            )
+        )
+
+    def test_multi_target_crash_during_cleanup_marker_staging_is_resumable(self):
+        from subagents_configs import transaction
+
+        plan = self._plan(Target.CODEX, Target.OPENCODE)
+        real_rewrite = transaction.filesystem.rewrite_regular_in_place
+        crashed = False
+
+        def crash_after_first_marker(path, before, content, label):
+            nonlocal crashed
+            result = real_rewrite(path, before, content, label)
+            if (
+                b'"domain":"subagents-configs/cleanup-root/v1"' in content
+                and not crashed
+            ):
+                crashed = True
+                raise _SimulatedCleanupCrash
+            return result
+
+        with patch.object(
+            transaction.filesystem,
+            "rewrite_regular_in_place",
+            side_effect=crash_after_first_marker,
+        ):
+            with self.assertRaises(transaction.TransactionError):
+                transaction.apply_transaction(plan)
+        homes = {
+            Target.CODEX: self._home(Target.CODEX),
+            Target.OPENCODE: self._home(Target.OPENCODE),
+        }
+        transaction.recover_participants(homes)
+        self.assertTrue(
+            all(
+                not (home / ".subagents_configs/journal.json").exists()
+                for home in homes.values()
+            )
+        )
+
+    def test_cleanup_root_short_write_is_repaired_from_retained_base_anchor(self):
+        from subagents_configs import transaction
+
+        plan = self._plan(Target.CODEX)
+        real_rewrite = transaction.filesystem.rewrite_regular_in_place
+        crashed = False
+
+        def short_write_then_crash(path, before, content, label):
+            nonlocal crashed
+            if (
+                b'"domain":"subagents-configs/cleanup-root/v1"' in content
+                and not crashed
+            ):
+                crashed = True
+                with path.open("r+b") as marker:
+                    marker.write(content[:97])
+                    marker.flush()
+                    os.fsync(marker.fileno())
+                raise _SimulatedCleanupCrash
+            return real_rewrite(path, before, content, label)
+
+        with patch.object(
+            transaction.filesystem,
+            "rewrite_regular_in_place",
+            side_effect=short_write_then_crash,
+        ):
+            with self.assertRaises(transaction.TransactionError):
+                transaction.apply_transaction(plan)
+        home = self._home()
+        transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertFalse((home / ".subagents_configs/journal.json").exists())
+
+    def test_cleanup_crash_after_root_write_is_resumable(self):
+        from subagents_configs import transaction
+
+        plan = self._plan(Target.CODEX)
+        real_rewrite = transaction.filesystem.rewrite_regular_in_place
+        cleanup_writes = 0
+
+        def crash_after_root_write(path, before, content, label):
+            nonlocal cleanup_writes
+            result = real_rewrite(path, before, content, label)
+            if b'"domain":"subagents-configs/cleanup-root/v1"' in content:
+                cleanup_writes += 1
+                if cleanup_writes == 1:
+                    raise _SimulatedCleanupCrash
+            return result
+
+        with patch.object(
+            transaction.filesystem,
+            "rewrite_regular_in_place",
+            side_effect=crash_after_root_write,
+        ):
+            with self.assertRaises(transaction.TransactionError):
+                transaction.apply_transaction(plan)
+        home = self._home()
+        transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertFalse((home / ".subagents_configs/journal.json").exists())
+
+    def test_multi_target_missing_noncleanup_participant_fails_closed(self):
+        from subagents_configs import transaction
+
+        plan = self._plan(Target.CODEX, Target.OPENCODE)
+        self._apply_leaving_unsealed_complete_journals(plan)
+        homes = {
+            Target.CODEX: self._home(Target.CODEX),
+            Target.OPENCODE: self._home(Target.OPENCODE),
+        }
+        (homes[Target.CODEX] / ".subagents_configs/journal.json").unlink()
+        with self.assertRaises((transaction.IncompleteRollbackError, ValueError)):
+            transaction.recover_participants(homes)
+
+    def test_multi_target_partial_cleanup_malformed_survivor_fails_closed(self):
+        from dataclasses import replace
+
+        from subagents_configs import transaction
+
+        homes, journal_paths = self._partial_group_cleanup_fixture()
+        surviving = load_journal(
+            homes[Target.OPENCODE], descriptor_for(Target.OPENCODE)
+        )
+        malformed = replace(
+            surviving,
+            cleanup_participant_digests=(
+                surviving.cleanup_participant_digests[0],
+                "0" * 64,
+            ),
+        )
+        transaction.filesystem.atomic_write(
+            journal_paths[Target.OPENCODE], encode_journal(malformed), 0o600
+        )
+        with self.assertRaises((transaction.IncompleteRollbackError, ValueError)):
+            transaction.recover_participants(homes)
+
+    def test_multi_target_partial_cleanup_tampered_missing_digest_fails_closed(self):
+        from dataclasses import replace
+
+        from subagents_configs import transaction
+
+        homes, journal_paths = self._partial_group_cleanup_fixture()
+        surviving = load_journal(
+            homes[Target.OPENCODE], descriptor_for(Target.OPENCODE)
+        )
+        tampered = replace(
+            surviving,
+            cleanup_participant_digests=(
+                "0" * 64,
+                surviving.cleanup_participant_digests[1],
+            ),
+        )
+        transaction.filesystem.atomic_write(
+            journal_paths[Target.OPENCODE], encode_journal(tampered), 0o600
+        )
+        with self.assertRaises((transaction.IncompleteRollbackError, ValueError)):
+            transaction.recover_participants(homes)
+        self.assertTrue(journal_paths[Target.OPENCODE].exists())
+
+    def test_multi_target_partial_cleanup_hardlinked_marker_fails_closed(self):
+        from subagents_configs import transaction
+
+        homes, journal_paths = self._partial_group_cleanup_fixture()
+        surviving = load_journal(
+            homes[Target.OPENCODE], descriptor_for(Target.OPENCODE)
+        )
+        nonce = surviving.transaction_id.rsplit("-", 1)[0]
+        marker = (
+            homes[Target.CODEX]
+            / ".subagents_configs/backups"
+            / f"commitment-{nonce}-progress-a"
+        )
+        alias = self.root / "cleanup-marker-hardlink"
+        alias.hardlink_to(marker)
+        with self.assertRaises((transaction.IncompleteRollbackError, ValueError)):
+            transaction.recover_participants(homes)
+        self.assertTrue(journal_paths[Target.OPENCODE].exists())
+
+    def test_multi_target_partial_cleanup_replaced_marker_inode_fails_closed(self):
+        from subagents_configs import transaction
+
+        homes, journal_paths = self._partial_group_cleanup_fixture()
+        surviving = load_journal(
+            homes[Target.OPENCODE], descriptor_for(Target.OPENCODE)
+        )
+        nonce = surviving.transaction_id.rsplit("-", 1)[0]
+        marker = (
+            homes[Target.CODEX]
+            / ".subagents_configs/backups"
+            / f"commitment-{nonce}-progress-a"
+        )
+        content = marker.read_bytes()
+        marker.unlink()
+        marker.write_bytes(content)
+        marker.chmod(0o600)
+        with self.assertRaises((transaction.IncompleteRollbackError, ValueError)):
+            transaction.recover_participants(homes)
+        self.assertTrue(journal_paths[Target.OPENCODE].exists())
+
+    def test_cleanup_recovery_rejects_rewritten_target_identity_with_same_content(self):
+        from dataclasses import replace
+
+        from subagents_configs import transaction
+
+        plan = self._plan(Target.CODEX)
+        with patch.object(transaction, "_sync_and_remove_journal"):
+            transaction.apply_transaction(plan)
+        home = self._home()
+        descriptor = descriptor_for(Target.CODEX)
+        journal_path = home / ".subagents_configs/journal.json"
+        journal = load_journal(home, descriptor)
+        position = next(
+            index
+            for index, operation in enumerate(journal.operations)
+            if operation.identifier == "code-explorer"
+        )
+        target = home / "agents/code-explorer.toml"
+        content = target.read_bytes()
+        mode = stat.S_IMODE(target.stat().st_mode)
+        target.unlink()
+        target.write_bytes(content)
+        target.chmod(mode)
+        replacement = transaction.capture_evidence(target, "replacement target")
+        operations = tuple(
+            replace(operation, expected_after_evidence=replacement)
+            if index == position
+            else operation
+            for index, operation in enumerate(journal.operations)
+        )
+        altered = replace(journal, operations=operations)
+        altered = replace(
+            altered,
+            cleanup_participant_digests=(
+                transaction.cleanup_participant_digests((altered,))[0],
+            ),
+        )
+        transaction.filesystem.atomic_write(
+            journal_path, encode_journal(altered), 0o600
+        )
+
+        with self.assertRaises(transaction.IncompleteRollbackError):
+            transaction.recover_incomplete_journal(home, descriptor)
+        self.assertTrue(journal_path.exists())
+
+    def test_pending_recovery_rejects_rewritten_applied_target_identity(self):
+        from dataclasses import replace
+
+        from subagents_configs import transaction
+
+        class CrashBeforeSecondOperation:
+            def __init__(self):
+                self.calls = 0
+
+            def before_operation(self, _operation_id):
+                self.calls += 1
+                if self.calls == 2:
+                    raise _SimulatedCleanupCrash
+
+        def preserve_pending(_prepared, primary):
+            raise primary
+
+        plan = self._plan(Target.CODEX)
+        with patch.object(transaction, "_rollback", side_effect=preserve_pending):
+            with self.assertRaises(_SimulatedCleanupCrash):
+                transaction.apply_transaction(
+                    plan, failure_injector=CrashBeforeSecondOperation()
+                )
+        home = self._home()
+        descriptor = descriptor_for(Target.CODEX)
+        journal_path = home / ".subagents_configs/journal.json"
+        journal = load_journal(home, descriptor)
+        position = next(
+            index
+            for index, operation in enumerate(journal.operations)
+            if operation.status == "applied"
+        )
+        operation = journal.operations[position]
+        target = transaction._path_for_journal_operation(home, descriptor, operation)
+        content = target.read_bytes()
+        mode = stat.S_IMODE(target.stat().st_mode)
+        target.unlink()
+        target.write_bytes(content)
+        target.chmod(mode)
+        replacement = transaction.capture_evidence(target, "replacement target")
+        altered = replace(
+            journal,
+            operations=tuple(
+                replace(item, expected_after_evidence=replacement)
+                if index == position
+                else item
+                for index, item in enumerate(journal.operations)
+            ),
+        )
+        transaction.filesystem.atomic_write(
+            journal_path, encode_journal(altered), 0o600
+        )
+
+        with self.assertRaises(transaction.IncompleteRollbackError):
+            transaction.recover_incomplete_journal(home, descriptor)
+        self.assertTrue(journal_path.exists())
+
+    def test_pending_recovery_rejects_rewritten_progress_anchor_digest(self):
+        from dataclasses import replace
+
+        from subagents_configs import transaction
+
+        class CrashBeforeSecondOperation:
+            def __init__(self):
+                self.calls = 0
+
+            def before_operation(self, _operation_id):
+                self.calls += 1
+                if self.calls == 2:
+                    raise _SimulatedCleanupCrash
+
+        def preserve_pending(_prepared, primary):
+            raise primary
+
+        plan = self._plan(Target.CODEX)
+        with patch.object(transaction, "_rollback", side_effect=preserve_pending):
+            with self.assertRaises(_SimulatedCleanupCrash):
+                transaction.apply_transaction(
+                    plan, failure_injector=CrashBeforeSecondOperation()
+                )
+        home = self._home()
+        descriptor = descriptor_for(Target.CODEX)
+        journal_path = home / ".subagents_configs/journal.json"
+        journal = load_journal(home, descriptor)
+        for slot in (1, 2):
+            with self.subTest(slot=slot):
+                altered_evidence = list(journal.cleanup_commitment_evidence)
+                altered_evidence[slot] = replace(
+                    altered_evidence[slot], sha256="0" * 64
+                )
+                altered = replace(
+                    journal,
+                    cleanup_commitment_evidence=tuple(altered_evidence),
+                )
+                transaction.filesystem.atomic_write(
+                    journal_path, encode_journal(altered), 0o600
+                )
+
+                with self.assertRaises(transaction.IncompleteRollbackError):
+                    transaction.recover_incomplete_journal(home, descriptor)
+                self.assertTrue(journal_path.exists())
+
+    def test_pending_recovery_rejects_forged_ahead_progress_envelope(self):
+        from subagents_configs import transaction
+
+        class CrashBeforeSecondOperation:
+            def __init__(self):
+                self.calls = 0
+
+            def before_operation(self, _operation_id):
+                self.calls += 1
+                if self.calls == 2:
+                    raise _SimulatedCleanupCrash
+
+        def preserve_pending(_prepared, primary):
+            raise primary
+
+        plan = self._plan(Target.CODEX)
+        with patch.object(transaction, "_rollback", side_effect=preserve_pending):
+            with self.assertRaises(_SimulatedCleanupCrash):
+                transaction.apply_transaction(
+                    plan, failure_injector=CrashBeforeSecondOperation()
+                )
+        home = self._home()
+        descriptor = descriptor_for(Target.CODEX)
+        journal_path = home / ".subagents_configs/journal.json"
+        journal = load_journal(home, descriptor)
+        nonce = journal.transaction_id.rsplit("-", 1)[0]
+        progress_paths = {
+            slot: home
+            / ".subagents_configs/backups"
+            / f"commitment-{nonce}-progress-{'a' if slot == 1 else 'b'}"
+            for slot in (1, 2)
+        }
+        sequences = {
+            slot: transaction._progress_sequence(path.read_bytes(), journal)
+            for slot, path in progress_paths.items()
+        }
+        current_sequence = max(
+            sequence for sequence in sequences.values() if sequence is not None
+        )
+        stale_slot = next(
+            slot for slot, sequence in sequences.items() if sequence is None
+        )
+        forged = transaction._fixed_commitment_payload(
+            {
+                "domain": "subagents-configs/progress-root/v1",
+                "transaction_id": journal.transaction_id,
+                "target": journal.target.value,
+                "participants": [target.value for target in journal.participants],
+                "sequence": current_sequence + 1,
+                "journal_digest": "0" * 64,
+                "anchor_structures": [
+                    transaction._identity_structure_record(item)
+                    for item in journal.cleanup_commitment_evidence
+                ],
+            }
+        )
+        marker = progress_paths[stale_slot]
+        transaction.filesystem.rewrite_regular_in_place(
+            marker,
+            transaction.capture_evidence(marker, "forged progress marker"),
+            forged,
+            "forged progress marker",
+        )
+
+        with self.assertRaises(transaction.IncompleteRollbackError):
+            transaction.recover_incomplete_journal(home, descriptor)
+        self.assertTrue(journal_path.exists())
+
+    def test_progress_short_write_keeps_prior_slot_recoverable(self):
+        from subagents_configs import transaction
+
+        real_rewrite = transaction.filesystem.rewrite_regular_in_place
+        crashed = False
+
+        def short_write_then_crash(path, before, content, label):
+            nonlocal crashed
+            if (
+                b'"domain":"subagents-configs/progress-root/v1"' in content
+                and not crashed
+            ):
+                crashed = True
+                with path.open("r+b") as marker:
+                    marker.write(content[:97])
+                    marker.flush()
+                    os.fsync(marker.fileno())
+                raise _SimulatedCleanupCrash
+            return real_rewrite(path, before, content, label)
+
+        def preserve_pending(_prepared, primary):
+            raise primary
+
+        plan = self._plan(Target.CODEX)
+        with (
+            patch.object(transaction, "_rollback", side_effect=preserve_pending),
+            patch.object(
+                transaction.filesystem,
+                "rewrite_regular_in_place",
+                side_effect=short_write_then_crash,
+            ),
+            self.assertRaises(_SimulatedCleanupCrash),
+        ):
+            transaction.apply_transaction(plan)
+
+        home = self._home()
+        transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertFalse((home / ".subagents_configs/journal.json").exists())
+        self.assertFalse((home / "agents/code-explorer.toml").exists())
+
+    def test_crash_after_progress_root_before_journal_keeps_prior_slot_recoverable(
+        self,
+    ):
+        from subagents_configs import transaction
+
+        real_write = transaction._write_journal
+        crashed = False
+
+        def crash_before_journal(home, journal, **kwargs):
+            nonlocal crashed
+            if not crashed and any(
+                operation.status == "applying" for operation in journal.operations
+            ):
+                crashed = True
+                raise _SimulatedCleanupCrash
+            return real_write(home, journal, **kwargs)
+
+        def preserve_pending(_prepared, primary):
+            raise primary
+
+        plan = self._plan(Target.CODEX)
+        with (
+            patch.object(transaction, "_rollback", side_effect=preserve_pending),
+            patch.object(
+                transaction, "_write_journal", side_effect=crash_before_journal
+            ),
+            self.assertRaises(_SimulatedCleanupCrash),
+        ):
+            transaction.apply_transaction(plan)
+
+        home = self._home()
+        transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
+        self.assertFalse((home / ".subagents_configs/journal.json").exists())
+        self.assertFalse((home / "agents/code-explorer.toml").exists())
+
+    def test_crash_after_applied_progress_root_materializes_next_journal(self):
+        from subagents_configs import transaction
+
+        real_write = transaction._write_journal
+        crashed = False
+
+        def crash_before_applied_journal(home, journal, **kwargs):
+            nonlocal crashed
+            if not crashed and any(
+                operation.status == "applied" for operation in journal.operations
+            ):
+                crashed = True
+                raise _SimulatedCleanupCrash
+            return real_write(home, journal, **kwargs)
+
+        def preserve_pending(_prepared, primary):
+            raise primary
+
+        plan = self._plan(Target.CODEX)
+        with (
+            patch.object(transaction, "_rollback", side_effect=preserve_pending),
+            patch.object(
+                transaction,
+                "_write_journal",
+                side_effect=crash_before_applied_journal,
+            ),
+            self.assertRaises(_SimulatedCleanupCrash),
+        ):
+            transaction.apply_transaction(plan)
+
+        home = self._home()
+        descriptor = descriptor_for(Target.CODEX)
+        stale = load_journal(home, descriptor)
+        applying = next(
+            operation
+            for operation in stale.operations
+            if operation.status == "applying"
+        )
+        target = transaction._path_for_journal_operation(home, descriptor, applying)
+        self.assertTrue(target.exists())
+
+        transaction.recover_incomplete_journal(home, descriptor)
+        self.assertFalse((home / ".subagents_configs/journal.json").exists())
+        self.assertFalse(target.exists())
+
+    def test_crash_after_rolled_back_progress_root_materializes_next_journal(self):
+        from subagents_configs import transaction
+
+        class CrashBeforeSecondOperation:
+            def __init__(self):
+                self.calls = 0
+
+            def before_operation(self, _operation_id):
+                self.calls += 1
+                if self.calls == 2:
+                    raise _SimulatedCleanupCrash
+
+        def preserve_pending(_prepared, primary):
+            raise primary
+
+        plan = self._plan(Target.CODEX)
+        with patch.object(transaction, "_rollback", side_effect=preserve_pending):
+            with self.assertRaises(_SimulatedCleanupCrash):
+                transaction.apply_transaction(
+                    plan, failure_injector=CrashBeforeSecondOperation()
+                )
+
+        home = self._home()
+        descriptor = descriptor_for(Target.CODEX)
+        real_write = transaction._write_journal
+        crashed = False
+
+        def crash_before_rolled_back_journal(home, journal, **kwargs):
+            nonlocal crashed
+            if not crashed and any(
+                operation.status == "rolled-back" for operation in journal.operations
+            ):
+                crashed = True
+                raise _SimulatedCleanupCrash
+            return real_write(home, journal, **kwargs)
+
+        with (
+            patch.object(
+                transaction,
+                "_write_journal",
+                side_effect=crash_before_rolled_back_journal,
+            ),
+            self.assertRaises(_SimulatedCleanupCrash),
+        ):
+            transaction.recover_incomplete_journal(home, descriptor)
+
+        stale = load_journal(home, descriptor)
+        applied = next(
+            operation for operation in stale.operations if operation.status == "applied"
+        )
+        applying = next(
+            operation
+            for operation in stale.operations
+            if operation.status == "applying"
+        )
+        applied_target = transaction._path_for_journal_operation(
+            home, descriptor, applied
+        )
+        rollback_target = transaction._path_for_journal_operation(
+            home, descriptor, applying
+        )
+        self.assertTrue(applied_target.exists())
+        self.assertFalse(rollback_target.exists())
+
+        transaction.recover_incomplete_journal(home, descriptor)
+        self.assertFalse((home / ".subagents_configs/journal.json").exists())
+        self.assertFalse(applied_target.exists())
+        self.assertFalse(rollback_target.exists())
+
+    def test_progress_root_postcondition_exception_is_proved_and_continues(self):
+        from subagents_configs import transaction
+
+        real_rewrite = transaction.filesystem.rewrite_regular_in_place
+        injected = False
+
+        def raise_after_progress_write(path, before, content, label):
+            nonlocal injected
+            result = real_rewrite(path, before, content, label)
+            if (
+                b'"domain":"subagents-configs/progress-root/v1"' in content
+                and not injected
+                and (path.parent.parent / "journal.json").exists()
+            ):
+                injected = True
+                raise OSError("injected postcondition failure")
+            return result
+
+        with patch.object(
+            transaction.filesystem,
+            "rewrite_regular_in_place",
+            side_effect=raise_after_progress_write,
+        ):
+            transaction.apply_transaction(self._plan(Target.CODEX))
+
+        self.assertTrue(injected)
+        self.assertFalse((self._home() / ".subagents_configs/journal.json").exists())
+
+    def test_pending_recovery_rejects_rewritten_rolled_back_target_identity(self):
+        from dataclasses import replace
+
+        from subagents_configs import transaction
+
+        home = self._home()
+        target = home / "agents/code-explorer.toml"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"original explorer\n")
+        target.chmod(0o600)
+
+        class CrashBeforeSecondOperation:
+            def __init__(self):
+                self.calls = 0
+
+            def before_operation(self, _operation_id):
+                self.calls += 1
+                if self.calls == 2:
+                    raise RuntimeError("injected operation failure")
+
+        plan = self._plan(Target.CODEX)
+        with (
+            patch.object(
+                transaction,
+                "_stage_prepared_cleanup",
+                side_effect=OSError("preserve pending rollback"),
+            ),
+            self.assertRaises(transaction.IncompleteRollbackError),
+        ):
+            transaction.apply_transaction(
+                plan, failure_injector=CrashBeforeSecondOperation()
+            )
+
+        descriptor = descriptor_for(Target.CODEX)
+        journal_path = home / ".subagents_configs/journal.json"
+        journal = load_journal(home, descriptor)
+        position = next(
+            index
+            for index, operation in enumerate(journal.operations)
+            if operation.identifier == "code-explorer"
+        )
+        operation = journal.operations[position]
+        self.assertEqual(operation.status, "rolled-back")
+        content = target.read_bytes()
+        mode = stat.S_IMODE(target.stat().st_mode)
+        target.unlink()
+        target.write_bytes(content)
+        target.chmod(mode)
+        replacement = transaction.capture_evidence(target, "replacement target")
+        altered = replace(
+            journal,
+            operations=tuple(
+                replace(item, expected_before_evidence=replacement)
+                if index == position
+                else item
+                for index, item in enumerate(journal.operations)
+            ),
+        )
+        transaction.filesystem.atomic_write(
+            journal_path, encode_journal(altered), 0o600
+        )
+
+        with self.assertRaises(transaction.IncompleteRollbackError):
+            transaction.recover_incomplete_journal(home, descriptor)
+        self.assertTrue(journal_path.exists())
+
+    def test_unsealed_complete_recovery_rejects_rewritten_target_identity(self):
+        from dataclasses import replace
+
+        from subagents_configs import transaction
+
+        plan = self._plan(Target.CODEX)
+        self._apply_leaving_unsealed_complete_journals(plan)
+        home = self._home()
+        descriptor = descriptor_for(Target.CODEX)
+        journal_path = home / ".subagents_configs/journal.json"
+        journal = load_journal(home, descriptor)
+        self.assertEqual(journal.rollback_status, "complete")
+        position = next(
+            index
+            for index, operation in enumerate(journal.operations)
+            if operation.identifier == "code-explorer"
+        )
+        target = home / "agents/code-explorer.toml"
+        content = target.read_bytes()
+        mode = stat.S_IMODE(target.stat().st_mode)
+        target.unlink()
+        target.write_bytes(content)
+        target.chmod(mode)
+        replacement = transaction.capture_evidence(target, "replacement target")
+        altered = replace(
+            journal,
+            operations=tuple(
+                replace(operation, expected_after_evidence=replacement)
+                if index == position
+                else operation
+                for index, operation in enumerate(journal.operations)
+            ),
+        )
+        transaction.filesystem.atomic_write(
+            journal_path, encode_journal(altered), 0o600
+        )
+
+        with self.assertRaises(transaction.IncompleteRollbackError):
+            transaction.recover_incomplete_journal(home, descriptor)
+        self.assertTrue(journal_path.exists())
+
+    def test_unsealed_complete_recovery_rejects_rewritten_anchor_sha(self):
+        from dataclasses import replace
+
+        from subagents_configs import transaction
+
+        plan = self._plan(Target.CODEX)
+        self._apply_leaving_unsealed_complete_journals(plan)
+        home = self._home()
+        descriptor = descriptor_for(Target.CODEX)
+        journal_path = home / ".subagents_configs/journal.json"
+        journal = load_journal(home, descriptor)
+        self.assertEqual(journal.rollback_status, "complete")
+        altered_anchor = replace(
+            journal.cleanup_commitment_evidence[0], sha256="0" * 64
+        )
+        altered = replace(
+            journal,
+            cleanup_commitment_evidence=(
+                altered_anchor,
+                *journal.cleanup_commitment_evidence[1:],
+            ),
+        )
+        transaction.filesystem.atomic_write(
+            journal_path, encode_journal(altered), 0o600
+        )
+
+        with self.assertRaises(transaction.IncompleteRollbackError):
+            transaction.recover_incomplete_journal(home, descriptor)
+        self.assertTrue(journal_path.exists())
+
+    def test_partial_cleanup_retains_unchanged_base_root(self):
+        from subagents_configs import transaction
+
+        homes, _journal_paths = self._partial_group_cleanup_fixture()
+        surviving = load_journal(
+            homes[Target.OPENCODE], descriptor_for(Target.OPENCODE)
+        )
+        nonce = surviving.transaction_id.rsplit("-", 1)[0]
+        for home in homes.values():
+            base = home / ".subagents_configs/backups" / f"commitment-{nonce}"
+            self.assertEqual(
+                base.read_bytes(), transaction._base_commitment_payload(surviving)
+            )
+
+    def test_cleanup_recovery_rejects_rewritten_marker_identity_and_digest(self):
+        from dataclasses import replace
+
+        from subagents_configs import transaction
+
+        plan = self._plan(Target.CODEX)
+        with patch.object(transaction, "_sync_and_remove_journal"):
+            transaction.apply_transaction(plan)
+        home = self._home()
+        descriptor = descriptor_for(Target.CODEX)
+        journal_path = home / ".subagents_configs/journal.json"
+        journal = load_journal(home, descriptor)
+        nonce = journal.transaction_id.rsplit("-", 1)[0]
+        marker = next(
+            path
+            for path in (home / ".subagents_configs/backups").glob(
+                f"*commitment-{nonce}*"
+            )
+            if transaction.capture_evidence(path, "cleanup marker")
+            == journal.cleanup_commitment_evidence[1]
+        )
+        content = marker.read_bytes()
+        marker.unlink()
+        marker.write_bytes(content)
+        marker.chmod(0o600)
+        replacement = transaction.capture_evidence(marker, "replacement marker")
+        altered = replace(
+            journal,
+            cleanup_commitment_evidence=(
+                journal.cleanup_commitment_evidence[0],
+                replacement,
+                journal.cleanup_commitment_evidence[2],
+            ),
+        )
+        altered = replace(
+            altered,
+            cleanup_participant_digests=(
+                transaction.cleanup_participant_digests((altered,))[0],
+            ),
+        )
+        transaction.filesystem.atomic_write(
+            journal_path, encode_journal(altered), 0o600
+        )
+
+        with self.assertRaises(transaction.IncompleteRollbackError):
+            transaction.recover_incomplete_journal(home, descriptor)
+        self.assertTrue(journal_path.exists())
+
+    def test_transaction_recovery_rejects_rewritten_original_anchor_identity(self):
+        from dataclasses import replace
+
+        from subagents_configs import transaction
+
+        plan = self._plan(Target.CODEX)
+        self._apply_leaving_journals(plan)
+        home = self._home()
+        descriptor = descriptor_for(Target.CODEX)
+        journal_path = home / ".subagents_configs/journal.json"
+        journal = load_journal(home, descriptor)
+        nonce = journal.transaction_id.rsplit("-", 1)[0]
+        marker = home / ".subagents_configs/backups" / f"commitment-{nonce}"
+        content = marker.read_bytes()
+        marker.unlink()
+        marker.write_bytes(content)
+        marker.chmod(0o600)
+        replacement = transaction.capture_evidence(marker, "replacement anchor")
+        altered = replace(
+            journal,
+            cleanup_commitment_evidence=(
+                replacement,
+                *journal.cleanup_commitment_evidence[1:],
+            ),
+        )
+        transaction.filesystem.atomic_write(
+            journal_path, encode_journal(altered), 0o600
+        )
+
+        with self.assertRaises(transaction.IncompleteRollbackError):
+            transaction.recover_incomplete_journal(home, descriptor)
+        self.assertTrue(journal_path.exists())
+
+    def test_multi_target_mixed_cleanup_digests_fail_before_any_journal_unlink(self):
+        from dataclasses import replace
+
+        from subagents_configs import transaction
+
+        plan = self._plan(Target.CODEX, Target.OPENCODE)
+        with patch.object(transaction, "_sync_and_remove_journal"):
+            transaction.apply_transaction(plan)
+        homes = {
+            Target.CODEX: self._home(Target.CODEX),
+            Target.OPENCODE: self._home(Target.OPENCODE),
+        }
+        journal_paths = {
+            target: home / ".subagents_configs/journal.json"
+            for target, home in homes.items()
+        }
+        opencode = load_journal(homes[Target.OPENCODE], descriptor_for(Target.OPENCODE))
+        malformed = replace(
+            opencode,
+            cleanup_participant_digests=(
+                "0" * 64,
+                opencode.cleanup_participant_digests[1],
+            ),
+        )
+        transaction.filesystem.atomic_write(
+            journal_paths[Target.OPENCODE], encode_journal(malformed), 0o600
+        )
+        with self.assertRaises((transaction.IncompleteRollbackError, ValueError)):
+            transaction.recover_participants(homes)
+        self.assertTrue(all(path.exists() for path in journal_paths.values()))
+
     def test_environment_cannot_activate_a_failure_injector(self):
         from subagents_configs.transaction import apply_transaction
 
@@ -1516,7 +2884,8 @@ class TransactionInstallTests(unittest.TestCase):
             operation.content or b"",
             operation.expected_after_mode or 0o600,
         )
-        journal = transaction._journal_for_plan(plan, "recovery-test")
+        initial = transaction._journal_for_plan(plan, "recovery-test")
+        journal = initial
         journal = transaction.replace(
             journal,
             operations=tuple(
@@ -1526,11 +2895,17 @@ class TransactionInstallTests(unittest.TestCase):
                 for i, item in enumerate(journal.operations)
             ),
         )
-        transaction.filesystem.atomic_write(
-            self._home() / ".subagents_configs/journal.json",
-            transaction.encode_journal(journal),
-        )
         journal_path = self._home() / ".subagents_configs/journal.json"
+        initial_identity = transaction.filesystem.atomic_write(
+            journal_path,
+            transaction.encode_journal(initial),
+        )
+        transaction._write_progress_journal(
+            self._home(),
+            initial,
+            journal,
+            expected_before=initial_identity,
+        )
         transaction.recover_incomplete_journal(
             self._home(), descriptor_for(Target.CODEX)
         )
@@ -1557,10 +2932,18 @@ class TransactionInstallTests(unittest.TestCase):
         self._apply_leaving_journals(plan)
         home = self._home()
         descriptor = descriptor_for(Target.CODEX)
+        state = home / ".subagents_configs"
+        real_sync = transaction.filesystem.sync_directory
+
+        def fail_state_sync(path):
+            if path == state:
+                raise OSError("state fsync failed")
+            return real_sync(path)
+
         with patch.object(
             transaction.filesystem,
             "sync_directory",
-            side_effect=[OSError("state fsync failed"), None],
+            side_effect=fail_state_sync,
         ):
             with self.assertRaises(transaction.TransactionError):
                 transaction.recover_incomplete_journal(home, descriptor)
@@ -1575,16 +2958,31 @@ class TransactionInstallTests(unittest.TestCase):
         self._apply_leaving_journals(plan)
         home = self._home()
         descriptor = descriptor_for(Target.CODEX)
+        journal_path = home / ".subagents_configs/journal.json"
+        state = home / ".subagents_configs"
+        real_cas = transaction.filesystem.compare_and_swap
+        real_sync = transaction.filesystem.sync_directory
+
+        def fail_state_sync(path):
+            if path == state:
+                raise OSError("state fsync failed")
+            return real_sync(path)
+
+        def fail_recreation(path, before, content, mode, action):
+            if path == journal_path and action == "create":
+                raise OSError("journal recreate failed")
+            return real_cas(path, before, content, mode, action)
+
         with (
             patch.object(
                 transaction.filesystem,
                 "sync_directory",
-                side_effect=OSError("state fsync failed"),
+                side_effect=fail_state_sync,
             ),
             patch.object(
                 transaction.filesystem,
-                "atomic_write",
-                side_effect=OSError("journal recreate failed"),
+                "compare_and_swap",
+                side_effect=fail_recreation,
             ),
         ):
             with self.assertRaises(transaction.TransactionError) as error:

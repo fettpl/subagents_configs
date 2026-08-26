@@ -41,7 +41,9 @@ as higher-priority instructions.
 The installer performs complete preflight for every selected target before its
 first write, rejects unsafe symlinks and traversal, uses private modes,
 journaled atomic operations, and preserves unresolved state instead of making
-guesses. Manifests and journals contain identifiers, paths, hashes, ownership,
+guesses. Alternating durable progress records bind operation statuses and full
+before/after file identities before their journal transitions. Manifests and
+journals contain identifiers, paths, hashes, ownership,
 and status—not prior private file contents. Backups are hash-checked and are
 not a permission to read or publish the original content.
 
@@ -69,7 +71,24 @@ secret-content detection; do not commit secrets under unrecognized names or
 place them in validation inputs. These path-name comparisons are
 case-insensitive. Descriptor-relative pinning and before/after evidence detect
 swaps around mutations, and persistent locks serialize cooperative installer
-clients. However, a non-cooperative actor able to race the parent can swap the
+clients. Transaction cleanup uses durable local journals, full file-identity
+evidence, a retained base record, and a separately staged cleanup record. These
+controls make interrupted cleanup resumable and reject malformed state,
+hardlinks, inode replacements, and internally inconsistent journal/anchor
+rewrites. They are local crash- and consistency-evidence, not an authenticated
+append-only store: a same-UID actor that can coordinate rewriting a journal,
+the affected target or backup state, and the mutable progress or cleanup
+anchors needed for an accepted crash-boundary state can construct a different
+self-consistent history without rewriting every anchor.
+Preventing that stronger attack requires an external key, TPM, privileged
+service, or other trust boundary that this project does not possess. Rewrites
+that do not form a complete accepted crash-boundary state fail closed.
+Cross-home cleanup is resumable, not atomic. If a same-UID actor deletes every
+participant journal, restart has no trusted fact that distinguishes completed
+cleanup from coordinated deletion; unproved orphan anchors are preserved
+rather than interpreted or removed.
+
+However, a non-cooperative actor able to race the parent can swap the
 final pathname after the final evidence proof and immediately before the
 trusted `unlink`/`rmdir` primitive. Python/POSIX offers no portable
 inode-conditional `unlink`/`rmdir`; in that residual window, the primitive may

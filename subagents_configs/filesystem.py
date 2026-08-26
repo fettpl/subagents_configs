@@ -176,6 +176,72 @@ def read_descriptor_with_evidence(
     return evidence, content
 
 
+def rewrite_regular_in_place(
+    path: Path,
+    expected: IdentityEvidence,
+    content: bytes,
+    label: str,
+) -> IdentityEvidence:
+    """Durably rewrite a fixed-size, precommitted regular-file anchor.
+
+    The directory entry and all structural identity fields are pinned before and
+    after the write. Callers retain a separate valid base anchor while the
+    cleanup slot is rewritten, so a crash-short write can be repaired without
+    trusting the damaged content.
+    """
+
+    if not isinstance(expected, IdentityEvidence):
+        raise TypeError("in-place rewrite requires identity evidence")
+    if type(content) is not bytes or len(content) != expected.size:
+        raise ValueError("in-place rewrite must preserve the committed size")
+    target = normalized_absolute(path)
+    expected_structure = (
+        expected.device,
+        expected.inode,
+        expected.size,
+        expected.nlink,
+        expected.mode,
+    )
+    if expected.nlink != 1 or expected.mode != 0o600:
+        raise ValueError(f"{label} structural identity is unsafe")
+    with _pinned_directory(target.parent, f"{label} parent") as parent_fd:
+        _after_parent_pin("rewrite-in-place", target.parent)
+        _verify_locked_parent(target.parent)
+        result = _stat_at(parent_fd, target.name, label)
+        if result is None or not stat.S_ISREG(result.st_mode):
+            raise ValueError(f"{label} must be a regular file")
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(target.name, flags, dir_fd=parent_fd)
+        try:
+            opened = os.fstat(descriptor)
+            opened_structure = (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_nlink,
+                stat.S_IMODE(opened.st_mode),
+            )
+            if opened_structure != expected_structure:
+                raise ValueError(f"{label} structural identity changed")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            _write_all(descriptor, content)
+            os.fsync(descriptor)
+            evidence = _evidence_from_descriptor(
+                descriptor, label, known_content=content
+            )
+            if (
+                evidence.device,
+                evidence.inode,
+                evidence.size,
+                evidence.nlink,
+                evidence.mode,
+            ) != expected_structure:
+                raise ValueError(f"{label} structural identity changed")
+            return evidence
+        finally:
+            os.close(descriptor)
+
+
 @dataclass(frozen=True)
 class StateInventory:
     """Validated state objects captured together for one planning command."""
