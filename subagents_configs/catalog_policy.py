@@ -60,7 +60,12 @@ def _safe_model(value: object, field: str = "model") -> str | None:
         return None
     if type(value) is not str or not value or len(value) > 200:
         raise ValueError(f"{field} must be a bounded string or null")
-    if not _MODEL.fullmatch(value) or value.startswith(("/", "~")) or ".." in value:
+    if (
+        not _MODEL.fullmatch(value)
+        or value.startswith(("/", "~"))
+        or ".." in value
+        or ("/" in value and not value.startswith("openai/"))
+    ):
         raise ValueError(f"{field} is unsafe")
     return value
 
@@ -227,6 +232,11 @@ class NormalizedCatalog:
             destination_keys
         ) or destination_keys != sorted(destination_keys):
             raise ValueError("destinations must be unique and canonical")
+        destination_roles = [
+            (item.target.value, item.role) for item in self.destinations
+        ]
+        if len(set(destination_roles)) != len(destination_roles):
+            raise ValueError("each role must have at most one destination")
         if not isinstance(self.source_hashes, Mapping):
             raise TypeError("source_hashes must be a mapping")
         hashes: dict[str, str] = {}
@@ -265,16 +275,24 @@ class PolicyChange:
                 )
             else:
                 object.__setattr__(self, "role", _safe_identifier(self.role, "role"))
-        if self.before is not None:
-            object.__setattr__(self, "before", _safe_scalar(self.before, "before"))
-        if self.after is not None:
-            object.__setattr__(self, "after", _safe_scalar(self.after, "after"))
+        for field, value in (("before", self.before), ("after", self.after)):
+            if value is None:
+                continue
+            if self.kind == "source_hash":
+                if type(value) is not str or not _HASH.fullmatch(value):
+                    raise ValueError(f"{field} must be a lowercase SHA-256 value")
+            elif self.kind == "destination":
+                value = _safe_path(value, field)
+            elif self.kind == "model":
+                value = _safe_model(value, field)
+            elif self.kind in {"role", "tool", "permission"}:
+                value = _safe_identifier(value, field)
+            elif self.kind == "authority":
+                if type(value) is not str or value not in _AUTHORITY_VALUES:
+                    raise ValueError(f"{field} must be a known authority capability")
+            object.__setattr__(self, field, value)
         if type(self.authority_broadening) is not bool:
             raise TypeError("authority_broadening must be bool")
-        if self.kind == "authority":
-            for value in (self.before, self.after):
-                if value is not None and value not in _AUTHORITY_VALUES:
-                    raise ValueError("unknown authority in policy change")
 
 
 @dataclass(frozen=True)
@@ -332,11 +350,68 @@ def _object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _read_json(path: Path) -> dict[str, object]:
+_MAX_CATALOG_BYTES = 8 * 1024 * 1024
+
+
+def _descriptor_flags(*, directory: bool = False) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise ValueError("platform lacks no-follow file opening")
+    flags = os.O_RDONLY | nofollow
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    if directory:
+        directory_flag = getattr(os, "O_DIRECTORY", None)
+        if directory_flag is None:
+            raise ValueError("platform lacks no-follow directory opening")
+        flags |= directory_flag
+    return flags
+
+
+def _open_descriptor(
+    path: Path, *, dir_fd: int | None = None
+) -> tuple[int, os.stat_result]:
+    flags = _descriptor_flags()
     try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise ValueError("unable to read catalog") from exc
+        if dir_fd is None:
+            fd = os.open(os.fspath(path), flags)
+        else:
+            fd = os.open(os.fspath(path), flags, dir_fd=dir_fd)
+        info = os.fstat(fd)
+    except (OSError, TypeError) as exc:
+        try:
+            os.close(fd)
+        except UnboundLocalError:
+            pass
+        raise ValueError("unable to open catalog without following symlinks") from exc
+    return fd, info
+
+
+def _read_json_fd(fd: int) -> dict[str, object]:
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("catalog must be a regular file")
+        if info.st_size > _MAX_CATALOG_BYTES:
+            raise ValueError("catalog is too large")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            try:
+                chunk = os.read(fd, min(1024 * 1024, _MAX_CATALOG_BYTES + 1 - total))
+            except OSError as exc:
+                raise ValueError("unable to read catalog") from exc
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > _MAX_CATALOG_BYTES:
+                raise ValueError("catalog is too large")
+        raw = b"".join(chunks)
+    finally:
+        os.close(fd)
     try:
         parsed = json.loads(raw.decode("utf-8"), object_pairs_hook=_object_pairs)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
@@ -346,18 +421,12 @@ def _read_json(path: Path) -> dict[str, object]:
     return parsed
 
 
-def _regular_path(path: Path, *, directory: bool = False) -> None:
-    try:
-        info = path.lstat()
-    except OSError as exc:
-        raise ValueError("catalog path does not exist") from exc
-    if stat.S_ISLNK(info.st_mode):
-        raise ValueError("symlink catalog paths are not accepted")
-    if directory:
-        if not stat.S_ISDIR(info.st_mode):
-            raise ValueError("revision must be a directory")
-    elif not stat.S_ISREG(info.st_mode):
+def _read_json(path: Path) -> dict[str, object]:
+    fd, info = _open_descriptor(path)
+    if not stat.S_ISREG(info.st_mode):
+        os.close(fd)
         raise ValueError("catalog must be a regular file")
+    return _read_json_fd(fd)
 
 
 def _parse_catalog(raw: dict[str, object]) -> NormalizedCatalog:
@@ -662,7 +731,6 @@ def _parse_generated_catalog(raw: dict[str, object]) -> NormalizedCatalog:
 def load_catalog(path: str | os.PathLike[str]) -> NormalizedCatalog:
     """Load exactly one strict normalized catalog without following symlinks."""
     catalog_path = Path(path)
-    _regular_path(catalog_path)
     raw = _read_json(catalog_path)
     if "sources" in raw or "catalog_sha256" in raw:
         return _parse_generated_catalog(raw)
@@ -672,52 +740,76 @@ def load_catalog(path: str | os.PathLike[str]) -> NormalizedCatalog:
 def load_revision(path: str | os.PathLike[str]) -> tuple[NormalizedCatalog, ...]:
     """Load a file or an unambiguous single/all-target revision directory."""
     revision_path = Path(path)
-    try:
-        info = revision_path.lstat()
-    except OSError as exc:
-        raise ValueError("revision path does not exist") from exc
-    if stat.S_ISLNK(info.st_mode):
-        raise ValueError("symlink revision paths are not accepted")
+    revision_fd, info = _open_descriptor(revision_path)
     if stat.S_ISREG(info.st_mode):
-        return (load_catalog(revision_path),)
+        raw = _read_json_fd(revision_fd)
+        if "sources" in raw or "catalog_sha256" in raw:
+            return (_parse_generated_catalog(raw),)
+        return (_parse_catalog(raw),)
     if not stat.S_ISDIR(info.st_mode):
+        os.close(revision_fd)
         raise ValueError("revision must be a regular file or directory")
-    entries = list(revision_path.iterdir())
-    if any(entry.is_symlink() for entry in entries):
-        raise ValueError("revision contains a symlink")
-    files = [entry for entry in entries if entry.is_file()]
-    if len(files) != len(entries):
-        raise ValueError("revision contains a directory or special file")
-    names = {entry.name for entry in files}
-    if names == {"catalog.json"}:
-        return (load_catalog(revision_path / "catalog.json"),)
-    expected = {f"{target.value}.json" for target in Target}
-    if names != expected:
-        raise ValueError("revision directory is ambiguous")
-    catalog_paths = tuple(revision_path / f"{target.value}.json" for target in Target)
-    raw_catalogs = tuple(_read_json(path) for path in catalog_paths)
-    catalogs = tuple(
-        _parse_generated_catalog(raw)
-        if "catalog_sha256" in raw
-        else _parse_catalog(raw)
-        for raw in raw_catalogs
-    )
-    revisions = {catalog.revision for catalog in catalogs}
-    if len(revisions) != 1:
-        if not all("catalog_sha256" in raw for raw in raw_catalogs):
-            raise ValueError("revision catalogs disagree on revision")
-        revision = _safe_identifier(revision_path.name, "revision")
-        catalogs = tuple(
-            NormalizedCatalog(
-                catalog.target,
-                revision,
-                catalog.roles,
-                catalog.destinations,
-                catalog.source_hashes,
+    try:
+        try:
+            names = os.listdir(revision_fd)
+        except (OSError, TypeError) as exc:
+            raise ValueError("unable to enumerate revision directory safely") from exc
+        if not all(type(name) is str for name in names):
+            raise ValueError("revision directory has invalid entry names")
+        names = sorted(names)
+        if names == ["catalog.json"]:
+            child_fd, child_info = _open_descriptor(
+                Path("catalog.json"), dir_fd=revision_fd
             )
-            for catalog in catalogs
+            if not stat.S_ISREG(child_info.st_mode):
+                os.close(child_fd)
+                raise ValueError("catalog must be a regular file")
+            raw = _read_json_fd(child_fd)
+            if "sources" in raw or "catalog_sha256" in raw:
+                return (_parse_generated_catalog(raw),)
+            return (_parse_catalog(raw),)
+        expected = sorted(f"{target.value}.json" for target in Target)
+        if names != expected:
+            raise ValueError("revision directory is ambiguous")
+        raw_catalogs: list[dict[str, object]] = []
+        for name in names:
+            child_fd, child_info = _open_descriptor(Path(name), dir_fd=revision_fd)
+            if not stat.S_ISREG(child_info.st_mode):
+                os.close(child_fd)
+                raise ValueError("revision contains a non-regular catalog")
+            raw_catalogs.append(_read_json_fd(child_fd))
+        catalogs = tuple(
+            _parse_generated_catalog(raw)
+            if "catalog_sha256" in raw
+            else _parse_catalog(raw)
+            for raw in raw_catalogs
         )
-    return catalogs
+        for expected_name, expected_target, catalog in zip(
+            names,
+            sorted(Target, key=lambda item: f"{item.value}.json"),
+            catalogs,
+            strict=True,
+        ):
+            if catalog.target is not expected_target:
+                raise ValueError(f"{expected_name} target does not match its filename")
+        revisions = {catalog.revision for catalog in catalogs}
+        if len(revisions) != 1:
+            if not all("catalog_sha256" in raw for raw in raw_catalogs):
+                raise ValueError("revision catalogs disagree on revision")
+            revision = _safe_identifier(revision_path.name, "revision")
+            catalogs = tuple(
+                NormalizedCatalog(
+                    catalog.target,
+                    revision,
+                    catalog.roles,
+                    catalog.destinations,
+                    catalog.source_hashes,
+                )
+                for catalog in catalogs
+            )
+        return catalogs
+    finally:
+        os.close(revision_fd)
 
 
 def validate_generated_catalogs(
@@ -972,10 +1064,10 @@ def compare_catalogs(
         target, role = key
         if old is None:
             changes.append(PolicyChange("role", target, role, None, role, False))
-            continue
+            old = RolePolicy(target, role)
         if new is None:
             changes.append(PolicyChange("role", target, role, role, None, False))
-            continue
+            new = RolePolicy(target, role)
         if old.model != new.model:
             changes.append(
                 PolicyChange("model", target, role, old.model, new.model, False)

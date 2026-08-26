@@ -450,6 +450,141 @@ class PolicyDiffTests(unittest.TestCase):
             },
         )
 
+    def test_added_and_removed_roles_emit_nested_policy_changes(self):
+        populated = RolePolicy(
+            Target.CODEX,
+            "added",
+            model="model-a",
+            tools=frozenset({"shell"}),
+            permissions=frozenset({"write"}),
+            authorities=frozenset(
+                {
+                    AuthorityCapability.FILESYSTEM_WRITE,
+                    AuthorityCapability.SHELL_EXECUTION,
+                }
+            ),
+        )
+        empty = RolePolicy(Target.CODEX, "added")
+        added = compare_catalogs(
+            catalog(roles=()),
+            catalog(roles=(populated,), revision="after"),
+        )
+        removed = compare_catalogs(
+            catalog(roles=(populated,)),
+            catalog(roles=(empty,), revision="after"),
+        )
+        self.assertEqual(
+            {item.kind for item in added.changes},
+            {"role", "model", "tool", "permission", "authority"},
+        )
+        self.assertEqual(
+            {item.after for item in added.changes if item.kind == "authority"},
+            {"filesystem-write", "shell-execution"},
+        )
+        self.assertTrue(
+            all(
+                item.authority_broadening
+                for item in added.changes
+                if item.kind == "authority"
+            )
+        )
+        self.assertEqual(
+            {item.kind for item in removed.changes},
+            {"model", "tool", "permission", "authority"},
+        )
+        self.assertTrue(
+            all(
+                not item.authority_broadening
+                for item in removed.changes
+                if item.kind == "authority"
+            )
+        )
+
+    def test_policy_change_values_are_kind_specific_and_strict(self):
+        invalid = (
+            ("model", "agents/model", "safe"),
+            ("tool", "agents/tool", None),
+            ("permission", "permission with spaces", None),
+            ("destination", "agents/../secret", None),
+            ("source_hash", "not-a-hash", None),
+            ("authority", "unknown-authority", None),
+        )
+        for kind, before, after in invalid:
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                PolicyChange(kind, Target.CODEX, "role", before, after, False)
+        with self.assertRaises(ValueError):
+            PolicyChange("effort", Target.CODEX, "role", "low", "high", False)
+
+    def test_normalized_catalog_rejects_multiple_destinations_for_one_role(self):
+        with self.assertRaises(ValueError):
+            NormalizedCatalog(
+                Target.CODEX,
+                "safe",
+                (RolePolicy(Target.CODEX, "role"),),
+                (
+                    DestinationPolicy(Target.CODEX, "role", "agents/a"),
+                    DestinationPolicy(Target.CODEX, "role", "agents/b"),
+                ),
+                {},
+            )
+
+    def test_revision_filename_target_binding_rejects_swapped_catalogs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for filename, target in (
+                ("codex.json", "opencode"),
+                ("opencode.json", "codex"),
+                ("claude-code.json", "claude-code"),
+            ):
+                (root / filename).write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "revision": "safe",
+                            "target": target,
+                            "roles": [],
+                            "destinations": [],
+                            "source_hashes": {},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            with self.assertRaises(ValueError):
+                load_revision(root)
+
+    def test_descriptor_loaders_reject_symlink_races_without_reading_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside.json"
+            outside.write_text("private-catalog-content", encoding="utf-8")
+            link = root / "catalog.json"
+            link.symlink_to(outside)
+            with self.assertRaises(ValueError):
+                load_catalog(link)
+            revision = root / "revision"
+            revision.mkdir()
+            for target in ("codex", "opencode", "claude-code"):
+                payload = {
+                    "schema_version": 1,
+                    "revision": "safe",
+                    "target": target,
+                    "roles": [],
+                    "destinations": [],
+                    "source_hashes": {},
+                }
+                (revision / f"{target}.json").write_text(
+                    json.dumps(payload), encoding="utf-8"
+                )
+            swapped = root / "swapped.json"
+            swapped.write_text("private-catalog-content", encoding="utf-8")
+            (revision / "codex.json").unlink()
+            (revision / "codex.json").symlink_to(swapped)
+            with self.assertRaises(ValueError):
+                load_revision(revision)
+            self.assertEqual(
+                outside.read_text(encoding="utf-8"), "private-catalog-content"
+            )
+
     def test_generated_catalog_is_normalized_without_reading_sources(self):
         generated = Path(__file__).resolve().parents[1] / "catalogs" / "codex.json"
         loaded = load_catalog(generated)
@@ -462,6 +597,15 @@ class PolicyDiffTests(unittest.TestCase):
         self.assertEqual(
             len(loaded.source_hashes), len(json.loads(generated.read_text())["sources"])
         )
+
+    def test_all_checked_in_generated_catalogs_normalize(self):
+        root = Path(__file__).resolve().parents[1] / "catalogs"
+        for target in Target:
+            with self.subTest(target=target):
+                loaded = load_catalog(root / f"{target.value}.json")
+                self.assertIs(loaded.target, target)
+                self.assertTrue(loaded.roles)
+                self.assertEqual(len(loaded.roles), len(loaded.destinations))
 
     def test_policy_diff_rejects_duplicate_or_abbreviated_options_before_reads(self):
         missing = Path("/this/path/must/not/be/read")
