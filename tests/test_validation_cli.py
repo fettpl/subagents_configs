@@ -59,6 +59,23 @@ class ValidationCliTests(unittest.TestCase):
         self.assertNotIn("SECRET", output.getvalue())
         self.assertNotIn("TimeoutExpired", output.getvalue())
 
+    def test_cleanup_failure_is_sanitized_and_nonzero(self):
+        from scripts.validation_isolation import cli
+        from scripts.validation_isolation.runner import (
+            CleanupResult,
+            ValidationCleanupError,
+        )
+
+        output = StringIO()
+        failure = ValidationCleanupError(
+            CleanupResult("cleanup_failed", primary_present=False)
+        )
+        with patch.object(cli, "run_isolated", side_effect=failure):
+            with redirect_stderr(output):
+                self.assertEqual(cli.main(["--", "false"]), 1)
+        self.assertEqual(output.getvalue(), "validation blocked: validation failed\n")
+        self.assertNotIn("cleanup_failed", output.getvalue())
+
     def test_entrypoint_checks_python_version_before_newer_import(self):
         import ast
         import runpy

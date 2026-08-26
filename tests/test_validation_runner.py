@@ -72,6 +72,7 @@ class RunnerTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "ok\n")
+            self.assertEqual(result.cleanup.code, "cleaned")
             self.assertEqual(len(calls), 1)
             self.assertIn("print('a b')", calls[0][0])
             self.assertEqual(calls[0][1].name, "snapshot")
@@ -169,7 +170,7 @@ class RunnerTests(unittest.TestCase):
                     )(),
                 ) as select,
             ):
-                runner.run_isolated(
+                result = runner.run_isolated(
                     ("false",),
                     repository,
                     sys.platform,
@@ -177,6 +178,9 @@ class RunnerTests(unittest.TestCase):
                         argv, 0, "", ""
                     ),
                 )
+            self.assertEqual(result.returncode, 0)
+            self.assertIsNotNone(result.cleanup)
+            self.assertEqual(result.cleanup.code, "cleaned")
             self.assertEqual(select.call_args.args[3], fixed)
             self.assertNotEqual(select.call_args.args[3], hosted)
 
@@ -382,8 +386,8 @@ class RunnerTests(unittest.TestCase):
                 patch("scripts.validation_isolation.runner.probe_backend"),
                 patch(
                     "scripts.validation_isolation.runner.shutil.rmtree",
-                    side_effect=lambda path, ignore_errors: cleanup.append(
-                        (path, ignore_errors)
+                    side_effect=lambda path, ignore_errors=False, **kwargs: (
+                        cleanup.append((path, ignore_errors, kwargs))
                     ),
                 ),
             ):

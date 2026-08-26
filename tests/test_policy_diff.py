@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from subagents_configs.catalog_policy import (
     AuthorityCapability,
@@ -605,6 +606,117 @@ class PolicyDiffTests(unittest.TestCase):
                 load_revision(revision)
             self.assertEqual(
                 outside.read_text(encoding="utf-8"), "private-catalog-content"
+            )
+
+    def test_load_catalog_rejects_symlinked_ancestor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "catalog.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "revision": "outside",
+                        "target": "codex",
+                        "roles": [],
+                        "destinations": [],
+                        "source_hashes": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            linked = root / "linked"
+            linked.symlink_to(outside, target_is_directory=True)
+            before = sorted(item.name for item in root.iterdir())
+
+            with self.assertRaises(ValueError):
+                load_catalog(linked / "catalog.json")
+
+            self.assertEqual(before, sorted(item.name for item in root.iterdir()))
+            self.assertEqual(
+                json.loads((outside / "catalog.json").read_text(encoding="utf-8"))[
+                    "revision"
+                ],
+                "outside",
+            )
+
+    def test_load_revision_rejects_symlinked_ancestor_for_file_and_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside"
+            outside.mkdir()
+            payload = {
+                "schema_version": 1,
+                "revision": "outside",
+                "target": "codex",
+                "roles": [],
+                "destinations": [],
+                "source_hashes": {},
+            }
+            (outside / "revision.json").write_text(
+                json.dumps(payload), encoding="utf-8"
+            )
+            revision_directory = outside / "revision"
+            revision_directory.mkdir()
+            (revision_directory / "catalog.json").write_text(
+                json.dumps(payload), encoding="utf-8"
+            )
+
+            linked = root / "linked"
+            linked.symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                load_revision(linked / "revision.json")
+            with self.assertRaises(ValueError):
+                load_revision(linked / "revision")
+
+            self.assertEqual(
+                (outside / "revision.json").read_text(encoding="utf-8"),
+                json.dumps(payload),
+            )
+
+    def test_ancestor_swap_is_rejected_before_outside_catalog_is_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inside = root / "inside"
+            inside.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+            payload = {
+                "schema_version": 1,
+                "revision": "outside",
+                "target": "codex",
+                "roles": [],
+                "destinations": [],
+                "source_hashes": {},
+            }
+            inside_payload = {**payload, "revision": "inside"}
+            (inside / "catalog.json").write_text(
+                json.dumps(inside_payload), encoding="utf-8"
+            )
+            (outside / "catalog.json").write_text(json.dumps(payload), encoding="utf-8")
+            original_open = os.open
+            swapped = False
+
+            def swap_before_ancestor_open(path, flags, *args, **kwargs):
+                nonlocal swapped
+                if not swapped and os.fspath(path) == "inside":
+                    inside.rename(root / "inside-original")
+                    (root / "inside").symlink_to(outside, target_is_directory=True)
+                    swapped = True
+                return original_open(path, flags, *args, **kwargs)
+
+            with mock.patch(
+                "subagents_configs.catalog_policy.os.open",
+                side_effect=swap_before_ancestor_open,
+            ):
+                with self.assertRaises(ValueError):
+                    load_catalog(inside / "catalog.json")
+
+            self.assertTrue(swapped)
+            self.assertEqual(
+                (outside / "catalog.json").read_text(encoding="utf-8"),
+                json.dumps(payload),
             )
 
     def test_generated_catalog_is_normalized_without_reading_sources(self):

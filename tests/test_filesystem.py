@@ -7,10 +7,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from subagents_configs import filesystem
+from subagents_configs.errors import TransactionError
 from subagents_configs.filesystem import (
     atomic_write,
+    capture_evidence,
+    compare_and_swap,
     ensure_private_directory,
     exclusive_backup,
+    exclusive_write,
     sha256_bytes,
     sha256_file,
     unlink_regular,
@@ -20,6 +25,459 @@ TEMP_DIR = "/private/tmp" if Path("/private/tmp").is_dir() else None
 
 
 class FilesystemTests(unittest.TestCase):
+    def test_exclusive_write_parent_sync_failure_cleans_created_artifact(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            path = Path(temporary) / "journal"
+            with patch.object(
+                filesystem,
+                "_sync_parent_directory_fd",
+                side_effect=[
+                    OSError("parent sync failed"),
+                    OSError("cleanup sync failed"),
+                ],
+            ) as sync:
+                with self.assertRaisesRegex(OSError, "parent sync failed"):
+                    exclusive_write(path, b"journal bytes")
+            self.assertFalse(path.exists())
+            self.assertEqual(sync.call_count, 2)
+
+    def test_exclusive_write_cleanup_preserves_replacement(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            path = Path(temporary) / "journal"
+            real_sync = filesystem._sync_parent_directory_fd
+            calls = 0
+
+            def replace_then_fail(parent_fd):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    path.unlink()
+                    path.write_bytes(b"attacker replacement")
+                    path.chmod(0o600)
+                    raise OSError("parent sync failed")
+                return real_sync(parent_fd)
+
+            with patch.object(
+                filesystem,
+                "_sync_parent_directory_fd",
+                side_effect=replace_then_fail,
+            ):
+                with self.assertRaisesRegex(OSError, "parent sync failed"):
+                    exclusive_write(path, b"journal bytes")
+            self.assertEqual(path.read_bytes(), b"attacker replacement")
+
+    def test_quarantine_evidence_failure_removes_only_created_link(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+            real_evidence = filesystem._evidence_from_descriptor
+
+            def fail_quarantine(descriptor, label, **kwargs):
+                if label == "CAS quarantine link":
+                    raise OSError("injected quarantine evidence failure")
+                return real_evidence(descriptor, label, **kwargs)
+
+            with patch.object(filesystem, "_evidence_from_descriptor", fail_quarantine):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, before, b"installer bytes", 0o600, "replace")
+            self.assertEqual(path.read_bytes(), b"original")
+            self.assertEqual(list(root.glob(".managed.cas-*")), [])
+
+    def test_quarantine_open_failure_removes_only_created_link(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+            real_open = filesystem.os.open
+
+            def fail_quarantine_open(name, flags, *args, **kwargs):
+                if isinstance(name, str) and Path(name).name.startswith(
+                    ".managed.cas-"
+                ):
+                    raise OSError("injected quarantine open failure")
+                return real_open(name, flags, *args, **kwargs)
+
+            with patch.object(filesystem.os, "open", side_effect=fail_quarantine_open):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, before, b"installer bytes", 0o600, "replace")
+            self.assertEqual(path.read_bytes(), b"original")
+            self.assertEqual(list(root.glob(".managed.cas-*")), [])
+
+    def test_quarantine_open_failure_preserves_replacement_after_created_stat(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+            real_open = filesystem.os.open
+            swapped = False
+
+            def fail_quarantine_open(name, flags, *args, **kwargs):
+                nonlocal swapped
+                if isinstance(name, str) and Path(name).name.startswith(
+                    ".managed.cas-"
+                ):
+                    candidate = root / Path(name).name
+                    if not swapped:
+                        candidate.unlink()
+                        candidate.write_bytes(b"unowned replacement")
+                        candidate.chmod(0o600)
+                        swapped = True
+                    raise OSError("injected quarantine open failure")
+                return real_open(name, flags, *args, **kwargs)
+
+            with patch.object(filesystem.os, "open", side_effect=fail_quarantine_open):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, before, b"installer bytes", 0o600, "replace")
+            self.assertEqual(path.read_bytes(), b"original")
+            self.assertEqual(
+                next(iter(root.glob(".managed.cas-*"))).read_bytes(),
+                b"unowned replacement",
+            )
+
+    def test_quarantine_unlink_boundary_preserves_replacement(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+            real_evidence = filesystem._evidence_from_descriptor
+
+            def fail_quarantine(descriptor, label, **kwargs):
+                if label == "CAS quarantine link":
+                    raise OSError("injected quarantine evidence failure")
+                return real_evidence(descriptor, label, **kwargs)
+
+            def swap_before_unlink(_parent_fd, candidate):
+                quarantine = root / candidate
+                quarantine.unlink()
+                quarantine.write_bytes(b"unowned replacement")
+                quarantine.chmod(0o600)
+
+            with (
+                patch.object(filesystem, "_evidence_from_descriptor", fail_quarantine),
+                patch.object(
+                    filesystem,
+                    "_before_created_quarantine_unlink",
+                    swap_before_unlink,
+                    create=True,
+                ),
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, before, b"installer bytes", 0o600, "replace")
+            self.assertEqual(path.read_bytes(), b"original")
+            self.assertEqual(
+                next(iter(root.glob(".managed.cas-*"))).read_bytes(),
+                b"unowned replacement",
+            )
+
+    def test_replacement_target_appearance_preserves_original_and_attacker(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+            real_link = filesystem._link_no_replace
+
+            def target_appears(parent_fd, source, target):
+                if source.startswith(".managed.tmp-"):
+                    path.write_bytes(b"attacker replacement")
+                    path.chmod(0o600)
+                return real_link(parent_fd, source, target)
+
+            with patch.object(
+                filesystem, "_link_no_replace", side_effect=target_appears
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, before, b"installer bytes", 0o600, "replace")
+            self.assertEqual(path.read_bytes(), b"attacker replacement")
+            self.assertEqual(list(root.glob(".managed.cas-*")), [])
+
+    def test_quarantine_cleanup_has_no_target_appearance_gap(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+            real_remove = filesystem._remove_owned_quarantine
+
+            def appear_after_cleanup(parent_fd, quarantine, expected):
+                result = real_remove(parent_fd, quarantine, expected)
+                if not path.exists():
+                    path.write_bytes(b"attacker replacement")
+                    path.chmod(0o600)
+                return result
+
+            with patch.object(
+                filesystem,
+                "_remove_owned_quarantine",
+                side_effect=appear_after_cleanup,
+            ):
+                result = compare_and_swap(
+                    path, before, b"installer bytes", 0o600, "replace"
+                )
+            self.assertEqual(result.sha256, sha256_bytes(b"installer bytes"))
+            self.assertEqual(path.read_bytes(), b"installer bytes")
+            self.assertEqual(list(root.glob(".managed.cas-*")), [])
+
+    def test_quarantine_cleanup_error_after_removal_returns_proven_install(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+            real_remove = filesystem._remove_owned_quarantine
+
+            def remove_then_raise(parent_fd, quarantine, expected):
+                real_remove(parent_fd, quarantine, expected)
+                raise OSError("injected post-removal error")
+
+            with patch.object(
+                filesystem,
+                "_remove_owned_quarantine",
+                side_effect=remove_then_raise,
+            ):
+                result = compare_and_swap(
+                    path, before, b"installer bytes", 0o600, "replace"
+                )
+            self.assertEqual(result.sha256, sha256_bytes(b"installer bytes"))
+            self.assertEqual(path.read_bytes(), b"installer bytes")
+            self.assertEqual(list(root.glob(".managed.cas-*")), [])
+
+    def test_quarantine_boundary_swap_never_overwrites_unowned_entry(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+
+            def swap_reserved(_parent, _target, quarantine):
+                if quarantine.exists():
+                    quarantine.unlink()
+                quarantine.write_bytes(b"unowned replacement")
+                quarantine.chmod(0o600)
+
+            with patch.object(
+                filesystem,
+                "_before_quarantine_mutation",
+                swap_reserved,
+                create=True,
+            ):
+                with (
+                    patch.object(
+                        filesystem,
+                        "_quarantine_path",
+                        return_value=root / ".managed.cas-race",
+                    ),
+                    self.assertRaises(TransactionError),
+                ):
+                    compare_and_swap(path, before, b"installer bytes", 0o600, "replace")
+            self.assertEqual(path.read_bytes(), b"original")
+            self.assertEqual(
+                next(iter(root.glob(".managed.cas-*"))).read_bytes(),
+                b"unowned replacement",
+            )
+
+    def test_create_rejects_same_inode_hardlink_count_race_in_final_evidence(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+
+            def add_hardlink(_parent, target):
+                os.link(target, target.with_name("same-inode-link"))
+
+            with patch.object(
+                filesystem,
+                "_before_final_target_evidence",
+                add_hardlink,
+                create=True,
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, None, b"installer bytes", 0o600, "create")
+            self.assertEqual(path.read_bytes(), b"installer bytes")
+            self.assertTrue((root / "same-inode-link").exists())
+
+    def test_quarantine_collision_preserves_unowned_entry(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+            collision = root / ".managed.cas-collision"
+            collision.write_bytes(b"unowned quarantine")
+            collision.chmod(0o600)
+
+            with patch.object(filesystem, "_quarantine_path", return_value=collision):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, before, b"installer bytes", 0o600, "replace")
+            self.assertEqual(path.read_bytes(), b"original")
+            self.assertEqual(collision.read_bytes(), b"unowned quarantine")
+
+    def test_failed_cas_cleanup_preserves_same_content_different_inode_temp(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+
+            def create_target(_parent):
+                path.write_bytes(b"installer bytes")
+                path.chmod(0o600)
+
+            def replace_temp(_parent, temporary_path):
+                replacement = temporary_path.with_name("replacement-temp")
+                replacement.write_bytes(b"installer bytes")
+                replacement.chmod(0o600)
+                temporary_path.unlink()
+                replacement.rename(temporary_path)
+
+            with (
+                patch.object(
+                    filesystem,
+                    "_before_create_mutation",
+                    create_target,
+                    create=True,
+                ),
+                patch.object(
+                    filesystem,
+                    "_before_failed_temp_cleanup",
+                    replace_temp,
+                    create=True,
+                ),
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, None, b"installer bytes", 0o600, "create")
+            self.assertEqual(path.read_bytes(), b"installer bytes")
+            self.assertEqual(
+                len(list(root.glob(".managed.tmp-*"))),
+                1,
+                "same-content replacement temp must not be unlinked",
+            )
+
+    def test_create_rejects_same_content_mode_replacement_inode_after_link(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+
+            def replace_after_link(_parent, target, _temporary):
+                replacement = target.with_name("replacement-target")
+                replacement.write_bytes(b"installer bytes")
+                replacement.chmod(0o600)
+                target.unlink()
+                replacement.rename(target)
+
+            with patch.object(
+                filesystem, "_after_create_link", replace_after_link, create=True
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, None, b"installer bytes", 0o600, "create")
+            self.assertEqual(path.read_bytes(), b"installer bytes")
+
+    def test_temp_unlink_boundary_preserves_same_content_replacement(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+
+            def replace_temp(_parent, temporary_path):
+                replacement = temporary_path.with_name("replacement-temp")
+                replacement.write_bytes(b"installer bytes")
+                replacement.chmod(0o600)
+                temporary_path.unlink()
+                replacement.rename(temporary_path)
+
+            with patch.object(filesystem, "_before_temp_unlink_mutation", replace_temp):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, None, b"installer bytes", 0o600, "create")
+            self.assertEqual(path.read_bytes(), b"installer bytes")
+            self.assertEqual(len(list(root.glob(".managed.tmp-*"))), 1)
+
+    def test_create_race_preserves_late_target_and_fails(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+
+            def attacker_before_create(_parent):
+                path.write_bytes(b"user create race")
+                path.chmod(0o600)
+
+            with patch.object(
+                filesystem, "_before_create_mutation", attacker_before_create
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, None, b"installer bytes", 0o600, "create")
+            self.assertEqual(path.read_bytes(), b"user create race")
+
+    def test_replace_race_preserves_late_target_and_fails(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+
+            def attacker_before_replace(_parent):
+                path.unlink()
+                path.write_bytes(b"user replace race")
+                path.chmod(0o600)
+
+            with patch.object(
+                filesystem, "_before_replace_mutation", attacker_before_replace
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, before, b"installer bytes", 0o600, "replace")
+            self.assertEqual(path.read_bytes(), b"user replace race")
+
+    def test_unlink_race_preserves_late_target_and_fails(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+
+            def attacker_before_unlink(_parent):
+                path.unlink()
+                path.write_bytes(b"user unlink race")
+                path.chmod(0o600)
+
+            with patch.object(
+                filesystem, "_before_unlink_mutation", attacker_before_unlink
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, before, None, None, "unlink")
+            self.assertEqual(path.read_bytes(), b"user unlink race")
+
+    def test_chmod_race_preserves_late_target_and_fails(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+
+            def attacker_before_chmod(_parent):
+                path.unlink()
+                path.write_bytes(b"user chmod race")
+                path.chmod(0o640)
+
+            with patch.object(
+                filesystem, "_before_chmod_mutation", attacker_before_chmod
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, before, None, 0o644, "chmod")
+            self.assertEqual(path.read_bytes(), b"user chmod race")
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
+
     def test_hash_helpers_match_sha256(self):
         content = b"known bytes\x00"
         expected = hashlib.sha256(content).hexdigest()

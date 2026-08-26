@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import sys  # noqa: F401 - retained for compatibility with validation test seams
 import tempfile
@@ -33,6 +34,7 @@ class ValidationResult:
     stdout: str
     stderr: str
     evidence: tuple[str, ...]
+    cleanup: CleanupResult | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,22 @@ class ValidationFailure:
 
     code: str
     message: str
+
+
+@dataclass(frozen=True)
+class CleanupRootIdentity:
+    """Pinned identity for the private root owned by one validation run."""
+
+    device: int
+    inode: int
+    mode: int
+
+    @classmethod
+    def from_path(cls, path: Path) -> CleanupRootIdentity:
+        item = os.lstat(path)
+        if not stat.S_ISDIR(item.st_mode):
+            raise ValidationIsolationError("validation cleanup root is unsafe")
+        return cls(item.st_dev, item.st_ino, stat.S_IMODE(item.st_mode))
 
 
 @dataclass(frozen=True)
@@ -55,6 +73,72 @@ class CleanupResult:
             f"CleanupResult(code={self.code!r}, "
             f"primary_present={self.primary_present!r})"
         )
+
+
+class ValidationCleanupError(ValidationIsolationError):
+    """Stable sanitized failure for cleanup after a successful child."""
+
+    def __init__(self, cleanup: CleanupResult) -> None:
+        self.cleanup = cleanup
+        super().__init__("validation cleanup failed")
+
+
+_DIRECTORY_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+)
+
+
+def _suppress_top_directory_error(function, path, error_info) -> None:
+    """Allow fd-relative rmtree to leave removal of the opened root to us."""
+
+    if function is os.rmdir and path == ".":
+        return
+    raise error_info[1]
+
+
+def _cleanup_directory_fd(descriptor: int) -> None:
+    """Remove contents through an opened directory, never through its path."""
+
+    shutil.rmtree(".", dir_fd=descriptor, onerror=_suppress_top_directory_error)
+
+
+def _before_final_cleanup(parent_descriptor: int, name: str) -> None:
+    """Test seam immediately before final identity revalidation."""
+
+
+def _identity_matches_descriptor(
+    identity: CleanupRootIdentity, descriptor: int
+) -> bool:
+    item = os.fstat(descriptor)
+    return identity == CleanupRootIdentity(
+        item.st_dev, item.st_ino, stat.S_IMODE(item.st_mode)
+    ) and stat.S_ISDIR(item.st_mode)
+
+
+def _entry_exists(parent_descriptor: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _entry_matches_descriptor(
+    parent_descriptor: int, name: str, descriptor: int
+) -> bool:
+    """Check that a no-follow parent entry is still the opened directory."""
+
+    try:
+        entry = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        opened = os.fstat(descriptor)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(entry.st_mode)
+        and stat.S_ISDIR(opened.st_mode)
+        and os.path.samestat(entry, opened)
+        and stat.S_IMODE(entry.st_mode) == stat.S_IMODE(opened.st_mode)
+    )
 
 
 def _failure_for(exc: BaseException) -> ValidationFailure:
@@ -72,15 +156,92 @@ def _failure_for_result(result: ValidationResult) -> ValidationFailure | None:
 
 
 def cleanup_validation_root(
-    root: Path, *, primary: ValidationFailure | None
+    root: Path,
+    *,
+    primary: ValidationFailure | None,
+    expected_identity: CleanupRootIdentity | None = None,
 ) -> CleanupResult:
     """Remove a private validation root and return only stable typed evidence."""
 
+    parent_descriptor = None
+    quarantine_descriptor = None
     try:
-        shutil.rmtree(root, ignore_errors=False)
+        parent_descriptor = os.open(root.parent, _DIRECTORY_FLAGS)
+        quarantine = Path(
+            tempfile.mkdtemp(prefix="subagents-validation-cleanup-", dir=root.parent)
+        )
+        os.rmdir(quarantine)
+    except BaseException:
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
+        return CleanupResult("cleanup_failed", primary is not None)
+
+    try:
+        os.rename(
+            root.name,
+            quarantine.name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+    except OSError:
+        os.close(parent_descriptor)
+        return CleanupResult("cleanup_root_changed", primary is not None)
+
+    try:
+        quarantine_descriptor = os.open(
+            quarantine.name, _DIRECTORY_FLAGS, dir_fd=parent_descriptor
+        )
+    except OSError:
+        os.close(parent_descriptor)
+        return CleanupResult("cleanup_root_changed", primary is not None)
+
+    if expected_identity is not None and not _identity_matches_descriptor(
+        expected_identity, quarantine_descriptor
+    ):
+        try:
+            if not _entry_exists(parent_descriptor, root.name):
+                os.rename(
+                    quarantine.name,
+                    root.name,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                )
+        except OSError:
+            pass
+        os.close(quarantine_descriptor)
+        os.close(parent_descriptor)
+        return CleanupResult("cleanup_root_changed", primary is not None)
+
+    try:
+        _cleanup_directory_fd(quarantine_descriptor)
+        _before_final_cleanup(parent_descriptor, quarantine.name)
+        # Python has no portable unlinkat-by-open-directory-fd primitive.
+        # Revalidate the no-follow parent entry against the opened directory
+        # immediately before the dir-fd-relative rmdir, then verify that the
+        # opened object remained the one removed and its name is gone.
+        before_removal = os.fstat(quarantine_descriptor)
+        if not _entry_matches_descriptor(
+            parent_descriptor, quarantine.name, quarantine_descriptor
+        ):
+            return CleanupResult("cleanup_failed", primary is not None)
+        os.rmdir(quarantine.name, dir_fd=parent_descriptor)
+        after_removal = os.fstat(quarantine_descriptor)
+        if not os.path.samestat(before_removal, after_removal):
+            return CleanupResult("cleanup_failed", primary is not None)
+        try:
+            os.stat(quarantine.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return CleanupResult("cleaned", primary is not None)
+        except OSError:
+            return CleanupResult("cleanup_failed", primary is not None)
+        return CleanupResult("cleanup_failed", primary is not None)
     except BaseException:
         return CleanupResult("cleanup_failed", primary is not None)
-    return CleanupResult("cleaned", primary is not None)
+    finally:
+        if quarantine_descriptor is not None:
+            os.close(quarantine_descriptor)
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
 
 
 ProcessRunner: TypeAlias = Callable[
@@ -177,6 +338,7 @@ def run_isolated(
         None,
     )
     isolation_root = Path(tempfile.mkdtemp(prefix="subagents-validation-")).resolve()
+    cleanup_identity = CleanupRootIdentity.from_path(isolation_root)
     snapshot = None
     result = None
     primary_error = None
@@ -252,6 +414,7 @@ def run_isolated(
     cleanup_result = cleanup_validation_root(
         isolation_root,
         primary=primary_for_cleanup,
+        expected_identity=cleanup_identity,
     )
 
     if mutation_error is not None:
@@ -260,9 +423,12 @@ def run_isolated(
         raise primary_error
     if result is None:
         raise ValidationIsolationError("validation did not produce a result")
+    if cleanup_result.code != "cleaned" and result.returncode == 0:
+        raise ValidationCleanupError(cleanup_result)
     return ValidationResult(
         result.returncode,
         result.stdout,
         result.stderr,
         (*result.evidence, f"cleanup={cleanup_result.code}"),
+        cleanup_result,
     )

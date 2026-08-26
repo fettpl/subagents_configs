@@ -13,6 +13,7 @@ import json
 import os
 import re
 import stat
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -360,6 +361,28 @@ def _object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
 _MAX_CATALOG_BYTES = 8 * 1024 * 1024
 
 
+def _lexical_absolute_path(raw_path: str) -> str:
+    """Make an absolute path while retaining no-follow semantics.
+
+    macOS exposes a few protected compatibility aliases (notably ``/var``)
+    as symlinks.  Canonicalize only those fixed OS aliases so ordinary
+    temporary paths remain usable; user-provided components are still walked
+    with O_NOFOLLOW below the pinned root descriptor.
+    """
+    absolute_path = os.path.abspath(raw_path)
+    if sys.platform == "darwin":
+        aliases = ("/var", os.path.join(os.sep, "tmp"), os.path.join(os.sep, "etc"))
+        for alias in aliases:
+            if absolute_path == alias or absolute_path.startswith(alias + os.sep):
+                canonical_alias = "/private" + alias
+                try:
+                    if os.path.realpath(alias) == canonical_alias:
+                        return canonical_alias + absolute_path[len(alias) :]
+                except OSError:
+                    pass
+    return absolute_path
+
+
 def _descriptor_flags(*, directory: bool = False) -> int:
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
@@ -380,19 +403,76 @@ def _descriptor_flags(*, directory: bool = False) -> int:
 def _open_descriptor(
     path: Path, *, dir_fd: int | None = None
 ) -> tuple[int, os.stat_result]:
-    flags = _descriptor_flags()
     try:
-        if dir_fd is None:
-            fd = os.open(os.fspath(path), flags)
+        raw_path = os.fspath(path)
+    except TypeError as exc:
+        raise ValueError("catalog path is invalid") from exc
+    if type(raw_path) is not str:
+        raise ValueError("catalog path must be text")
+
+    if dir_fd is not None:
+        if os.path.isabs(raw_path):
+            raise ValueError("descriptor-relative catalog path must be relative")
+        components = [part for part in raw_path.split(os.sep) if part]
+        parent_fd = dir_fd
+        parent_owned = False
+    else:
+        # Normalize only lexically.  In particular, do not resolve the path:
+        # every component must be opened below a descriptor with O_NOFOLLOW.
+        absolute_path = _lexical_absolute_path(raw_path)
+        components = [part for part in absolute_path.split(os.sep) if part]
+        parent_fd = None
+        parent_owned = True
+
+    fd: int | None = None
+    owned_fds: list[int] = []
+    try:
+        if parent_owned:
+            parent_fd = os.open(os.sep, _descriptor_flags(directory=True))
+            owned_fds.append(parent_fd)
+        if not components:
+            if parent_fd is None:
+                raise ValueError("catalog path is empty")
+            if parent_owned:
+                fd = parent_fd
+                owned_fds.remove(parent_fd)
+                parent_fd = None
+                parent_owned = False
+            else:
+                fd = os.dup(parent_fd)
+                owned_fds.append(fd)
         else:
-            fd = os.open(os.fspath(path), flags, dir_fd=dir_fd)
+            for component in components[:-1]:
+                child_fd = os.open(
+                    component,
+                    _descriptor_flags(directory=True),
+                    dir_fd=parent_fd,
+                )
+                owned_fds.append(child_fd)
+                if parent_owned:
+                    os.close(parent_fd)
+                    owned_fds.remove(parent_fd)
+                parent_fd = child_fd
+                parent_owned = True
+            fd = os.open(components[-1], _descriptor_flags(), dir_fd=parent_fd)
+            owned_fds.append(fd)
+        if parent_owned and parent_fd is not None:
+            os.close(parent_fd)
+            owned_fds.remove(parent_fd)
+            parent_fd = None
+            parent_owned = False
         info = os.fstat(fd)
-    except (OSError, TypeError) as exc:
-        try:
-            os.close(fd)
-        except UnboundLocalError:
-            pass
+    except (OSError, TypeError, ValueError) as exc:
+        for open_fd in reversed(owned_fds):
+            try:
+                os.close(open_fd)
+            except OSError:
+                pass
         raise ValueError("unable to open catalog without following symlinks") from exc
+    if fd is None:  # pragma: no cover - all successful paths assign the final fd
+        raise ValueError("unable to open catalog")
+    if fd in owned_fds:
+        owned_fds.remove(fd)
     return fd, info
 
 

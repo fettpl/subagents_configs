@@ -38,6 +38,34 @@ class TransactionPreparationTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def test_apply_transaction_rejects_swapped_nested_target_home_bindings(self):
+        homes = {
+            Target.CODEX: self.root / "codex-home",
+            Target.OPENCODE: self.root / "opencode-home",
+        }
+        for home in homes.values():
+            home.mkdir(mode=0o700)
+        plan = preflight_install(
+            self.repository,
+            planning_request("install", homes, targets=(Target.CODEX, Target.OPENCODE)),
+        )
+        swapped = {
+            Target.CODEX: homes[Target.OPENCODE],
+            Target.OPENCODE: homes[Target.CODEX],
+        }
+        swapped_plan = replace(
+            plan,
+            targets=tuple(
+                replace(target_plan, home=swapped[target_plan.target])
+                for target_plan in plan.targets
+            ),
+        )
+        with transaction.locked_target_homes(homes, (Target.CODEX, Target.OPENCODE)):
+            with self.assertRaises(ValueError):
+                transaction.apply_transaction(swapped_plan)
+        for home in homes.values():
+            self.assertFalse((home / ".subagents_configs").exists())
+
     def test_readonly_evidence_failure_writes_nothing_after_lock(self):
         home = self.root / "codex-home"
         home.mkdir(mode=0o700)
@@ -94,6 +122,87 @@ class TransactionPreparationTests(unittest.TestCase):
             self.assertEqual(before, tree_snapshot(home))
         self.assertTrue((backups / "user-backup").exists())
         self.assertTrue(unrelated.exists())
+
+    def test_failed_exclusive_backup_is_cleaned_before_ownership_recording(self):
+        home = self.root / "codex-home"
+        destination = home / "agents/code-explorer.toml"
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(b"user bytes\n")
+        destination.chmod(0o640)
+        plan = preflight_install(
+            self.repository,
+            planning_request("install", {Target.CODEX: home}),
+        )
+        real_exclusive_write = transaction.filesystem.exclusive_write
+        injected = False
+
+        def fail_first_exclusive_write(path, content, mode=0o600):
+            nonlocal injected
+            if not injected:
+                injected = True
+                with patch.object(
+                    transaction.filesystem,
+                    "_sync_parent_directory_fd",
+                    side_effect=[OSError("backup parent sync failed"), None],
+                ):
+                    return real_exclusive_write(path, content, mode)
+            return real_exclusive_write(path, content, mode)
+
+        with transaction.locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+            evidence = transaction._collect_readonly_evidence(plan)
+            with patch.object(
+                transaction.filesystem,
+                "exclusive_write",
+                side_effect=fail_first_exclusive_write,
+            ):
+                with self.assertRaises(transaction.TransactionPreparationError):
+                    transaction._prepare(plan, evidence)
+        self.assertTrue(injected)
+        backups = home / ".subagents_configs/backups"
+        self.assertEqual(list(backups.glob("*")), [])
+
+    def test_replace_quarantine_cleanup_failure_restores_preexisting_target(self):
+        home = self.root / "codex-home"
+        destination = home / "agents/code-explorer.toml"
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(b"user bytes\n")
+        destination.chmod(0o640)
+        plan = preflight_install(
+            self.repository,
+            planning_request("install", {Target.CODEX: home}),
+        )
+        real_remove = transaction.filesystem._remove_owned_quarantine
+        real_link = transaction.filesystem._link_no_replace
+        installed_temporary = []
+
+        def fail_target_quarantine(parent_fd, quarantine, expected):
+            if quarantine.startswith(".code-explorer.toml.cas-"):
+                raise OSError("injected quarantine cleanup failure")
+            return real_remove(parent_fd, quarantine, expected)
+
+        def track_temporary_install(parent_fd, source, target):
+            result = real_link(parent_fd, source, target)
+            if source.startswith(".code-explorer.toml.tmp-"):
+                installed_temporary.append(source)
+            return result
+
+        with (
+            patch.object(
+                transaction.filesystem,
+                "_remove_owned_quarantine",
+                side_effect=fail_target_quarantine,
+            ),
+            patch.object(
+                transaction.filesystem,
+                "_link_no_replace",
+                side_effect=track_temporary_install,
+            ),
+        ):
+            with self.assertRaises(transaction.TransactionError):
+                transaction.apply_transaction(plan)
+        self.assertEqual(destination.read_bytes(), b"user bytes\n")
+        self.assertEqual(len(installed_temporary), 1)
+        self.assertEqual(list(destination.parent.glob(".code-explorer.toml.cas-*")), [])
 
     def test_cleanup_failure_does_not_replace_primary_apply_status(self):
         home = self.root / "codex-home"
@@ -159,6 +268,31 @@ class TransactionPreparationTests(unittest.TestCase):
                 home, journal, journal_evidence=expected
             )
         self.assertEqual(path.read_bytes(), encode_journal(replacement))
+
+    def test_journal_update_requires_expected_identity_and_preserves_replacement(self):
+        home = self.root / "codex-home"
+        prepared = self._prepared(home)
+        journal = prepared.journals[Target.CODEX]
+        path = home / ".subagents_configs/journal.json"
+        expected = prepared.journal_evidence[Target.CODEX]
+        replacement = replace(journal, transaction_id="attacker-journal-replacement")
+        path.write_bytes(encode_journal(replacement))
+        path.chmod(0o600)
+        with self.assertRaises(transaction.TransactionError):
+            transaction.write_journal(home, journal, expected_before=expected)
+        self.assertEqual(path.read_bytes(), encode_journal(replacement))
+
+    def test_initial_journal_creation_does_not_overwrite_existing_evidence(self):
+        home = self.root / "codex-home"
+        prepared = self._prepared(home)
+        journal = prepared.journals[Target.CODEX]
+        path = home / ".subagents_configs/journal.json"
+        attacker = b"attacker initial journal\n"
+        path.write_bytes(attacker)
+        path.chmod(0o600)
+        with self.assertRaises(transaction.TransactionError):
+            transaction.write_journal(home, journal)
+        self.assertEqual(path.read_bytes(), attacker)
 
     def test_backup_replacement_after_validation_is_retained_with_journal(self):
         home = self.root / "codex-home"
