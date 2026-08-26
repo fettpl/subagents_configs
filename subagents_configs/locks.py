@@ -32,6 +32,7 @@ _DIRECTORY_FLAGS = (
 
 _ANCHOR_REGISTRY_GUARD = threading.Lock()
 _HELD_ANCHORS: dict[Path, dict[object, tuple[int, int]]] = {}
+_FD_CLEANUP_GUARD = threading.Lock()
 
 
 class _LockLease:
@@ -109,15 +110,75 @@ def _lock_anchor_path_identity(
 
 def _unlock_and_close(descriptor: int, unlock: bool) -> list[BaseException]:
     errors: list[BaseException] = []
-    if unlock:
+    with _FD_CLEANUP_GUARD:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            before = os.fstat(descriptor)
+            expected_identity = (
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_rdev,
+            )
+        except OSError:
+            expected_identity = None
+        if unlock:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            except BaseException as exc:
+                errors.append(exc)
+        try:
+            os.close(descriptor)
         except BaseException as exc:
             errors.append(exc)
-    try:
-        os.close(descriptor)
-    except BaseException as exc:
-        errors.append(exc)
+            try:
+                fcntl.fcntl(descriptor, fcntl.F_GETFD)
+            except OSError as probe_error:
+                if probe_error.errno != errno.EBADF:
+                    errors.append(probe_error)
+            else:
+                try:
+                    current = os.fstat(descriptor)
+                    current_identity = (
+                        current.st_dev,
+                        current.st_ino,
+                        current.st_mode,
+                        current.st_rdev,
+                    )
+                except OSError:
+                    current_identity = None
+                if (
+                    expected_identity is not None
+                    and current_identity == expected_identity
+                ):
+                    try:
+                        os.close(descriptor)
+                    except BaseException as retry_error:
+                        errors.append(retry_error)
+                        try:
+                            fcntl.fcntl(descriptor, fcntl.F_GETFD)
+                        except OSError as verify_error:
+                            if verify_error.errno != errno.EBADF:
+                                errors.append(verify_error)
+                        else:
+                            errors.append(
+                                OSError(
+                                    errno.EBUSY,
+                                    "descriptor remained open after cleanup",
+                                )
+                            )
+                    else:
+                        try:
+                            fcntl.fcntl(descriptor, fcntl.F_GETFD)
+                        except OSError as verify_error:
+                            if verify_error.errno != errno.EBADF:
+                                errors.append(verify_error)
+                        else:
+                            errors.append(
+                                OSError(
+                                    errno.EBUSY,
+                                    "descriptor remained open after cleanup",
+                                )
+                            )
     return errors
 
 

@@ -1,5 +1,6 @@
 import asyncio
 import errno
+import os
 import stat
 import subprocess
 import sys
@@ -528,6 +529,55 @@ with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
             self.assertIn(flock_calls[1][0], close_calls)
             with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
                 pass
+
+    def test_failed_close_retries_when_original_descriptor_remains_open(self):
+        with private_tempdir() as temporary:
+            path = Path(temporary) / "descriptor"
+            descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+            real_close = locks.os.close
+            attempts = 0
+
+            def fail_once(fd):
+                nonlocal attempts
+                if fd == descriptor and attempts == 0:
+                    attempts += 1
+                    raise OSError(errno.EIO, "injected close failure")
+                return real_close(fd)
+
+            with patch.object(locks.os, "close", side_effect=fail_once):
+                errors = locks._unlock_and_close(descriptor, False)
+            self.assertEqual(attempts, 1)
+            self.assertEqual(len(errors), 1)
+            with self.assertRaises(OSError) as error:
+                locks.fcntl.fcntl(descriptor, locks.fcntl.F_GETFD)
+            self.assertEqual(error.exception.errno, errno.EBADF)
+
+    def test_failed_close_does_not_close_reused_descriptor_after_eintr(self):
+        with private_tempdir() as temporary:
+            path = Path(temporary) / "descriptor"
+            replacement = Path(temporary) / "replacement"
+            descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+            real_close = locks.os.close
+            replacement_descriptor = None
+
+            def close_then_reuse(fd):
+                nonlocal replacement_descriptor
+                if fd == descriptor and replacement_descriptor is None:
+                    real_close(fd)
+                    replacement_descriptor = os.open(
+                        replacement, os.O_RDWR | os.O_CREAT, 0o600
+                    )
+                    raise OSError(errno.EINTR, "simulated completed close")
+                return real_close(fd)
+
+            with patch.object(locks.os, "close", side_effect=close_then_reuse):
+                errors = locks._unlock_and_close(descriptor, False)
+            assert replacement_descriptor is not None
+            self.assertEqual(len(errors), 1)
+            self.assertGreaterEqual(
+                locks.fcntl.fcntl(replacement_descriptor, locks.fcntl.F_GETFD), 0
+            )
+            real_close(replacement_descriptor)
 
     def test_lock_rejects_noncanonical_or_duplicate_target_sequences(self):
         with private_tempdir() as temporary:
