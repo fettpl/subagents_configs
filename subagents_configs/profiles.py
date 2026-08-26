@@ -30,9 +30,7 @@ _SENSITIVE_FRAGMENTS = (
     "secret",
     "token",
     "password",
-    "private-key",
-    "private_key",
-    "private key",
+    "privatekey",
 )
 
 
@@ -47,8 +45,10 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
 
 def _reject_hostile_strings(value: object) -> None:
     if isinstance(value, str):
-        lowered = value.lower()
-        if any(fragment in lowered for fragment in _SENSITIVE_FRAGMENTS):
+        normalized = "".join(
+            character for character in value.lower() if character.isalnum()
+        )
+        if any(fragment in normalized for fragment in _SENSITIVE_FRAGMENTS):
             raise ValueError("profile contains credential-like data")
         if any(ord(character) < 32 or ord(character) == 127 for character in value):
             raise ValueError("profile contains control data")
@@ -299,12 +299,7 @@ def merge_profile_with_cli(
         dry_run_format=dry_run_format,
         client_versions=client_versions,
     )
-    if request.operation == "uninstall" and (
-        request.enable_global_routing
-        or request.enable_codex_multi_agent
-        or request.include_commit_pusher
-    ):
-        raise CliError("install-only options are not valid for uninstall")
-    if request.enable_codex_multi_agent and Target.CODEX not in request.targets:
-        raise CliError("--enable-codex-multi-agent requires the codex target")
+    from .planning import validate_request_shape
+
+    validate_request_shape(request)
     return request

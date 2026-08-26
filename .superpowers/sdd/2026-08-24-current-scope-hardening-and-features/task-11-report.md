@@ -54,3 +54,24 @@ checks remain authoritative.
 The fixed backend-gate availability result above remains the only incomplete
 verification item and should be rerun in an environment with the required
 backend before release-owner validation.
+
+## Review round 1 fixes
+
+Review-round base: `7ef6f5a`.
+
+- Extracted public pure `validate_request_shape` from planner invariants;
+  profile merge and orchestrator invoke it before compatibility, recovery,
+  locks, repository, or home reads, while preflight delegates to it.
+- Closed direct `ProfileRequest` canonical target, absolute/canonical home,
+  and normalized-distinctness invariants.
+- Sensitive-fragment matching now case-folds and removes separators, covering
+  `privatekey`, `private-key`, `private_key`, and `private key` in keys/values.
+- Added the production-path duplicate-normalized-home zero-read regression,
+  hostile TOML parity, direct-model, precedence, and paired-flag tests.
+
+Review-round focused verification:
+
+- Profile, CLI, integration, planning, capability, and static suites — 104 passed.
+- Full unittest discovery — 525 passed, 1 skipped.
+- Ruff check/format, catalog validation, compileall, shell syntax/ShellCheck,
+  and `git diff --check` rerun after fixes — passed.

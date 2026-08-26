@@ -1,6 +1,7 @@
 import base64
 import enum
 import hashlib
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -497,6 +498,13 @@ class ProfileRequest:
             raise TypeError("profile targets must use Target values")
         if len(set(self.targets)) != len(self.targets):
             raise ValueError("profile targets must be unique")
+        canonical_targets = tuple(
+            target
+            for target in (Target.CODEX, Target.OPENCODE, Target.CLAUDE_CODE)
+            if target in self.targets
+        )
+        if self.targets != canonical_targets:
+            raise ValueError("profile targets must be in canonical descriptor order")
         if not isinstance(self.homes, Mapping):
             raise TypeError("profile homes must be a mapping")
         if set(self.homes) != set(self.targets):
@@ -505,6 +513,24 @@ class ProfileRequest:
             raise TypeError("profile home keys must use Target values")
         if any(not isinstance(home, Path) for home in self.homes.values()):
             raise TypeError("profile homes must use Path values")
+        normalized_homes: list[Path] = []
+        for home in self.homes.values():
+            if not home.is_absolute():
+                raise ValueError("profile homes must be absolute")
+            raw_home = os.fspath(home)
+            if "\\" in raw_home or any(
+                ord(character) < 32 or ord(character) == 127 for character in raw_home
+            ):
+                raise ValueError("profile home contains unsafe characters")
+            if raw_home != "/" and (
+                raw_home.startswith("//") or raw_home.endswith("/") or "//" in raw_home
+            ):
+                raise ValueError("profile home is not canonical")
+            if any(component in {".", ".."} for component in raw_home.split("/")):
+                raise ValueError("profile home contains unsafe lexical components")
+            normalized_homes.append(Path(os.path.normpath(os.path.abspath(raw_home))))
+        if len(set(normalized_homes)) != len(normalized_homes):
+            raise ValueError("profile homes must be distinct after normalization")
         if type(self.options) is not ProfileOptions:
             raise TypeError("profile options must use ProfileOptions")
         object.__setattr__(self, "homes", MappingProxyType(dict(self.homes)))

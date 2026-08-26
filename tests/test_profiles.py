@@ -2,12 +2,14 @@ import io
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from subagents_configs.cli import parse_request
 from subagents_configs.errors import CliError
 from subagents_configs.models import Target
 from subagents_configs.orchestrator import (
     EXIT_BLOCKED_VALIDATION,
+    EXIT_PREFLIGHT_ERROR,
     EXIT_SUCCESS,
     run,
 )
@@ -51,6 +53,11 @@ class ProfileTests(unittest.TestCase):
         path.write_text(json.dumps(value), encoding="utf-8")
         return path
 
+    def write_toml(self, body):
+        path = self.root / "profile.toml"
+        path.write_text(body, encoding="utf-8")
+        return path
+
     def test_loads_strict_json_profile_as_immutable_typed_values(self):
         profile = load_profile(self.write_json(_profile()))
         self.assertIsInstance(profile, ProfileRequest)
@@ -83,6 +90,39 @@ class ProfileTests(unittest.TestCase):
         )
         profile = load_profile(path)
         self.assertEqual(profile.options.dry_run_format, "text")
+
+    def test_direct_profile_model_rejects_noncanonical_or_unsafe_homes(self):
+        options = ProfileOptions(False, False, False, False, "text")
+        with self.assertRaises(ValueError):
+            ProfileRequest(
+                1,
+                "install",
+                (Target.OPENCODE, Target.CODEX),
+                {
+                    Target.OPENCODE: Path("/var/tmp/opencode"),  # noqa: S108
+                    Target.CODEX: Path("/var/tmp/codex"),  # noqa: S108
+                },
+                options,
+            )
+        with self.assertRaises(ValueError):
+            ProfileRequest(
+                1,
+                "install",
+                (Target.CODEX,),
+                {Target.CODEX: Path("relative/home")},
+                options,
+            )
+        with self.assertRaises(ValueError):
+            ProfileRequest(
+                1,
+                "install",
+                (Target.CODEX, Target.OPENCODE),
+                {
+                    Target.CODEX: Path("/var/tmp/shared"),  # noqa: S108
+                    Target.OPENCODE: Path("/var/tmp/shared/.."),  # noqa: S108
+                },
+                options,
+            )
 
     def test_rejects_unknown_keys_and_duplicate_json_keys(self):
         unknown = _profile()
@@ -121,7 +161,9 @@ class ProfileTests(unittest.TestCase):
     def test_rejects_credentials_controls_and_wrong_exact_types(self):
         for key, value in (
             ("api_token", False),
+            ("PrIvAtE-Key", False),
             ("notes", "secret-value"),
+            ("PRIVATE key", False),
             ("x", "a\x00b"),
         ):
             profile = _profile()
@@ -132,6 +174,47 @@ class ProfileTests(unittest.TestCase):
         profile["options"]["dry_run"] = 1
         with self.assertRaises(ValueError):
             load_profile(self.write_json(profile))
+
+    def test_toml_rejects_hostile_and_noncanonical_schema_variants(self):
+        base = (
+            'schema_version = 1\noperation = "install"\n'
+            'targets = ["codex"]\n[homes]\n'
+            'codex = "/var/tmp/profile-codex"\n[options]\n'
+            "enable_global_routing = false\n"
+            "enable_codex_multi_agent = false\n"
+            "include_commit_pusher = false\n"
+            "dry_run = true\ndry_run_format = "
+        )
+        invalid_documents = (
+            base + '"text"\n[extra]\nvalue = false\n',
+            base + '"text"\ntargets = ["codex"]\n',
+            base.replace('targets = ["codex"]', 'targets = ["codex", "codex"]')
+            + '"text"\n',
+            base.replace('targets = ["codex"]', 'targets = ["all"]') + '"text"\n',
+            base.replace('targets = ["codex"]', 'targets = ["bogus"]') + '"text"\n',
+            base.replace("schema_version = 1", "schema_version = true") + '"text"\n',
+            base.replace('operation = "install"', 'operation = "deploy"') + '"text"\n',
+            base.replace('codex = "/var/tmp/profile-codex"', 'codex = "relative"')
+            + '"text"\n',
+            base.replace('codex = "/var/tmp/profile-codex"', 'codex = "/var/tmp/../x"')
+            + '"text"\n',
+            base.replace("dry_run_format = ", "dry_run = 1\n# ") + '"text"\n',
+            base + '"xml"\n',
+            base.replace("dry_run_format = ", 'dry_run_format = "private.key"\n# ')
+            + '"text"\n',
+            base + '"a\\u0000b"\n',
+        )
+        for body in invalid_documents:
+            with self.subTest(body=body):
+                with self.assertRaises(ValueError):
+                    load_profile(self.write_toml(body))
+        with self.assertRaises(ValueError):
+            load_profile(
+                self.write_toml(
+                    base + '"text"\n[homes]\ncodex = "/var/tmp/one"\n'
+                    'codex = "/var/tmp/two"\n'
+                )
+            )
 
     def test_cli_boolean_precedence_is_two_way_and_absence_retains_profile(self):
         profile = load_profile(self.write_json(_profile()))
@@ -176,6 +259,66 @@ class ProfileTests(unittest.TestCase):
         self.assertTrue(turned_on.enable_codex_multi_agent)
         self.assertTrue(turned_on.include_commit_pusher)
         self.assertTrue(turned_on.dry_run)
+
+    def test_conflicting_or_repeated_paired_flags_fail_closed(self):
+        profile = load_profile(self.write_json(_profile()))
+        for flags in (
+            ["--enable-global-routing", "--no-global-routing"],
+            ["--enable-codex-multi-agent", "--no-codex-multi-agent"],
+            ["--include-commit-pusher", "--no-commit-pusher"],
+            ["--dry-run", "--no-dry-run"],
+            ["--no-global-routing", "--no-global-routing"],
+            ["--no-dry-run", "--no-dry-run"],
+        ):
+            with self.subTest(flags=flags):
+                with self.assertRaises(CliError):
+                    merge_profile_with_cli(profile, flags, self.environ)
+
+    def test_cli_target_all_home_and_format_values_override_profile(self):
+        profile = load_profile(
+            self.write_json(
+                _profile(
+                    options={
+                        "enable_global_routing": False,
+                        "enable_codex_multi_agent": False,
+                        "include_commit_pusher": False,
+                        "dry_run": True,
+                        "dry_run_format": "text",
+                    }
+                )
+            )
+        )
+        explicit_target = merge_profile_with_cli(
+            profile,
+            [
+                "--target",
+                "opencode",
+                "--home",
+                "opencode=/var/tmp/override-opencode",
+                "--format",
+                "json",
+            ],
+            self.environ,
+        )
+        self.assertEqual(explicit_target.targets, (Target.OPENCODE,))
+        self.assertEqual(
+            explicit_target.homes[Target.OPENCODE],
+            Path("/var/tmp/override-opencode"),  # noqa: S108
+        )
+        self.assertEqual(explicit_target.dry_run_format, "json")
+        all_targets = merge_profile_with_cli(profile, ["--all"], self.environ)
+        self.assertEqual(
+            all_targets.targets,
+            (Target.CODEX, Target.OPENCODE, Target.CLAUDE_CODE),
+        )
+        self.assertEqual(
+            all_targets.homes[Target.CODEX],
+            Path("/var/tmp/profile-codex"),  # noqa: S108
+        )
+        self.assertEqual(
+            all_targets.homes[Target.OPENCODE],
+            self.root / ".config" / "opencode",
+        )
 
     def test_profile_and_cli_operations_must_match(self):
         self.write_json(_profile(operation="install"))
@@ -238,6 +381,58 @@ class ProfileTests(unittest.TestCase):
             stderr=err,
         )
         self.assertEqual(status, EXIT_BLOCKED_VALIDATION)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_duplicate_normalized_merged_profile_homes_fail_before_preflight_reads(
+        self,
+    ):
+        profile_path = self.write_json(
+            _profile(
+                targets=["codex", "opencode"],
+                homes={
+                    "codex": str(self.root / "codex"),
+                    "opencode": str(self.root / "opencode"),
+                },
+                options={
+                    "enable_global_routing": False,
+                    "enable_codex_multi_agent": False,
+                    "include_commit_pusher": False,
+                    "dry_run": True,
+                    "dry_run_format": "text",
+                },
+            )
+        )
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            patch(
+                "subagents_configs.orchestrator.validate_request_compatibility"
+            ) as compatibility,
+            patch("subagents_configs.orchestrator._journal_groups") as journals,
+            patch("subagents_configs.orchestrator._state_fingerprint") as state,
+            patch(
+                "subagents_configs.orchestrator._collect_stable_dry_run_evidence"
+            ) as evidence,
+            patch("subagents_configs.orchestrator.locked_target_homes") as locks,
+        ):
+            status = run(
+                "install",
+                [
+                    "--profile",
+                    str(profile_path),
+                    "--home",
+                    f"opencode={self.root / 'codex'}",
+                ],
+                repo_root=self.root / "missing-repository",
+                environ=self.environ,
+                stdout=out,
+                stderr=err,
+            )
+        self.assertEqual(status, EXIT_PREFLIGHT_ERROR)
+        compatibility.assert_not_called()
+        journals.assert_not_called()
+        state.assert_not_called()
+        evidence.assert_not_called()
+        locks.assert_not_called()
         self.assertEqual(out.getvalue(), "")
 
 

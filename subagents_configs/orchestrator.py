@@ -25,6 +25,7 @@ from .planning import (
     preflight_uninstall,
     render_plan,
     render_plan_json,
+    validate_request_shape,
 )
 from .recovery import recover_transaction
 from .state import load_journal
@@ -796,6 +797,15 @@ def run(
             status="invalid",
         )
         return EXIT_CLI_ERROR
+    except ValueError:
+        _emit(
+            stderr,
+            DiagnosticCode.PREFLIGHT_REJECTED,
+            operation=operation,
+            phase="preflight",
+            status="rejected",
+        )
+        return EXIT_PREFLIGHT_ERROR
     except Exception:
         _emit(
             stderr,
@@ -805,6 +815,18 @@ def run(
             status="invalid",
         )
         return EXIT_CLI_ERROR
+
+    try:
+        validate_request_shape(request)
+    except (TypeError, ValueError):
+        _emit(
+            stderr,
+            DiagnosticCode.PREFLIGHT_REJECTED,
+            operation=operation,
+            phase="preflight",
+            status="rejected",
+        )
+        return EXIT_PREFLIGHT_ERROR
 
     if not request.dry_run:
         return _run_mutating_locked(
