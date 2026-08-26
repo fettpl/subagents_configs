@@ -167,15 +167,11 @@ class ValidationCleanupContractTests(unittest.TestCase):
                 if Path(source).name == root.name and not raced:
                     real_rename(root, displaced)
                     root.mkdir(mode=0o700)
-                    (root / "replacement").write_text(
-                        "replacement", encoding="utf-8"
-                    )
+                    (root / "replacement").write_text("replacement", encoding="utf-8")
                     raced = True
                 return real_rename(source, destination, **kwargs)
 
-            with patch.object(
-                runner.os, "rename", side_effect=swap_before_cleanup
-            ):
+            with patch.object(runner.os, "rename", side_effect=swap_before_cleanup):
                 result = runner.cleanup_validation_root(
                     root, primary=None, expected_identity=identity
                 )
@@ -203,9 +199,7 @@ class ValidationCleanupContractTests(unittest.TestCase):
                 )
                 quarantine.rename(displaced)
                 quarantine.mkdir(mode=0o700)
-                (quarantine / "replacement").write_text(
-                    "replacement", encoding="utf-8"
-                )
+                (quarantine / "replacement").write_text("replacement", encoding="utf-8")
                 real_cleanup(descriptor)
 
             with patch.object(

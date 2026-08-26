@@ -83,8 +83,8 @@ class ValidationCleanupError(ValidationIsolationError):
         super().__init__("validation cleanup failed")
 
 
-_DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
-    os, "O_NOFOLLOW", 0
+_DIRECTORY_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 )
 
 

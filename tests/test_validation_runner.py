@@ -176,7 +176,7 @@ class RunnerTests(unittest.TestCase):
                     sys.platform,
                     lambda argv, cwd, env, timeout: subprocess.CompletedProcess(
                         argv, 0, "", ""
-                    )
+                    ),
                 )
             self.assertEqual(result.returncode, 0)
             self.assertIsNotNone(result.cleanup)
@@ -386,8 +386,8 @@ class RunnerTests(unittest.TestCase):
                 patch("scripts.validation_isolation.runner.probe_backend"),
                 patch(
                     "scripts.validation_isolation.runner.shutil.rmtree",
-                    side_effect=lambda path, ignore_errors=False, **kwargs: cleanup.append(
-                        (path, ignore_errors, kwargs)
+                    side_effect=lambda path, ignore_errors=False, **kwargs: (
+                        cleanup.append((path, ignore_errors, kwargs))
                     ),
                 ),
             ):
