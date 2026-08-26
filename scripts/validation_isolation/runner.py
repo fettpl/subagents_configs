@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import sys  # noqa: F401 - retained for compatibility with validation test seams
 import tempfile
@@ -33,6 +34,7 @@ class ValidationResult:
     stdout: str
     stderr: str
     evidence: tuple[str, ...]
+    cleanup: CleanupResult | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,34 @@ class ValidationFailure:
 
     code: str
     message: str
+
+
+@dataclass(frozen=True)
+class CleanupRootIdentity:
+    """Pinned identity for the private root owned by one validation run."""
+
+    device: int
+    inode: int
+    mode: int
+
+    @classmethod
+    def from_path(cls, path: Path) -> CleanupRootIdentity:
+        item = os.lstat(path)
+        if not stat.S_ISDIR(item.st_mode):
+            raise ValidationIsolationError("validation cleanup root is unsafe")
+        return cls(item.st_dev, item.st_ino, stat.S_IMODE(item.st_mode))
+
+    def matches(self, path: Path) -> bool:
+        try:
+            item = os.lstat(path)
+        except OSError:
+            return False
+        return (
+            stat.S_ISDIR(item.st_mode)
+            and self == CleanupRootIdentity(
+                item.st_dev, item.st_ino, stat.S_IMODE(item.st_mode)
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -55,6 +85,14 @@ class CleanupResult:
             f"CleanupResult(code={self.code!r}, "
             f"primary_present={self.primary_present!r})"
         )
+
+
+class ValidationCleanupError(ValidationIsolationError):
+    """Stable sanitized failure for cleanup after a successful child."""
+
+    def __init__(self, cleanup: CleanupResult) -> None:
+        self.cleanup = cleanup
+        super().__init__("validation cleanup failed")
 
 
 def _failure_for(exc: BaseException) -> ValidationFailure:
@@ -72,10 +110,15 @@ def _failure_for_result(result: ValidationResult) -> ValidationFailure | None:
 
 
 def cleanup_validation_root(
-    root: Path, *, primary: ValidationFailure | None
+    root: Path,
+    *,
+    primary: ValidationFailure | None,
+    expected_identity: CleanupRootIdentity | None = None,
 ) -> CleanupResult:
     """Remove a private validation root and return only stable typed evidence."""
 
+    if expected_identity is not None and not expected_identity.matches(root):
+        return CleanupResult("cleanup_root_changed", primary is not None)
     try:
         shutil.rmtree(root, ignore_errors=False)
     except BaseException:
@@ -177,6 +220,7 @@ def run_isolated(
         None,
     )
     isolation_root = Path(tempfile.mkdtemp(prefix="subagents-validation-")).resolve()
+    cleanup_identity = CleanupRootIdentity.from_path(isolation_root)
     snapshot = None
     result = None
     primary_error = None
@@ -252,6 +296,7 @@ def run_isolated(
     cleanup_result = cleanup_validation_root(
         isolation_root,
         primary=primary_for_cleanup,
+        expected_identity=cleanup_identity,
     )
 
     if mutation_error is not None:
@@ -260,9 +305,12 @@ def run_isolated(
         raise primary_error
     if result is None:
         raise ValidationIsolationError("validation did not produce a result")
+    if cleanup_result.code != "cleaned" and result.returncode == 0:
+        raise ValidationCleanupError(cleanup_result)
     return ValidationResult(
         result.returncode,
         result.stdout,
         result.stderr,
         (*result.evidence, f"cleanup={cleanup_result.code}"),
+        cleanup_result,
     )

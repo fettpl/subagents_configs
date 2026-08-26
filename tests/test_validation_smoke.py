@@ -124,6 +124,26 @@ class ValidationCleanupContractTests(unittest.TestCase):
             self.assertEqual(result.code, "cleaned")
             self.assertFalse(result.primary_present)
 
+    def test_cleanup_rejects_validation_root_substitution(self):
+        from scripts.validation_isolation.runner import (
+            CleanupRootIdentity,
+            cleanup_validation_root,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            root.mkdir(mode=0o700)
+            identity = CleanupRootIdentity.from_path(root)
+            displaced = root.with_name("root-displaced")
+            root.rename(displaced)
+            root.mkdir(mode=0o700)
+            result = cleanup_validation_root(
+                root, primary=None, expected_identity=identity
+            )
+            self.assertEqual(result.code, "cleanup_root_changed")
+            self.assertTrue(root.exists())
+            self.assertTrue(displaced.exists())
+
 
 class RunnerCleanupPrecedenceTests(unittest.TestCase):
     @staticmethod
@@ -138,7 +158,9 @@ class RunnerCleanupPrecedenceTests(unittest.TestCase):
             },
         )()
 
-    def _run_with_cleanup_failure(self, child_returncode, *, probe_error=None):
+    def _run_with_cleanup_failure(
+        self, child_returncode, *, probe_error=None, expect_cleanup_error=False
+    ):
         from scripts.validation_isolation import runner
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -151,8 +173,8 @@ class RunnerCleanupPrecedenceTests(unittest.TestCase):
                 process_calls.append(tuple(argv))
                 return subprocess.CompletedProcess(argv, child_returncode, "", "")
 
-            def cleanup_validation_root(root, *, primary):
-                del root
+            def cleanup_validation_root(root, *, primary, expected_identity):
+                del root, expected_identity
                 cleanup_primary.append(primary)
                 return runner.CleanupResult("cleanup_failed", primary is not None)
 
@@ -175,9 +197,19 @@ class RunnerCleanupPrecedenceTests(unittest.TestCase):
                 ),
             ):
                 if probe_error is None:
-                    result = runner.run_isolated(
-                        ("false",), repository, "darwin", process_runner
-                    )
+                    if expect_cleanup_error:
+                        with self.assertRaisesRegex(
+                            runner.ValidationIsolationError,
+                            "validation cleanup failed",
+                        ) as raised:
+                            runner.run_isolated(
+                                ("false",), repository, "darwin", process_runner
+                            )
+                        result = raised.exception
+                    else:
+                        result = runner.run_isolated(
+                            ("false",), repository, "darwin", process_runner
+                        )
                 else:
                     with self.assertRaisesRegex(
                         ValueError, "validation isolation probe failed"
@@ -189,11 +221,14 @@ class RunnerCleanupPrecedenceTests(unittest.TestCase):
             return result, process_calls, cleanup_primary
 
     def test_successful_child_reports_typed_cleanup_failure(self):
-        result, process_calls, cleanup_primary = self._run_with_cleanup_failure(0)
-        self.assertIsNotNone(result)
-        assert result is not None
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("cleanup=cleanup_failed", result.evidence)
+        from scripts.validation_isolation import runner
+
+        result, process_calls, cleanup_primary = self._run_with_cleanup_failure(
+            0, expect_cleanup_error=True
+        )
+        self.assertIsInstance(result, runner.ValidationIsolationError)
+        self.assertEqual(result.cleanup.code, "cleanup_failed")
+        self.assertFalse(result.cleanup.primary_present)
         self.assertEqual(len(process_calls), 1)
         self.assertEqual(cleanup_primary, [None])
 
@@ -203,6 +238,9 @@ class RunnerCleanupPrecedenceTests(unittest.TestCase):
         assert result is not None
         self.assertEqual(result.returncode, 23)
         self.assertIn("cleanup=cleanup_failed", result.evidence)
+        self.assertIsNotNone(result.cleanup)
+        assert result.cleanup is not None
+        self.assertEqual(result.cleanup.code, "cleanup_failed")
         self.assertEqual(len(process_calls), 1)
         self.assertEqual(len(cleanup_primary), 1)
         self.assertIsNotNone(cleanup_primary[0])
@@ -215,6 +253,29 @@ class RunnerCleanupPrecedenceTests(unittest.TestCase):
         self.assertEqual(process_calls, [])
         self.assertEqual(len(cleanup_primary), 1)
         self.assertIsNotNone(cleanup_primary[0])
+
+    def test_timeout_primary_wins_over_cleanup_failure(self):
+        from scripts.validation_isolation import runner
+
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = make_repository(Path(temporary))
+            timeout = subprocess.TimeoutExpired(("false",), 1)
+            with (
+                patch.object(runner, "select_backend", return_value=self._backend()),
+                patch.object(runner, "verify_backend"),
+                patch.object(runner, "probe_backend"),
+                patch.object(runner, "build_backend_argv", return_value=("sandbox",)),
+                patch.object(runner, "run_verified_process", side_effect=timeout),
+                patch.object(
+                    runner,
+                    "cleanup_validation_root",
+                    return_value=runner.CleanupResult("cleanup_failed", True),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    runner.ValidationIsolationError, "validation command timed out"
+                ):
+                    runner.run_isolated(("false",), repository, "darwin")
 
 
 class RealValidationSmokeTests(unittest.TestCase):
