@@ -171,6 +171,29 @@ no-argument invocation of generic `install.sh` or `uninstall.sh` valid.
 ./uninstall.sh --target codex --dry-run
 ```
 
+### Review catalog policy changes
+
+Before publishing generated catalogs, run the local, read-only policy review
+against two normalized revision files or revision directories:
+
+```sh
+python scripts/manage-subagents-configs.py policy-diff \
+  --from catalogs/revisions/before \
+  --to catalogs/revisions/after \
+  --format json
+python -m subagents_configs policy-diff \
+  --from catalogs/revisions/before \
+  --to catalogs/revisions/after \
+  --format text
+```
+
+The command reads only the supplied catalog snapshots. It does not inspect
+client homes or environment settings, acquire installer locks, install or
+uninstall anything, or write files. Review role, model, tool, permission,
+destination, source-hash, and authority changes locally; treat any authority
+broadening as a publication gate requiring explicit owner approval. This
+review is not a publication or release action.
+
 The wrappers require Python 3.11 or newer. They use the fixed-PATH `python3`
 as the safe default, pass `-I`, and never install dependencies or download
 anything. OpenCode and Claude Code validation requires the pinned PyYAML

@@ -61,6 +61,25 @@ Reproducible verification means using the hash-locked `requirements-dev.lock`,
 a clean checkout, deterministic temporary homes, and the canonical validator
 from the preceding bootstrap-and-validation block.
 
+## Catalog policy review gate
+
+Before publication, compare the candidate generated catalog revision with the
+previous reviewed revision using the standalone local command:
+
+```sh
+python scripts/manage-subagents-configs.py policy-diff \
+  --from catalogs/revisions/before \
+  --to catalogs/revisions/after \
+  --format json
+```
+
+This is a read-only review gate. It accepts only strict normalized snapshots,
+requires matching target sets and coherent revision identifiers, and never
+reads client homes, environment settings, credentials, or source contents.
+Inspect every reported role/model/tool/permission/destination/source-hash and
+authority change. Any authority broadening requires separate owner approval;
+the command itself does not publish, install, uninstall, or modify files.
+
 The validator performs no installation, download, network access, or
 credential access. Bootstrap a developer environment only with
 `scripts/bootstrap-developer.sh`; runtime wrappers never install packages.

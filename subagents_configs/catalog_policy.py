@@ -12,7 +12,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -444,11 +444,229 @@ def _parse_catalog(raw: dict[str, object]) -> NormalizedCatalog:
     )
 
 
+def _hash_value(value: object, field: str) -> str:
+    if type(value) is not str or not _HASH.fullmatch(value):
+        raise ValueError(f"{field} must be a lowercase SHA-256 value")
+    return value
+
+
+def _native_value_token(value: object) -> str:
+    """Encode native values as safe, deterministic policy identifiers."""
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    return "".join(
+        char if char.isalnum() or char in "_.-" else f"_{ord(char):02x}"
+        for char in encoded
+    )
+
+
+def _parse_generated_catalog(raw: dict[str, object]) -> NormalizedCatalog:
+    """Normalize one checked-in generated catalog without reading its sources."""
+
+    expected = {
+        "schema_version",
+        "target",
+        "order",
+        "include_in_all",
+        "agent_directory",
+        "source_format",
+        "parser",
+        "semantic_validator",
+        "global_instruction",
+        "optional_blocks",
+        "lifecycle_capabilities",
+        "external_lifecycle",
+        "roles",
+        "sources",
+        "policy_sha256",
+        "source_sha256",
+        "catalog_sha256",
+    }
+    if set(raw) != expected or raw.get("schema_version") != 1:
+        raise ValueError("generated catalog has an invalid schema")
+    target = _target(raw["target"])
+    _safe_source_identifier(raw["agent_directory"], "agent_directory")
+    _safe_identifier(raw["source_format"], "source_format")
+    _safe_identifier(raw["parser"], "parser")
+    _safe_identifier(raw["semantic_validator"], "semantic_validator")
+    if type(raw["order"]) is not int or raw["order"] < 0:
+        raise ValueError("generated catalog order is invalid")
+    if type(raw["include_in_all"]) is not bool or raw["external_lifecycle"] is not None:
+        raise ValueError("generated catalog lifecycle metadata is invalid")
+    global_instruction = raw["global_instruction"]
+    if type(global_instruction) is not dict or set(global_instruction) != {
+        "block_id",
+        "filename",
+        "source",
+    }:
+        raise ValueError("generated global instruction is invalid")
+    _safe_identifier(global_instruction["block_id"], "global block id")
+    _safe_path(global_instruction["filename"], "global filename")
+    _safe_source_identifier(global_instruction["source"], "global source")
+    optional_blocks = raw["optional_blocks"]
+    if type(optional_blocks) is not list:
+        raise ValueError("generated optional blocks are invalid")
+    for block in optional_blocks:
+        if type(block) is not dict or set(block) != {
+            "block_id",
+            "relative_path",
+            "source",
+        }:
+            raise ValueError("generated optional block is invalid")
+        _safe_identifier(block["block_id"], "optional block id")
+        _safe_path(block["relative_path"], "optional block path")
+        if block["source"] is not None:
+            _safe_source_identifier(block["source"], "optional block source")
+    lifecycle = raw["lifecycle_capabilities"]
+    if (
+        type(lifecycle) is not list
+        or any(type(item) is not str for item in lifecycle)
+        or lifecycle != sorted(lifecycle)
+    ):
+        raise ValueError("generated lifecycle capabilities are invalid")
+    if raw["external_lifecycle"] is not None:
+        raise ValueError("generated external lifecycle is invalid")
+    _hash_value(raw["policy_sha256"], "policy_sha256")
+    _hash_value(raw["source_sha256"], "source_sha256")
+    revision = _hash_value(raw["catalog_sha256"], "catalog_sha256")
+    if type(raw["roles"]) is not list or type(raw["sources"]) is not list:
+        raise ValueError("generated catalog members have invalid types")
+
+    roles: list[RolePolicy] = []
+    destinations: list[DestinationPolicy] = []
+    role_keys: list[str] = []
+    for item in raw["roles"]:
+        if type(item) is not dict or set(item) != {
+            "identifier",
+            "source",
+            "destination",
+            "optional",
+            "contract",
+            "overlay",
+            "policy_sha256",
+        }:
+            raise ValueError("generated role has an invalid schema")
+        role = _safe_identifier(item["identifier"], "role")
+        role_keys.append(role)
+        _safe_source_identifier(item["source"], "role source")
+        destination = _safe_path(item["destination"], "destination")
+        if type(item["optional"]) is not bool or type(item["contract"]) is not dict:
+            raise ValueError("generated role metadata is invalid")
+        if set(item["contract"]) != {"optional", "read_only"} or any(
+            type(value) is not bool for value in item["contract"].values()
+        ):
+            raise ValueError("generated role contract is invalid")
+        overlay = item["overlay"]
+        if type(overlay) is not dict:
+            raise ValueError("generated role overlay is invalid")
+        allowed_overlay = {
+            Target.CODEX: {
+                "model",
+                "model_reasoning_effort",
+                "sandbox_mode",
+                "network_access",
+            },
+            Target.OPENCODE: {"model", "model_reasoning_effort", "mode", "permission"},
+            Target.CLAUDE_CODE: {
+                "model",
+                "model_reasoning_effort",
+                "permissionMode",
+                "tools",
+            },
+        }[target]
+        if set(overlay) - allowed_overlay:
+            raise ValueError("generated role overlay has unknown fields")
+        _hash_value(item["policy_sha256"], "role policy_sha256")
+        model = _safe_model(overlay.get("model"))
+        effort = overlay.get("model_reasoning_effort")
+        if effort is not None:
+            effort = _safe_identifier(effort, "effort")
+        tools: frozenset[str] = frozenset()
+        permissions: frozenset[str] = frozenset()
+        native: dict[str, object] = {}
+        if target is Target.CLAUDE_CODE:
+            if "tools" in overlay:
+                if type(overlay["tools"]) is not str:
+                    raise ValueError("Claude tools must be a string")
+                parts = tuple(part.strip() for part in overlay["tools"].split(","))
+                tools = frozenset(_safe_identifier(part, "tool") for part in parts)
+                native["tools"] = overlay["tools"]
+            if "permissionMode" in overlay:
+                permission = _safe_identifier(overlay["permissionMode"], "permission")
+                permissions = frozenset({f"permissionMode_{permission}"})
+                native["permissionMode"] = overlay["permissionMode"]
+        elif target is Target.OPENCODE:
+            if "mode" in overlay:
+                _safe_identifier(overlay["mode"], "mode")
+            if "permission" in overlay:
+                permission = overlay["permission"]
+                if type(permission) is not dict:
+                    raise ValueError("OpenCode permission must be an object")
+                encoded: list[str] = []
+                for key, value in permission.items():
+                    _safe_identifier(key, "permission")
+                    if type(value) is str:
+                        _safe_identifier(value, "permission value")
+                        encoded.append(f"{key}_{_native_value_token(value)}")
+                    elif type(value) is dict:
+                        encoded.append(f"{key}_{_native_value_token(value)}")
+                    else:
+                        raise ValueError("OpenCode permission value is invalid")
+                permissions = frozenset(encoded)
+                native["permission"] = permission
+        elif target is Target.CODEX:
+            for field in ("sandbox_mode", "network_access"):
+                if field in overlay:
+                    native[field] = overlay[field]
+        else:  # pragma: no cover - Target is closed
+            raise ValueError("unsupported target")
+        authorities = authorities_from_native(target, native)
+        roles.append(
+            RolePolicy(target, role, model, effort, tools, permissions, authorities)
+        )
+        destinations.append(DestinationPolicy(target, role, destination))
+    if role_keys != sorted(role_keys) or len(set(role_keys)) != len(role_keys):
+        raise ValueError("generated roles must use canonical order")
+
+    source_hashes: dict[str, str] = {}
+    source_keys: list[tuple[str, str]] = []
+    for item in raw["sources"]:
+        if type(item) is not dict or set(item) != {
+            "identifier",
+            "source",
+            "destination",
+            "kind",
+            "source_format",
+            "optional_role",
+            "sha256",
+        }:
+            raise ValueError("generated source has an invalid schema")
+        identifier = _safe_source_identifier(item["identifier"], "source identifier")
+        _safe_source_identifier(item["source"], "source path")
+        if item["destination"] is not None:
+            _safe_path(item["destination"], "source destination")
+        _safe_identifier(item["kind"], "source kind")
+        _safe_identifier(item["source_format"], "source format")
+        if item["optional_role"] is not None:
+            _safe_identifier(item["optional_role"], "optional role")
+        source_hashes[identifier] = _hash_value(item["sha256"], "source sha256")
+        source_keys.append((str(item["kind"]), identifier))
+    if len(source_hashes) != len(raw["sources"]) or source_keys != sorted(source_keys):
+        raise ValueError("generated sources must use canonical order")
+    return NormalizedCatalog(
+        target, revision, tuple(roles), tuple(destinations), source_hashes
+    )
+
+
 def load_catalog(path: str | os.PathLike[str]) -> NormalizedCatalog:
     """Load exactly one strict normalized catalog without following symlinks."""
     catalog_path = Path(path)
     _regular_path(catalog_path)
-    return _parse_catalog(_read_json(catalog_path))
+    raw = _read_json(catalog_path)
+    if "sources" in raw or "catalog_sha256" in raw:
+        return _parse_generated_catalog(raw)
+    return _parse_catalog(raw)
 
 
 def load_revision(path: str | os.PathLike[str]) -> tuple[NormalizedCatalog, ...]:
@@ -476,13 +694,144 @@ def load_revision(path: str | os.PathLike[str]) -> tuple[NormalizedCatalog, ...]
     expected = {f"{target.value}.json" for target in Target}
     if names != expected:
         raise ValueError("revision directory is ambiguous")
+    catalog_paths = tuple(revision_path / f"{target.value}.json" for target in Target)
+    raw_catalogs = tuple(_read_json(path) for path in catalog_paths)
     catalogs = tuple(
-        load_catalog(revision_path / f"{target.value}.json") for target in Target
+        _parse_generated_catalog(raw)
+        if "catalog_sha256" in raw
+        else _parse_catalog(raw)
+        for raw in raw_catalogs
     )
     revisions = {catalog.revision for catalog in catalogs}
     if len(revisions) != 1:
-        raise ValueError("revision catalogs disagree on revision")
+        if not all("catalog_sha256" in raw for raw in raw_catalogs):
+            raise ValueError("revision catalogs disagree on revision")
+        revision = _safe_identifier(revision_path.name, "revision")
+        catalogs = tuple(
+            NormalizedCatalog(
+                catalog.target,
+                revision,
+                catalog.roles,
+                catalog.destinations,
+                catalog.source_hashes,
+            )
+            for catalog in catalogs
+        )
     return catalogs
+
+
+def validate_generated_catalogs(
+    root: str | os.PathLike[str],
+) -> tuple[NormalizedCatalog, ...]:
+    """Validate and normalize every checked-in generated target catalog."""
+    catalog_root = Path(root) / "catalogs"
+    loaded = tuple(
+        load_catalog(catalog_root / f"{target.value}.json") for target in Target
+    )
+    if {catalog.target for catalog in loaded} != set(Target):
+        raise ValueError("generated catalog target set is incomplete")
+    if len({catalog.revision for catalog in loaded}) != len(loaded):
+        raise ValueError("generated catalog revisions are not unique")
+    return loaded
+
+
+def _policy_diff_args(argv: Sequence[str]) -> tuple[str, str, Literal["text", "json"]]:
+    if not isinstance(argv, Sequence) or isinstance(argv, (str, bytes)):
+        raise ValueError("policy-diff arguments are invalid")
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(argv):
+        option = argv[index]
+        if type(option) is not str or option not in {"--from", "--to", "--format"}:
+            raise ValueError("policy-diff option is invalid")
+        if option in values or index + 1 >= len(argv):
+            raise ValueError("policy-diff option is missing or duplicated")
+        value = argv[index + 1]
+        if (
+            type(value) is not str
+            or not value
+            or value.startswith("-")
+            or value.startswith("~")
+            or _UNSAFE_TEXT.search(value)
+            or any(part in {".", ".."} for part in value.replace("\\", "/").split("/"))
+        ):
+            raise ValueError("policy-diff option value is unsafe")
+        values[option] = value
+        index += 2
+    if set(values) != {"--from", "--to", "--format"}:
+        raise ValueError("policy-diff requires --from, --to, and --format")
+    if values["--format"] not in {"text", "json"}:
+        raise ValueError("policy-diff format is invalid")
+    return values["--from"], values["--to"], values["--format"]  # type: ignore[return-value]
+
+
+def _change_payload(change: PolicyChange) -> dict[str, object]:
+    return {
+        "kind": change.kind,
+        "target": change.target.value,
+        "role": change.role,
+        "before": change.before,
+        "after": change.after,
+        "authority_broadening": change.authority_broadening,
+    }
+
+
+def run_policy_diff(argv: Sequence[str]) -> str:
+    """Validate, compare, and render a read-only policy-diff invocation."""
+    from_path, to_path, format = _policy_diff_args(argv)
+    before = load_revision(from_path)
+    after = load_revision(to_path)
+    before_targets = {catalog.target for catalog in before}
+    after_targets = {catalog.target for catalog in after}
+    if before_targets != after_targets:
+        raise ValueError("revision target sets do not match")
+    if (
+        len({catalog.revision for catalog in before}) != 1
+        or len({catalog.revision for catalog in after}) != 1
+    ):
+        raise ValueError("revision identifiers are incoherent")
+    reports: list[PolicyChangeReport] = []
+    for target in sorted(before_targets, key=lambda item: item.value):
+        prior = next(catalog for catalog in before if catalog.target is target)
+        current = next(catalog for catalog in after if catalog.target is target)
+        report = compare_catalogs(prior, current)
+        reports.append(report)
+    if not reports:
+        raise ValueError("revision contains no targets")
+    if format == "json":
+        return json.dumps(
+            {
+                "from_revision": reports[0].from_revision,
+                "to_revision": reports[0].to_revision,
+                "reports": [
+                    {
+                        "target": target.value,
+                        "changes": [
+                            _change_payload(change) for change in report.changes
+                        ],
+                    }
+                    for target, report in zip(
+                        sorted(before_targets, key=lambda item: item.value),
+                        reports,
+                        strict=True,
+                    )
+                ],
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+    lines = [f"policy changes: {reports[0].from_revision} -> {reports[0].to_revision}"]
+    for target, report in zip(
+        sorted(before_targets, key=lambda item: item.value), reports, strict=True
+    ):
+        lines.append(f"target={target.value}")
+        for change in report.changes:
+            role = f" role={change.role}" if change.role is not None else ""
+            lines.append(
+                f"{change.kind}{role} before={change.before!r} after={change.after!r} "
+                f"authority_broadening={change.authority_broadening}"
+            )
+    return "\n".join(lines) + "\n"
 
 
 def _native_authority(

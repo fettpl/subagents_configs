@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +18,7 @@ from subagents_configs.catalog_policy import (
     load_catalog,
     load_revision,
     render_policy_report,
+    run_policy_diff,
 )
 from subagents_configs.models import Target
 
@@ -446,6 +449,145 @@ class PolicyDiffTests(unittest.TestCase):
                 ("source_hash", "new", None, "b" * 64),
             },
         )
+
+    def test_generated_catalog_is_normalized_without_reading_sources(self):
+        generated = Path(__file__).resolve().parents[1] / "catalogs" / "codex.json"
+        loaded = load_catalog(generated)
+        self.assertIs(loaded.target, Target.CODEX)
+        self.assertEqual(
+            loaded.revision,
+            "072b9f6c5f7592e0d5de04044de2ff0825ec6f555ef8f2a9cf7e7306b8decb4a",
+        )
+        self.assertEqual(len(loaded.roles), 6)
+        self.assertEqual(
+            len(loaded.source_hashes), len(json.loads(generated.read_text())["sources"])
+        )
+
+    def test_policy_diff_rejects_duplicate_or_abbreviated_options_before_reads(self):
+        missing = Path("/this/path/must/not/be/read")
+        for argv in (
+            [
+                "--from",
+                str(missing),
+                "--from",
+                str(missing),
+                "--to",
+                str(missing),
+                "--format",
+                "json",
+            ],
+            ["--fr", str(missing), "--to", str(missing), "--format", "json"],
+            [
+                "--from",
+                str(missing),
+                "--to",
+                str(missing),
+                "--format",
+                "json",
+                "--unknown",
+            ],
+            ["--from", str(missing), "--to", str(missing), "--format", "json", "--"],
+            [
+                "--from",
+                str(missing.parent / ".." / "unsafe"),
+                "--to",
+                str(missing),
+                "--format",
+                "json",
+            ],
+        ):
+            with self.subTest(argv=argv), self.assertRaises(ValueError):
+                run_policy_diff(argv)
+
+    def test_policy_diff_aggregates_matching_target_sets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            before = root / "before"
+            after = root / "after"
+            before.mkdir()
+            after.mkdir()
+            for target in ("codex", "opencode", "claude-code"):
+                payload = {
+                    "schema_version": 1,
+                    "revision": "before",
+                    "target": target,
+                    "roles": [],
+                    "destinations": [],
+                    "source_hashes": {},
+                }
+                (before / f"{target}.json").write_text(json.dumps(payload))
+                payload["revision"] = "after"
+                (after / f"{target}.json").write_text(json.dumps(payload))
+            rendered = run_policy_diff(
+                ["--from", str(before), "--to", str(after), "--format", "json"]
+            )
+            self.assertEqual(
+                json.loads(rendered),
+                {
+                    "from_revision": "before",
+                    "to_revision": "after",
+                    "reports": [
+                        {"target": "claude-code", "changes": []},
+                        {"target": "codex", "changes": []},
+                        {"target": "opencode", "changes": []},
+                    ],
+                },
+            )
+
+    def test_policy_diff_entrypoints_are_standalone_and_read_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            before = root / "before.json"
+            after = root / "after.json"
+            payload = {
+                "schema_version": 1,
+                "revision": "before",
+                "target": "codex",
+                "roles": [],
+                "destinations": [],
+                "source_hashes": {},
+            }
+            before.write_text(json.dumps(payload))
+            payload["revision"] = "after"
+            after.write_text(json.dumps(payload))
+            args = [
+                "policy-diff",
+                "--from",
+                str(before),
+                "--to",
+                str(after),
+                "--format",
+                "json",
+            ]
+            env = {"PATH": os.environ["PATH"], "HOME": str(root / "must-not-be-read")}
+            script = (
+                Path(__file__).resolve().parents[1]
+                / "scripts"
+                / "manage-subagents-configs.py"
+            )
+            result = subprocess.run(  # noqa: S603
+                [sys.executable, str(script), *args],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(result.stdout)["reports"],
+                [{"target": "codex", "changes": []}],
+            )
+            result = subprocess.run(  # noqa: S603
+                [sys.executable, "-m", "subagents_configs", *args],
+                capture_output=True,
+                text=True,
+                env=env,
+                cwd=Path(__file__).resolve().parents[1],
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(result.stdout)["reports"],
+                [{"target": "codex", "changes": []}],
+            )
 
 
 if __name__ == "__main__":
