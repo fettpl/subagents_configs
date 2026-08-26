@@ -16,7 +16,12 @@ from subagents_configs.state import (
     load_manifest,
 )
 from subagents_configs.targets import descriptor_for
-from tests.helpers import planning_repository, planning_request, private_tempdir
+from tests.helpers import (
+    planning_repository,
+    planning_request,
+    private_tempdir,
+    replace_file_with_same_content_new_inode,
+)
 
 
 class _FailBefore:
@@ -348,10 +353,7 @@ class TransactionInstallTests(unittest.TestCase):
                 if self.done:
                     return
                 self.done = True
-                content = target.read_bytes()
-                target.unlink()
-                target.write_bytes(content)
-                target.chmod(0o644)
+                replace_file_with_same_content_new_inode(target)
 
         with self.assertRaises(transaction.TransactionError):
             transaction.apply_transaction(plan, failure_injector=ReplaceBeforeApply())
@@ -1733,10 +1735,7 @@ class TransactionInstallTests(unittest.TestCase):
 
         fixture = self._cleanup_fixture()
         home, _journal, journal_path, _identity, _evidence, backups = fixture
-        content = backups[0].read_bytes()
-        backups[0].unlink()
-        backups[0].write_bytes(content)
-        backups[0].chmod(0o600)
+        replace_file_with_same_content_new_inode(backups[0])
         with self.assertRaises(transaction.IncompleteRollbackError):
             transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
         self.assertTrue(journal_path.exists())
@@ -1834,10 +1833,7 @@ class TransactionInstallTests(unittest.TestCase):
         with patch.object(transaction, "_write_journal", side_effect=crash_after_write):
             with self.assertRaises(_SimulatedCleanupCrash):
                 self._cleanup(fixture)
-        content = backups[0].read_bytes()
-        backups[0].unlink()
-        backups[0].write_bytes(content)
-        backups[0].chmod(0o600)
+        replace_file_with_same_content_new_inode(backups[0])
         with self.assertRaises(transaction.IncompleteRollbackError):
             transaction.recover_incomplete_journal(home, descriptor_for(Target.CODEX))
         self.assertTrue(journal_path.exists())
@@ -2090,10 +2086,7 @@ class TransactionInstallTests(unittest.TestCase):
             / ".subagents_configs/backups"
             / f"commitment-{nonce}-progress-a"
         )
-        content = marker.read_bytes()
-        marker.unlink()
-        marker.write_bytes(content)
-        marker.chmod(0o600)
+        replace_file_with_same_content_new_inode(marker)
         with self.assertRaises((transaction.IncompleteRollbackError, ValueError)):
             transaction.recover_participants(homes)
         self.assertTrue(journal_paths[Target.OPENCODE].exists())
@@ -2116,11 +2109,7 @@ class TransactionInstallTests(unittest.TestCase):
             if operation.identifier == "code-explorer"
         )
         target = home / "agents/code-explorer.toml"
-        content = target.read_bytes()
-        mode = stat.S_IMODE(target.stat().st_mode)
-        target.unlink()
-        target.write_bytes(content)
-        target.chmod(mode)
+        replace_file_with_same_content_new_inode(target)
         replacement = transaction.capture_evidence(target, "replacement target")
         operations = tuple(
             replace(operation, expected_after_evidence=replacement)
@@ -2177,11 +2166,7 @@ class TransactionInstallTests(unittest.TestCase):
         )
         operation = journal.operations[position]
         target = transaction._path_for_journal_operation(home, descriptor, operation)
-        content = target.read_bytes()
-        mode = stat.S_IMODE(target.stat().st_mode)
-        target.unlink()
-        target.write_bytes(content)
-        target.chmod(mode)
+        replace_file_with_same_content_new_inode(target)
         replacement = transaction.capture_evidence(target, "replacement target")
         altered = replace(
             journal,
@@ -2573,11 +2558,7 @@ class TransactionInstallTests(unittest.TestCase):
         )
         operation = journal.operations[position]
         self.assertEqual(operation.status, "rolled-back")
-        content = target.read_bytes()
-        mode = stat.S_IMODE(target.stat().st_mode)
-        target.unlink()
-        target.write_bytes(content)
-        target.chmod(mode)
+        replace_file_with_same_content_new_inode(target)
         replacement = transaction.capture_evidence(target, "replacement target")
         altered = replace(
             journal,
@@ -2614,11 +2595,7 @@ class TransactionInstallTests(unittest.TestCase):
             if operation.identifier == "code-explorer"
         )
         target = home / "agents/code-explorer.toml"
-        content = target.read_bytes()
-        mode = stat.S_IMODE(target.stat().st_mode)
-        target.unlink()
-        target.write_bytes(content)
-        target.chmod(mode)
+        replace_file_with_same_content_new_inode(target)
         replacement = transaction.capture_evidence(target, "replacement target")
         altered = replace(
             journal,
@@ -2702,10 +2679,7 @@ class TransactionInstallTests(unittest.TestCase):
             if transaction.capture_evidence(path, "cleanup marker")
             == journal.cleanup_commitment_evidence[1]
         )
-        content = marker.read_bytes()
-        marker.unlink()
-        marker.write_bytes(content)
-        marker.chmod(0o600)
+        replace_file_with_same_content_new_inode(marker)
         replacement = transaction.capture_evidence(marker, "replacement marker")
         altered = replace(
             journal,
@@ -2742,10 +2716,7 @@ class TransactionInstallTests(unittest.TestCase):
         journal = load_journal(home, descriptor)
         nonce = journal.transaction_id.rsplit("-", 1)[0]
         marker = home / ".subagents_configs/backups" / f"commitment-{nonce}"
-        content = marker.read_bytes()
-        marker.unlink()
-        marker.write_bytes(content)
-        marker.chmod(0o600)
+        replace_file_with_same_content_new_inode(marker)
         replacement = transaction.capture_evidence(marker, "replacement anchor")
         altered = replace(
             journal,
