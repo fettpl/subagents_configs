@@ -370,7 +370,12 @@ def _create_and_publish_home(
             published_result.st_mode
         ):
             raise ValueError("target home must be a private directory")
-        published_binding = _directory_binding(published_result)
+        pathname_binding = _directory_binding(published_result)
+        descriptor_binding = _directory_binding(os.fstat(descriptor))
+        if pathname_binding != descriptor_binding:
+            published_binding = descriptor_binding
+            raise ValueError("target home identity changed")
+        published_binding = pathname_binding
         _after_home_publish(normalized)
         final = os.stat(normalized.name, dir_fd=parent_fd, follow_symlinks=False)
         if stat.S_ISLNK(final.st_mode) or not stat.S_ISDIR(final.st_mode):

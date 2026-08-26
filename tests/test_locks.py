@@ -351,6 +351,35 @@ class LockAndEvidenceTests(unittest.TestCase):
                 [entry for entry in parent.iterdir() if ".tmp-" in entry.name], []
             )
 
+    def test_absent_home_replacement_before_post_publish_stat_fails_closed(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            parent = root / "parent"
+            parent.mkdir(mode=0o700)
+            home = parent / "home"
+            detached = parent / "detached"
+            real_stat = locks.os.stat
+            home_stat_calls = 0
+
+            def replace_after_rename(path, *args, **kwargs):
+                nonlocal home_stat_calls
+                if path == "home":
+                    home_stat_calls += 1
+                    if home_stat_calls == 2:
+                        home.rename(detached)
+                        home.mkdir(mode=0o700)
+                return real_stat(path, *args, **kwargs)
+
+            with patch.object(locks.os, "stat", side_effect=replace_after_rename):
+                with self.assertRaises(ValueError):
+                    with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                        pass
+            self.assertEqual(home_stat_calls, 3)
+            self.assertTrue(home.is_dir())
+            self.assertTrue(detached.is_dir())
+            self.assertFalse((home / ".subagents_configs.lock").exists())
+            self.assertFalse((detached / ".subagents_configs.lock").exists())
+
     def test_home_and_ancestor_symlinks_are_rejected_without_redirected_lock(self):
         with private_tempdir() as temporary:
             root = Path(temporary)
