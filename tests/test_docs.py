@@ -65,6 +65,78 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertNotIn("security@", lower)
         self.assertIn("not perfect", lower)
 
+    def test_snapshot_and_environment_credential_boundaries_are_explicit(self):
+        text = " ".join(
+            (ROOT / "README.md").read_text(encoding="utf-8").lower().split()
+        )
+        validation = text.split("validation runs only through:", 1)[1].split(
+            "on macos,", 1
+        )[0]
+
+        for token in (
+            "snapshot exclusions",
+            "explicit credential paths",
+            "not generically detected",
+            "credential-bearing environment variables",
+            "filtered",
+            "child environment",
+        ):
+            self.assertIn(token, validation)
+        self.assertRegex(
+            validation,
+            r"snapshot exclusions.{0,100}explicit credential paths",
+        )
+        self.assertRegex(
+            validation,
+            r"proxy.{0,100}credential-bearing environment variables"
+            r".{0,100}filtered.{0,100}child environment",
+        )
+        self.assertRegex(
+            validation,
+            r"`token`.{0,80}`secret`.{0,80}`password`"
+            r".{0,80}`credential`.{0,80}`key`.{0,80}not generically detected",
+        )
+        self.assertNotRegex(validation, r"names containing.{0,100}excluded")
+
+    def test_security_guidance_discloses_final_name_primitive_race(self):
+        text = " ".join(
+            (ROOT / "SECURITY.md").read_text(encoding="utf-8").lower().split()
+        )
+        technical = text.split("## technical controls and limitations", 1)[1].split(
+            "## reporting a concern", 1
+        )[0]
+
+        for token in (
+            "descriptor-relative pinning",
+            "before/after evidence",
+            "persistent locks",
+            "cooperative installer clients",
+            "python/posix",
+            "inode-conditional `unlink`/`rmdir`",
+            "non-cooperative actor",
+            "race the parent",
+            "final evidence proof",
+            "immediately before",
+            "trusted `unlink`/`rmdir` primitive",
+            "replacement",
+            "unowned final entry",
+        ):
+            self.assertIn(token, technical)
+        self.assertRegex(
+            technical,
+            r"non-cooperative actor.{0,100}race the parent",
+        )
+        self.assertRegex(
+            technical,
+            r"after the final evidence proof.{0,100}"
+            r"immediately before the trusted `unlink`/`rmdir` primitive",
+        )
+        self.assertRegex(
+            technical,
+            r"(?:may|could) remove.{0,100}(?:replacement|unowned final entry)",
+        )
+        self.assertNotRegex(technical, r"`unlink`/`rmdir`.{0,100}overwrite")
+
     def test_release_guidance_keeps_governance_manual(self):
         text = (ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
         lower = text.lower()

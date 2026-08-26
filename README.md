@@ -446,9 +446,11 @@ environment, private `HOME` and caches, deterministic locale, and Git settings
 that disable global/system configuration and prompts. This is an explicit
 path policy, not arbitrary secret-content detection: do not commit secrets
 under unrecognized names and do not place secrets in validation inputs.
-These path-name comparisons are case-insensitive.
-Proxy variables, credential-bearing names, SSH-agent sockets, and names
-containing `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, or `KEY` are excluded.
+Snapshot exclusions are limited to the explicit credential paths listed above;
+`TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, or `KEY` substrings are not
+generically detected. Those explicit path comparisons are case-insensitive.
+Proxy and credential-bearing environment variables are filtered from the child
+environment, including SSH-agent socket variables.
 The original worktree fingerprint and status are checked after every child
 failure, timeout, mutation, or cleanup failure.
 

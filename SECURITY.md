@@ -67,12 +67,20 @@ before the requested command starts; there is no unsandboxed fallback.
 The snapshot credential policy is an explicit path policy, not arbitrary
 secret-content detection; do not commit secrets under unrecognized names or
 place them in validation inputs. These path-name comparisons are
-case-insensitive. These controls are not perfect sandboxing. A
-validation dependency may still
-contain a vulnerability, and client behavior can change. Do not place secrets
-in prompts, repository files, fixtures, logs, or issue reports. Do not grant
-network, credential, external-directory, or write authority merely to make a
-check convenient. Inspect target paths, state, journals, backups, symlinks,
+case-insensitive. Descriptor-relative pinning and before/after evidence detect
+swaps around mutations, and persistent locks serialize cooperative installer
+clients. However, a non-cooperative actor able to race the parent can swap the
+final pathname after the final evidence proof and immediately before the
+trusted `unlink`/`rmdir` primitive. Python/POSIX offers no portable
+inode-conditional `unlink`/`rmdir`; in that residual window, the primitive may
+remove a replacement or otherwise unowned final entry selected by the swapped
+pathname. This is a limitation of the accepted final filesystem primitive; it
+does not remove the other containment, no-following, ownership, or evidence
+checks. These controls are not perfect sandboxing. A validation dependency may
+still contain a vulnerability, and client behavior can change. Do not place
+secrets in prompts, repository files, fixtures, logs, or issue reports. Do not
+grant network, credential, external-directory, or write authority merely to
+make a check convenient. Inspect target paths, state, journals, backups, symlinks,
 hard links, and Git status before and after sensitive operations.
 
 Never use `sudo`, download-and-execute installers, or unreviewed shell snippets.
