@@ -8,6 +8,7 @@ maps native capability declarations, compares them, and renders safe reports.
 from __future__ import annotations
 
 import enum
+import hashlib
 import json
 import os
 import re
@@ -45,6 +46,12 @@ _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@+-]*$")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _UNSAFE_TEXT = re.compile(r"[\x00-\x1f\x7f]")
+_LIFECYCLE_AUTHORITIES: dict[str, frozenset[AuthorityCapability]] = {
+    "file": frozenset({AuthorityCapability.FILESYSTEM_WRITE}),
+    "block": frozenset({AuthorityCapability.FILESYSTEM_WRITE}),
+    "manifest": frozenset({AuthorityCapability.FILESYSTEM_WRITE}),
+    "runtime": frozenset({AuthorityCapability.FILESYSTEM_WRITE}),
+}
 
 
 def _safe_identifier(value: object, field: str) -> str:
@@ -519,6 +526,13 @@ def _hash_value(value: object, field: str) -> str:
     return value
 
 
+def _canonical_hash(value: object) -> str:
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _native_value_token(value: object) -> str:
     """Encode native values as safe, deterministic policy identifiers."""
     encoded = json.dumps(
@@ -588,17 +602,41 @@ def _parse_generated_catalog(raw: dict[str, object]) -> NormalizedCatalog:
         if block["source"] is not None:
             _safe_source_identifier(block["source"], "optional block source")
     lifecycle = raw["lifecycle_capabilities"]
-    if (
-        type(lifecycle) is not list
-        or any(type(item) is not str for item in lifecycle)
-        or lifecycle != sorted(lifecycle)
-    ):
+    from .targets import capability_for
+
+    expected_lifecycle = tuple(sorted(capability_for(target).lifecycle_capabilities))
+    if type(lifecycle) is not list or tuple(lifecycle) != expected_lifecycle:
+        raise ValueError("generated lifecycle capabilities are invalid")
+    try:
+        lifecycle_authorities = tuple(
+            _LIFECYCLE_AUTHORITIES[item] for item in lifecycle
+        )
+    except (KeyError, TypeError) as exc:
+        raise ValueError("generated lifecycle capabilities are invalid") from exc
+    if any(not capabilities for capabilities in lifecycle_authorities):
         raise ValueError("generated lifecycle capabilities are invalid")
     if raw["external_lifecycle"] is not None:
         raise ValueError("generated external lifecycle is invalid")
+    expected_optional_blocks = [
+        {
+            "block_id": block.block_id,
+            "relative_path": block.relative_path.as_posix(),
+            "source": block.source.as_posix() if block.source else None,
+        }
+        for block in capability_for(target).optional_blocks
+    ]
+    if optional_blocks != expected_optional_blocks:
+        raise ValueError("generated optional blocks are not canonical")
     _hash_value(raw["policy_sha256"], "policy_sha256")
     _hash_value(raw["source_sha256"], "source_sha256")
-    revision = _hash_value(raw["catalog_sha256"], "catalog_sha256")
+    catalog_hash = _hash_value(raw["catalog_sha256"], "catalog_sha256")
+    body_without_hash = dict(raw)
+    body_without_hash.pop("catalog_sha256")
+    if _canonical_hash(body_without_hash) != catalog_hash:
+        raise ValueError("generated catalog hash does not match content")
+    if _canonical_hash(raw["sources"]) != raw["source_sha256"]:
+        raise ValueError("generated source hash does not match sources")
+    revision = catalog_hash
     if type(raw["roles"]) is not list or type(raw["sources"]) is not list:
         raise ValueError("generated catalog members have invalid types")
 
@@ -647,6 +685,8 @@ def _parse_generated_catalog(raw: dict[str, object]) -> NormalizedCatalog:
         if set(overlay) - allowed_overlay:
             raise ValueError("generated role overlay has unknown fields")
         _hash_value(item["policy_sha256"], "role policy_sha256")
+        if _canonical_hash(overlay) != item["policy_sha256"]:
+            raise ValueError("generated role policy hash does not match overlay")
         model = _safe_model(overlay.get("model"))
         effort = overlay.get("model_reasoning_effort")
         if effort is not None:

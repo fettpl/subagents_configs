@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -34,6 +35,27 @@ def catalog(*, roles=(), destinations=(), source_hashes=None, revision="before")
 
 
 class PolicyDiffTests(unittest.TestCase):
+    @staticmethod
+    def _generated_payload(target="codex"):
+        path = Path(__file__).resolve().parents[1] / "catalogs" / f"{target}.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _refresh_catalog_hash(payload):
+        body = dict(payload)
+        body.pop("catalog_sha256", None)
+        payload["catalog_sha256"] = hashlib.sha256(
+            json.dumps(
+                body, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode()
+        ).hexdigest()
+
+    def _load_mutated_generated(self, payload):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "catalog.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            return load_catalog(path)
+
     def test_compare_reports_each_policy_dimension(self):
         before_role = RolePolicy(
             target=Target.CODEX,
@@ -597,6 +619,55 @@ class PolicyDiffTests(unittest.TestCase):
         self.assertEqual(
             len(loaded.source_hashes), len(json.loads(generated.read_text())["sources"])
         )
+
+    def test_generated_catalog_rejects_stale_catalog_hash_after_model_mutation(self):
+        payload = self._generated_payload()
+        payload["roles"][0]["overlay"]["model"] = "gpt-5.6-sol"
+        with self.assertRaises(ValueError):
+            self._load_mutated_generated(payload)
+
+    def test_generated_catalog_rejects_stale_role_and_source_component_hashes(self):
+        role_payload = self._generated_payload()
+        role_payload["roles"][0]["policy_sha256"] = "a" * 64
+        self._refresh_catalog_hash(role_payload)
+        with self.assertRaises(ValueError):
+            self._load_mutated_generated(role_payload)
+
+        source_payload = self._generated_payload()
+        source_payload["sources"][0]["sha256"] = "b" * 64
+        self._refresh_catalog_hash(source_payload)
+        with self.assertRaises(ValueError):
+            self._load_mutated_generated(source_payload)
+
+    def test_generated_catalog_rejects_unknown_or_changed_lifecycle_capabilities(self):
+        for mutation in (
+            lambda values: [*values, "package"],
+            lambda values: values[:-1],
+            lambda values: [*values, values[0]],
+            lambda values: list(reversed(values)),
+        ):
+            with self.subTest(mutation=mutation):
+                payload = self._generated_payload()
+                payload["lifecycle_capabilities"] = mutation(
+                    payload["lifecycle_capabilities"]
+                )
+                self._refresh_catalog_hash(payload)
+                with self.assertRaises(ValueError):
+                    self._load_mutated_generated(payload)
+
+    def test_generated_catalog_rejects_duplicate_or_noncanonical_optional_blocks(self):
+        original = self._generated_payload()
+        mutations = (
+            original["optional_blocks"] + [dict(original["optional_blocks"][0])],
+            list(reversed(original["optional_blocks"])),
+        )
+        for optional_blocks in mutations:
+            with self.subTest(optional_blocks=optional_blocks):
+                payload = self._generated_payload()
+                payload["optional_blocks"] = optional_blocks
+                self._refresh_catalog_hash(payload)
+                with self.assertRaises(ValueError):
+                    self._load_mutated_generated(payload)
 
     def test_all_checked_in_generated_catalogs_normalize(self):
         root = Path(__file__).resolve().parents[1] / "catalogs"

@@ -79,6 +79,11 @@ reads client homes, environment settings, credentials, or source contents.
 Inspect every reported role/model/tool/permission/destination/source-hash and
 authority change. Any authority broadening requires separate owner approval;
 the command itself does not publish, install, uninstall, or modify files.
+Generated catalog hashes are checked against their canonical metadata, role
+overlay hashes, and source inventory hash. The shared `policy_sha256` input
+cannot be reconstructed from one catalog because it includes the generator's
+full role-policy table; its value is nevertheless cryptographically bound by
+the verified top-level catalog hash and remains covered by the generator check.
 
 The validator performs no installation, download, network access, or
 credential access. Bootstrap a developer environment only with
