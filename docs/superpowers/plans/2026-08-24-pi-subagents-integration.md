@@ -14,6 +14,7 @@
 
 - Plan 2 starts only after Plan 1 has delivered the authoritative capability registry and descriptor-backed transaction work; Pi must consume those seams rather than bypassing them.
 - Pi is selected only by explicit `--target pi`; `--all` remains exactly Codex, OpenCode, and Claude Code and never invokes Pi, npm, Node, network, or third-party code.
+- Profiles are declarative defaults only: a profile target list containing `pi` is explicitly rejected and can never select Pi. The closed optional top-level `target_defaults` object (TOML `[target_defaults.pi]`) may contain only the Pi key and, under it, exactly `home`; it is separate from both `targets` and `homes`, and it may be consumed only after the request already contains the explicit CLI `--target pi`. It never adds Pi to a request, including through `--all`, and all other Pi authority remains CLI-only.
 - The first supported package is exactly `npm:pi-subagents@0.56.0`; changing it requires a reviewed source, package inventory, dependency, compatibility, and release-note change.
 - User-scope support follows `PI_CODING_AGENT_DIR`, defaulting to `~/.pi/agent`; project scope is not implemented.
 - Non-dry package installation requires explicit `--consent-third-party-code` and `--consent-network`, exact package identity, an absolute verified Pi executable whose identity is rechecked at each spawn, exact tested Pi 0.84.1 compatibility evidence, and safe read-only inspection of settings/package state. Dry-run does not ask for consent because it executes no third-party code or network action; it reports the consents that a later real install would require.
@@ -29,11 +30,12 @@
 - `quick-implementer` and `implementer` receive explicit read/write/Bash lists; commit, push, credential, network, and scope restrictions remain visible and the parent session retains final authority.
 - `commit-pusher` retains separate explicit commit-and-push authorization, no-force-push, and no-credential-change requirements.
 - Pi roles inherit the active parent model. For `pi-subagents@0.56.0`, the valid native representation is omission of the `model` frontmatter key; normalized policy reports this as `model: inherit`. No Codex/OpenCode model identifier, `thinking`, fallback model, or explicit mapping is introduced in the first release. Such mappings require a later compatibility-matrix change backed by live registry evidence.
+- To preserve that inheritance guarantee in the first release, reject both global `subagents.defaultModel`/`subagents.defaultThinking` and every per-role `model`/`fallbackModels`/`thinking` value for managed roles. Generated frontmatter omits `model`, `fallbackModels`, and `thinking`; it never writes an inherited-model sentinel or a copied parent identifier.
 - The third-party bundled inventory (`scout`, `researcher`, `worker`, `reviewer`, `oracle`, `delegate`) remains visibly separate from the repository-managed inventory. Exactly five repository roles install by default and `commit-pusher` is the sixth only by opt-in; tests never misreport bundled roles as repository roles.
 - Effective discovery, collisions, overrides, tools, extensions, skills, model, thinking, context inheritance, and source identity are validated; user settings never silently widen a repository-managed role.
 - Optional Pi global routing is absent by default and, when explicitly enabled through the existing routing opt-in, uses one managed block in global `APPEND_SYSTEM.md` under the selected Pi home.
 - Repository and package metadata, prompts, client output, diagnostics, state, and tests are untrusted data; no artifact records credentials, raw environment values, private file contents, full prompts, provider transcripts, or unredacted package-manager output.
-- Windows remains fail-closed and unsupported until a separate approved design, with a behavioral selection/lifecycle test. Offline real Pi smoke with exact Pi 0.84.1 is mandatory before claiming/releasing Pi support. Provider smoke is optional supplementary evidence, separately authorized and never run by default; it becomes mandatory only for a release claim that explicitly includes live provider interoperability, and it never records credentials or full transcripts.
+- Windows remains fail-closed and unsupported until a separate approved design, with a behavioral selection/lifecycle test. Tasks 1–10 keep the Pi compatibility row `supported: false` and label Pi unreleased; only Task 11 may transition it to `supported: true` after mandatory offline real-Pi smoke with exact Pi 0.84.1 and the complete release gate. Provider smoke is optional supplementary evidence, separately authorized and never run by default; it becomes mandatory only for a release claim that explicitly includes live provider interoperability, and it never records credentials or full transcripts.
 - Every task uses TDD, focused tests, the relevant full suite, static checks, clean-tree verification, and a reviewable commit; no task weakens fail-closed behavior or automatically rolls back Pi-owned package state.
 - Documentation and catalog/compatibility contract tests change in the same task as behavior; intermediate docs label Pi as unreleased until the mandatory Task 11 release gate passes.
 
@@ -67,6 +69,10 @@ The exact public selection signatures are `capability_for(target: Target) -> Tar
 # subagents_configs/transaction.py
 def apply_transaction(plan: TransactionPlan, *, failure_injector: FailureInjector | None = None) -> None:
     """Apply an already validated local transaction while target locks are held."""
+```
+
+```python
+# subagents_configs/recovery.py
 
 def recover_transaction(homes: Mapping[Target, Path], targets: tuple[Target, ...]) -> None:
     """Recover the exact selected participant set through the public recovery seam."""
@@ -87,7 +93,7 @@ Files created by this plan:
 - `pi/agents/code-explorer.md`, `pi/agents/code-reviewer.md`, `pi/agents/code-validator.md`, `pi/agents/quick-implementer.md`, `pi/agents/implementer.md`, `pi/agents/commit-pusher.md`: Pi-native Markdown agents with YAML frontmatter and preserved repository role names.
 - `pi/extensions/run-validation.ts`: target-scoped Pi extension that registers the validator’s `run_validation` tool without Bash.
 - `pi/package-policy.json`: reviewed identity, manifest, dependency, lifecycle, and compatibility expectations for `pi-subagents` 0.56.0.
-- `tests/fixtures/pi-subagents-0.56.0-package.json`, `tests/fixtures/pi-subagents-0.56.0-package-lock.json`: reviewed upstream metadata/provenance fixtures pinned by policy hashes.
+- `tests/fixtures/pi-subagents-0.56.0-package.json`, `tests/fixtures/pi-subagents-0.56.0-package-lock.json`: reviewed upstream metadata/provenance fixtures pinned by policy hashes; these are immutable source-evidence fixtures, not installed-state evidence.
 - `rules/PI_SUBAGENT_ROUTING.md`: Pi-native routing source used only by the explicit global-routing opt-in.
 - `subagents_configs/pi_catalog.py`: Pi source parsing, placeholder rendering, native semantic validation, and effective catalog contracts.
 - `subagents_configs/pi_package.py`: absolute executable/runtime checks, consent, no-follow settings/package evidence, durable receipt codec, official Pi package commands, and bounded redacted subprocess results.
@@ -101,9 +107,9 @@ Files created by this plan:
 Files modified by this plan:
 
 - `subagents_configs/models.py`, `subagents_configs/targets.py`, `subagents_configs/cli.py`, `subagents_configs/locks.py`: Pi target, request consent/executable/home fields, registry-backed explicit target selection, and direct reuse of Plan 1's persistent lock API.
-- `subagents_configs/formats.py`, `subagents_configs/planning.py`, `subagents_configs/orchestrator.py`, `subagents_configs/transaction.py`, `subagents_configs/state.py`, `subagents_configs/errors.py`: Pi source/lifecycle validation, separate external phase, safe diagnostics, manifest/state identity, and phase-boundary handling.
-- `catalogs/client-compatibility.json`, `subagents_configs/compatibility.py`, `tests/test_compatibility.py`: transition the predeclared Pi row from unsupported to exact tested Pi 0.84.1/package 0.56.0 support without weakening other client rows.
-- `subagents_configs/profiles.py`, `tests/test_profiles.py`: allow profile defaults for an explicitly CLI-selected Pi target while forbidding profiles from selecting Pi, storing consents, or authorizing package lifecycle.
+- `subagents_configs/formats.py`, `subagents_configs/planning.py`, `subagents_configs/orchestrator.py`, `subagents_configs/transaction.py`, `subagents_configs/recovery.py`, `subagents_configs/state.py`, `subagents_configs/errors.py`: Pi source/lifecycle validation, separate external phase, safe diagnostics, manifest/state identity, public recovery seam, and phase-boundary handling.
+- `catalogs/client-compatibility.json`, `subagents_configs/compatibility.py`, `tests/test_compatibility.py`: keep the predeclared Pi row unreleased/`supported: false` through Task 10, then transition it only in Task 11 after exact Pi 0.84.1/package 0.56.0 evidence and mandatory release smoke, without weakening other client rows.
+- `subagents_configs/models.py`, `subagents_configs/profiles.py`, `tests/test_profiles.py`: add immutable `TargetProfileDefaults`/`ProfileRequest.target_defaults` with the closed Pi-only `home` field; consume it only for an explicitly CLI-selected Pi target while rejecting profile target selection, consents, executable paths, network/package lifecycle authority, and unknown fields.
 - `subagents_configs/catalog_policy.py`, `scripts/generate-catalogs.py`, `scripts/validate-catalogs.py`, `tests/test_policy_diff.py`: generate, validate, and compare the Pi projection through Plan 1's read-only catalog-policy feature.
 - `tests/test_targets.py`, `tests/test_cli.py`, `tests/test_catalogs.py`, `tests/test_planning.py`, `tests/test_transaction_install.py`, `tests/test_transaction_uninstall.py`, `tests/test_readme_contract.py`, `tests/test_docs.py`, `tests/test_security_static.py`, `tests/test_ci.py`: existing contracts extended for Pi and the package/phase boundary.
 - `README.md`, `SECURITY.md`, `docs/RELEASING.md`, `.github/workflows/ci.yml`: user trust boundary, exact paths/commands/consent, release evidence, and opt-in smoke wiring.
@@ -136,7 +142,7 @@ Files tested without modification:
 
 **Interfaces:**
 - Consumes: Plan 1 `TargetCapability`, `capability_for()`, `targets_for_request()`, `locked_target_homes()`, and client-compatibility seams from the prerequisite gate.
-- Produces: `Target.PI`, a Pi `TargetDescriptor`, and a `Request` carrying `pi_executable: Path | None`, `pi_agent_dir: Path | None`, `consent_third_party_code: bool`, `consent_network: bool`, and `remove_pi_package: bool`; `--all` still returns only `(CODEX, OPENCODE, CLAUDE_CODE)`.
+- Produces: `Target.PI`, a Pi `TargetDescriptor`, and a backward-compatible `Request` carrying the existing fields (including `client_versions`) plus defaulted Pi-only fields `pi_executable: Path | None`, `consent_third_party_code: bool`, `consent_network: bool`, and `remove_pi_package: bool`; `homes[Target.PI]` is the sole Pi home source of truth and `--all` still returns only `(CODEX, OPENCODE, CLAUDE_CODE)`.
 
 - [ ] **Step 1: Write RED target and parser tests**
 
@@ -168,7 +174,53 @@ def test_pi_install_rejects_missing_consents_or_relative_executable(self):
 
 Change the consent test to apply only when `dry_run` is false. Add `test_pi_dry_run_does_not_require_or_record_consent`, which accepts an absolute Pi executable without either consent and reports both required consents in the plan. Also assert that consent flags, `--pi-executable`, and `--remove-pi-package` are rejected for non-Pi targets; uninstall accepts no package-removal request unless Pi is explicitly selected; and `platform_name="win32"` rejects Pi before executable/settings/package reads.
 
-Add profile integration tests proving that a profile containing `targets = ["pi"]` cannot select Pi by itself, while explicit CLI `--target pi` may consume matching safe profile defaults such as the Pi home, global-routing opt-in, and optional-role choice. The profile schema must reject Pi executable paths, consent booleans, package-removal flags, or any other external-lifecycle authority; those values remain CLI-only, and a non-dry install still requires the two live consent flags.
+Add profile integration tests for this exact closed safe-default contract. `target_defaults` is an optional top-level object for backward compatibility with profiles that do not use it; unknown top-level keys remain errors. When present, it may contain only `pi`, and `target_defaults.pi` may contain exactly `home`:
+
+```json
+{
+  "schema_version": 1,
+  "operation": "install",
+  "targets": ["codex"],
+  "homes": {"codex": "/Users/example/.codex"},
+  "target_defaults": {"pi": {"home": "/Users/example/.pi/agent"}},
+  "options": {
+    "enable_global_routing": true,
+    "enable_codex_multi_agent": false,
+    "include_commit_pusher": true,
+    "dry_run": false,
+    "dry_run_format": "text"
+  }
+}
+```
+
+The equivalent TOML is:
+
+```toml
+schema_version = 1
+operation = "install"
+targets = ["codex"]
+
+[homes]
+codex = "/Users/example/.codex"
+
+[target_defaults.pi]
+home = "/Users/example/.pi/agent"
+
+[options]
+enable_global_routing = true
+enable_codex_multi_agent = false
+include_commit_pusher = true
+dry_run = false
+dry_run_format = "text"
+```
+
+The profile decoder must materialize immutable `ProfileRequest.target_defaults: Mapping[Target, TargetProfileDefaults]`, reject `targets = ["pi"]` explicitly (not by ignoring it), reject unknown target-default keys, any field besides the exact `home`, relative/non-canonical/symlinked homes, and credential-like or authority fields such as `pi_executable`, consent, network, package removal, `npm`, `node`, or provider values. `target_defaults` is not part of `targets` or `homes`; profile `homes` must still exactly match `profile.targets`.
+
+Add RED tests that bypass JSON/TOML and construct the models directly. `TargetProfileDefaults(home=...)` must reject a string/wrong type, a relative `Path`, noncanonical or traversal-bearing paths, and an existing symlink inspected with `lstat`/no-follow. A normal platform `Path` instance (`PosixPath`/`WindowsPath`) containing a valid normalized absolute non-symlink path passes. Construct `ProfileRequest` with a mutable input mapping, mutate that input afterward, and assert the profile retained an independent immutable copy; item assignment must fail. Also reject a direct `ProfileRequest` mapping whose key is not exactly `Target.PI` or whose value is not exactly `TargetProfileDefaults`. These invariants must live in model `__post_init__` validation so parser bypass cannot weaken them.
+
+Add merge tests proving the precedence for an explicitly selected Pi is `--home pi=PATH > target_defaults.pi.home > PI_CODING_AGENT_DIR > ~/.pi/agent`, while profile-only requests and `--all` ignore Pi defaults and never select Pi. Existing `ProfileOptions.enable_global_routing` and `include_commit_pusher` remain top-level options and are preserved by the merge; they do not participate in target selection and have effect only for targets already present in the effective CLI-selected target set (including an explicitly selected Pi), never adding a target or granting Pi package/executable/consent authority. A non-dry install still requires the two live consent flags.
+
+Add a compatibility test that constructs `Request` using the pre-Pi positional/keyword shape and asserts that `client_versions` remains intact; add an assertion that no `pi_agent_dir` field or parallel Pi-home argument exists and all Pi planning reads `request.homes[Target.PI]`.
 
 - [ ] **Step 2: Run the focused tests and verify RED**
 
@@ -178,11 +230,11 @@ Expected: FAIL because `Target.PI`, Pi request fields, Pi descriptor, consent fl
 
 - [ ] **Step 3: Implement the registry-backed target and exact request validation**
 
-Add `PI = "pi"` to `Target`; add a descriptor with `environment_variable="PI_CODING_AGENT_DIR"`, `default_home="~/.pi/agent"`, `global_filename="APPEND_SYSTEM.md"`, `config_filename=None`, Pi source directory `pi/agents`, `.md` agent suffix, routing source `rules/PI_SUBAGENT_ROUTING.md`, and runtime/extension sources. Do not append Pi to the `include_in_all` set. Parse `--pi-executable`, `--consent-third-party-code`, `--consent-network`, and `--remove-pi-package` with duplicate rejection. Require both consent flags only for non-dry Pi install, require an absolute executable string before any runtime invocation, reject project-scope paths, and preserve precedence `--home pi=PATH > PI_CODING_AGENT_DIR > ~/.pi/agent`. Keep all non-Pi requests byte-for-byte compatible in rendered text.
+Add `PI = "pi"` to `Target`; add a descriptor with `environment_variable="PI_CODING_AGENT_DIR"`, `default_home="~/.pi/agent"`, `global_filename="APPEND_SYSTEM.md"`, `config_filename=None`, Pi source directory `pi/agents`, `.md` agent suffix, routing source `rules/PI_SUBAGENT_ROUTING.md`, and runtime/extension sources. Do not append Pi to the `include_in_all` set. Parse `--pi-executable`, `--consent-third-party-code`, `--consent-network`, and `--remove-pi-package` with duplicate rejection. Require both consent flags only for non-dry Pi install, require an absolute executable string before any runtime invocation, reject project-scope paths, and preserve precedence for an explicitly CLI-selected Pi as `--home pi=PATH > target_defaults.pi.home > PI_CODING_AGENT_DIR > ~/.pi/agent`; profile-only and `--all` requests never consult `target_defaults.pi`. Keep all non-Pi requests byte-for-byte compatible in rendered text.
 
-Extend Plan 1's profile merge only at the existing request seam: the CLI must contain explicit `--target pi` before a profile may contribute Pi-safe defaults, and the profile parser rejects external lifecycle/consent/executable fields as unknown. Neither `--all` nor a profile target list may introduce Pi.
+Extend Plan 1's profile merge only at the existing request seam: add immutable `TargetProfileDefaults(home: Path)` and `ProfileRequest.target_defaults: Mapping[Target, TargetProfileDefaults]` (defaulting to an empty immutable mapping for old profiles). The decoder accepts the optional top-level `target_defaults` only with the exact closed schema above, explicitly rejects `Target.PI` in `profile.targets`, and validates each default home with the same absolute/no-follow/canonical home checks as profile homes. The CLI must contain explicit `--target pi` before `profile.target_defaults[Target.PI]` may contribute the Pi home; merge precedence is `--home` over the safe profile default over environment/default resolution. Neither `--all` nor a profile target list may introduce Pi, and profile options remain limited to the existing `ProfileOptions` fields.
 
-Use these signatures:
+Use these signatures. Append the Pi-only fields after the existing `client_versions` field with defaults (or make only those additions keyword-only if the repository's dataclass convention has moved); existing positional and keyword `Request` construction must continue to work unchanged:
 
 ```python
 @dataclass(frozen=True)
@@ -195,17 +247,70 @@ class Request:
     include_commit_pusher: bool
     dry_run: bool
     dry_run_format: Literal["text", "json"]
-    pi_executable: Path | None
-    pi_agent_dir: Path | None
-    consent_third_party_code: bool
-    consent_network: bool
-    remove_pi_package: bool
+    client_versions: Mapping[str, str] = field(default_factory=dict)
+    pi_executable: Path | None = None
+    consent_third_party_code: bool = False
+    consent_network: bool = False
+    remove_pi_package: bool = False
 
 def _validate_pi_request(request: Request) -> None:
     """Raise CliError before source reads or filesystem mutation."""
 ```
 
-Require both consents only when `request.operation == "install" and not request.dry_run`; dry-run still requires an absolute lexical executable fact but never executes it. Change the Plan 1 compatibility-only Pi row to `supported: true` only with `tested_client_version == "0.84.1"`, `minimum_client_version == "0.84.1"`, `package_source == "npm:pi-subagents@0.56.0"`, `supported_platforms == ["linux", "macos"]`, `scope == "user"`, and all required Pi format/features. The row's `CompatibilityTarget` string now maps to the newly registered `Target.PI`. In dry-run, validate a caller-supplied Plan 1 `--client-version pi=VERSION` when present; otherwise report `runtime_version_evidence="maintained-matrix-only"` and never claim the executable was probed. Non-dry preflight must execute the identity-checked Pi binary and prove exact 0.84.1. Unknown supplied/observed versions, Windows, project scope, or a different package source fail read-only compatibility preflight.
+The corresponding profile model seam is:
+
+```python
+@dataclass(frozen=True)
+class TargetProfileDefaults:
+    home: Path
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "home", _validate_profile_home_path(self.home))
+
+@dataclass(frozen=True)
+class ProfileRequest:
+    schema_version: Literal[1]
+    operation: Literal["install", "uninstall"]
+    targets: tuple[Target, ...]
+    homes: Mapping[Target, Path]
+    options: ProfileOptions
+    target_defaults: Mapping[Target, TargetProfileDefaults] = field(default_factory=dict)
+```
+
+Use one model-level validator for both decoded and direct construction:
+
+```python
+def _validate_profile_home_path(home: Path) -> Path:
+    if not isinstance(home, Path):
+        raise TypeError("profile home must be a Path")
+    raw = os.fspath(home)
+    if not home.is_absolute():
+        raise ValueError("profile home must be absolute")
+    if "\\" in raw or (len(raw) >= 2 and raw[1] == ":"):
+        raise ValueError("profile home must be a POSIX path")
+    if any(ord(character) < 32 or ord(character) == 127 for character in raw):
+        raise ValueError("profile home is unsafe")
+    if raw != "/" and (raw.startswith("//") or raw.endswith("/") or "//" in raw):
+        raise ValueError("profile home is not canonical")
+    if any(component in {".", ".."} for component in raw.split("/")):
+        raise ValueError("profile home contains unsafe lexical components")
+    normalized = Path(os.path.normpath(os.path.abspath(raw)))
+    if home != normalized:
+        raise ValueError("profile home is not canonical")
+    try:
+        evidence = home.lstat()
+    except FileNotFoundError:
+        return home
+    except OSError as exc:
+        raise ValueError("profile home cannot be inspected") from exc
+    if stat.S_ISLNK(evidence.st_mode):
+        raise ValueError("profile home must not be a symlink")
+    return home
+```
+
+`TargetProfileDefaults.__post_init__` calls this validator, so direct construction cannot bypass parsing policy. `ProfileRequest.__post_init__` requires `type(defaults) is TargetProfileDefaults` for every value, defensively revalidates each `defaults.home`, copies and freezes `target_defaults` with `MappingProxyType`, allows only `Target.PI`, rejects `Target.PI` in `targets`, and preserves the invariant that `set(homes) == set(targets)`.
+
+Require both consents only when `request.operation == "install" and not request.dry_run`; dry-run still requires an absolute lexical executable fact but never executes it. Keep the Plan 1 compatibility-only Pi row `supported: false` with an explicit `status: "unreleased"` marker through Tasks 1–10; Task 11 alone may set `supported: true` after the mandatory release smoke and all final gates. When that transition is made, require `tested_client_version == "0.84.1"`, `minimum_client_version == "0.84.1"`, `package_source == "npm:pi-subagents@0.56.0"`, `supported_platforms == ["linux", "macos"]`, `scope == "user"`, and all required Pi format/features. The row's `CompatibilityTarget` string maps to the newly registered `Target.PI`. In dry-run, validate a caller-supplied Plan 1 `--client-version pi=VERSION` when present; otherwise report `runtime_version_evidence="maintained-matrix-only"` and never claim the executable was probed. Non-dry preflight must execute the identity-checked Pi binary and prove exact 0.84.1. Unknown supplied/observed versions, Windows, project scope, or a different package source fail read-only compatibility preflight.
 
 Create the first generated `docs/COMPATIBILITY.md` projection and add a README development-status note in the same task. It must state that the target exists for implementation/testing but is not release-ready until Tasks 2–11, especially mandatory real-Pi smoke, pass; no intermediate commit may imply supported production use.
 
@@ -231,12 +336,12 @@ Commit: `git add subagents_configs/models.py subagents_configs/targets.py subage
 - Modify: `tests/test_security_static.py`
 
 **Interfaces:**
-- Consumes: `Request.pi_executable`, `Request.pi_agent_dir`, the selected Pi descriptor, and the package policy JSON.
+- Consumes: `Request.pi_executable`, `Request.homes[Target.PI]`, the selected Pi descriptor, and the package policy JSON; there is no `Request.pi_agent_dir` field.
 - Produces: `PiRuntimeEvidence`, `PiPackageEvidence`, `PiPackageReceipt`, strict receipt load/store functions, executable identity validation, package inspection, installation, and removal; every subprocess uses an argv tuple and a sanitized result.
 
 - [ ] **Step 1: Write failing package-policy and command-boundary tests**
 
-Create a temporary executable Python fixture that records argv and `PI_CODING_AGENT_DIR`, returns `0.84.1` for `--version`, advertises `install`, `remove`, and `--offline` in `--help`, and mutates only a fixture settings file when the exact official command is received. Test the policy schema against this exact reviewed JSON shape, derived from upstream tag `v0.56.0` (peeled commit `a0e2b9e31de5970215a567e20e2d781bbbddf235`), npm registry metadata, and the tag's package files:
+Create a temporary executable Python fixture that records argv and `PI_CODING_AGENT_DIR`, returns `0.84.1` for `--version`, advertises `install`, `remove`, and `--offline` in `--help`, and mutates only a fixture settings file when the exact official command is received. Invoke `validate_pi_executable(fake_path, agent_dir=validated_agent_dir, execute=True)` and poison the parent environment with conflicting `PI_CODING_AGENT_DIR`, proxy, auth, and token values; assert the child sees only the deterministic allowlist and the explicitly supplied validated agent directory. Test the policy schema against this exact reviewed JSON shape, derived from upstream tag `v0.56.0` (peeled commit `a0e2b9e31de5970215a567e20e2d781bbbddf235`), npm registry metadata, and the tag's package files:
 
 ```json
 {
@@ -258,7 +363,7 @@ Create a temporary executable Python fixture that records argv and `PI_CODING_AG
 }
 ```
 
-Check in the reviewed upstream `package.json` and package-lock root inventory as test fixtures and prove their hashes before deriving policy assertions; fabricated fixture-only evidence is insufficient. Assert that the command builder returns exactly `(pi, "install", "npm:pi-subagents@0.56.0")` and removal returns exactly `(pi, "remove", "npm:pi-subagents")`. The AST/static test forbids executable argv/program names `npm`, `npx`, `node`, `git`, shell APIs, `install.mjs`, and recursive removal while explicitly allowing the inert package-identity string prefix `npm:`. Test wrong name/version, missing manifest fields, dependency or bundled-agent drift, lifecycle scripts, wrong Pi version output, non-absolute path, symlink, directory, executable identity replacement, and non-executable fixtures as failures.
+Check in the reviewed upstream `package.json` and package-lock root inventory as immutable provenance fixtures and prove their policy hashes before deriving assertions; fabricated fixture-only evidence is insufficient. Separately test installed state only from `<agent_dir>/npm/package-lock.json` (the lockfile root dependency entry for `pi-subagents`) and the installed `<agent_dir>/npm/node_modules/pi-subagents/package.json`; never read or trust a `node_modules/**/package-lock.json`, and never substitute the upstream fixture for installed evidence. Assert that the command builder returns exactly `(pi, "install", "npm:pi-subagents@0.56.0")` and removal returns exactly `(pi, "remove", "npm:pi-subagents")`. The AST/static test forbids executable argv/program names `npm`, `npx`, `node`, `git`, shell APIs, `install.mjs`, and recursive removal while explicitly allowing the inert package-identity string prefix `npm:`. Test wrong name/version, missing manifest fields, dependency or bundled-agent drift, lifecycle scripts, wrong Pi version output, non-absolute path, symlink, directory, executable identity replacement, and non-executable fixtures as failures.
 
 - [ ] **Step 2: Run the focused tests and verify RED**
 
@@ -290,6 +395,8 @@ class PiPackageEvidence:
     package_entries: tuple[str, ...]
     status: Literal["absent", "exact", "conflict"]
     exact_pinned_entry: bool
+    installed_lock_path: Path | None
+    installed_lock_root_hash: str | None
     package_manifest_path: Path | None
     manifest_hash: str | None
     package_identity_valid: bool
@@ -307,13 +414,13 @@ class PiPackageReceipt:
     created_exact_entry: bool
 ```
 
-The concrete public functions are `validate_pi_executable(path: Path, execute: bool) -> PiRuntimeEvidence`, `inspect_pi_package_state(agent_dir: Path) -> PiPackageEvidence`, `load_pi_package_receipt(agent_dir: Path) -> PiPackageReceipt | None`, `store_pi_package_receipt(agent_dir: Path, receipt: PiPackageReceipt) -> None`, `install_pi_package(executable: PiRuntimeEvidence, agent_dir: Path, consent_third_party_code: bool, consent_network: bool) -> PiPackageReceipt`, and `remove_pi_package(executable: PiRuntimeEvidence, agent_dir: Path, receipt: PiPackageReceipt) -> PiPackageReceipt`.
+The concrete public functions are `validate_pi_executable(path: Path, *, agent_dir: Path, execute: bool) -> PiRuntimeEvidence`, `inspect_pi_package_state(agent_dir: Path) -> PiPackageEvidence`, `load_pi_package_receipt(agent_dir: Path) -> PiPackageReceipt | None`, `store_pi_package_receipt(agent_dir: Path, receipt: PiPackageReceipt) -> None`, `install_pi_package(executable: PiRuntimeEvidence, agent_dir: Path, consent_third_party_code: bool, consent_network: bool) -> PiPackageReceipt`, and `remove_pi_package(executable: PiRuntimeEvidence, agent_dir: Path, receipt: PiPackageReceipt) -> PiPackageReceipt`. The caller must pass the already validated normalized `request.homes[Target.PI]` as `agent_dir`; the executable validator never discovers a home from ambient environment or process cwd.
 
-For `execute=False`, validate only absolute lexical form, no-follow `lstat` regular-file type, execute mode, and executable identity/hash; never spawn Pi. For `execute=True`, revalidate that identity immediately before and after `(str(path), "--offline", "--version")` and `(str(path), "--offline", "--help")`, with `PI_CODING_AGENT_DIR` set to the normalized agent directory and a fixed environment allowlist. Parse version output only as exact `0.84.1`; map every other value to `PI_RUNTIME_INCOMPATIBLE`. Capture at most 4096 bytes, redact paths, environment-looking assignments, URLs, tokens, and package-manager output, and expose only typed diagnostic code/context.
+For `execute=False`, validate the supplied normalized absolute `agent_dir`, then validate only absolute lexical form, no-follow `lstat` regular-file type, execute mode, and executable identity/hash; never spawn Pi. For `execute=True`, revalidate that identity immediately before and after `(str(path), "--offline", "--version")` and `(str(path), "--offline", "--help")`, with `PI_CODING_AGENT_DIR` set deterministically to that validated `agent_dir`. Construct the child environment from a fixed allowlist rather than inheriting ambient variables; tests poison the parent environment and assert that only approved values, including the supplied `PI_CODING_AGENT_DIR`, reach the child. Parse version output only as exact `0.84.1`; map every other value to `PI_RUNTIME_INCOMPATIBLE`. Capture at most 4096 bytes, redact paths, environment-looking assignments, URLs, tokens, and package-manager output, and expose only typed diagnostic code/context.
 
-Read `<agent_dir>/settings.json`, `<agent_dir>/extensions/subagent/config.json` when present, the package-store directory, `package.json`, and package lock through no-follow, regular-file/directory, containment, owner, private-mode, and descriptor-identity checks. Reject object-form package entries, duplicate package identities, project settings, custom `npmCommand`, package/agent overrides that widen managed roles, and any unsafe path. Resolve only `<agent_dir>/npm/node_modules/pi-subagents/package.json` and its lock evidence without recursive search. Verify every policy field, exact source provenance/hash, bundled inventory, and absence of lifecycle keys.
+Read `<agent_dir>/settings.json`, `<agent_dir>/extensions/subagent/config.json` when present, the package-store directory, the installed `<agent_dir>/npm/node_modules/pi-subagents/package.json`, and the root dependency entry in `<agent_dir>/npm/package-lock.json` through no-follow, regular-file/directory, containment, owner, private-mode, and descriptor-identity checks. The checked-in `tests/fixtures/pi-subagents-0.56.0-package*.json` files are compared only as upstream provenance/integrity evidence. Reject object-form package entries, duplicate package identities, project settings, custom `npmCommand`, package/agent overrides that widen managed roles, any `node_modules/**/package-lock.json` as installed evidence, and any unsafe path. Resolve only the two installed paths above without recursive search. Verify every policy field, exact source provenance/hash, bundled inventory, and absence of lifecycle keys.
 
-Run the official install from an empty private working directory with an allowlisted environment containing only the required system path, `PI_CODING_AGENT_DIR`, `PI_TELEMETRY=0`, `PI_SKIP_VERSION_CHECK=1`, `GIT_TERMINAL_PROMPT=0`, and an empty npm user-config path; do not inherit proxy/auth/token variables or the user's npm configuration. Package installation may run only after both consent booleans are true and pre-package state is `absent`; an existing exact pin is a non-owned no-op. After a successful install and post-install verification, atomically persist `<agent_dir>/.subagents_configs/pi-package-receipt.json` at mode `0600` under the persistent target lock. If receipt persistence fails, preserve the package, skip local catalog mutation, and report manual recovery. Package removal requires that durable receipt, exact settings/manifest/policy hashes, and a single pinned entry; keep the receipt on failure and remove it only after Pi proves successful removal.
+Run the official install from an empty private working directory with an allowlisted environment containing only the required system path, `PI_CODING_AGENT_DIR`, `PI_TELEMETRY=0`, `PI_SKIP_VERSION_CHECK=1`, `GIT_TERMINAL_PROMPT=0`, and an empty npm user-config path; do not inherit proxy/auth/token variables or the user's npm configuration. Package installation may run only after both consent booleans are true and pre-package state is `absent`; an existing exact pin is a non-owned no-op. After a successful install and post-install verification, atomically persist `<agent_dir>/.subagents_configs/pi-package-receipt.json` at mode `0600` under the persistent target lock. If receipt persistence fails, preserve the package, skip local catalog mutation, and report manual recovery. Package removal requires that durable receipt, exact settings/manifest/policy hashes, the `<agent_dir>/npm/package-lock.json` root dependency, and a single pinned entry; keep the receipt on failure and remove it only after Pi proves successful removal. The policy's upstream `packageLockSha256` remains provenance for the reviewed fixture and is never treated as the installed lockfile hash.
 
 - [ ] **Step 4: Run GREEN and static checks**
 
@@ -368,7 +475,7 @@ for role in PI_DEFAULT_ROLES + PI_OPTIONAL_ROLES:
     assert frontmatter["inheritSkills"] is False
 ```
 
-Assert explorer/reviewer tools equal `READ_TOOLS`, validator tools equal `VALIDATOR_TOOLS` and contain no `bash`, quick/implementer tools equal `WRITE_TOOLS`, and commit-pusher tools equal `PUSHER_TOOLS`. Require an explicit empty `extensions` field and empty `skills` for every role. Validator alone has `subagentOnlyExtensions: {{PI_VALIDATION_EXTENSION}}`; no other role may declare `subagentOnlyExtensions`. Reject aliases, MCP entries, package names, inherited project context/skills, explicit model/fallback IDs, and any thinking value. Assert the repository-managed default inventory is five and optional inventory contains only `commit-pusher`; separately assert the reviewed third-party bundled inventory is exactly `delegate`, `oracle`, `researcher`, `reviewer`, `scout`, and `worker`.
+Assert explorer/reviewer tools equal `READ_TOOLS`, validator tools equal `VALIDATOR_TOOLS` and contain no `bash`, quick/implementer tools equal `WRITE_TOOLS`, and commit-pusher tools equal `PUSHER_TOOLS`. Require an explicit empty `extensions` field and empty `skills` for every role. Validator alone has `subagentOnlyExtensions: {{PI_VALIDATION_EXTENSION}}`; no other role may declare `subagentOnlyExtensions`. Reject aliases, MCP entries, package names, inherited project context/skills, explicit model/fallback IDs, and any thinking value. Add settings fixtures with global `subagents.defaultModel` and `subagents.defaultThinking`, plus per-role equivalents, and assert all are rejected for managed roles. Assert the repository-managed default inventory is five and optional inventory contains only `commit-pusher`; separately assert the reviewed third-party bundled inventory is exactly `delegate`, `oracle`, `researcher`, `reviewer`, `scout`, and `worker`.
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
@@ -378,7 +485,7 @@ Expected: FAIL because the Pi directory, sources, parser, and target-specific va
 
 - [ ] **Step 3: Implement exact frontmatter and target artifact**
 
-Write each agent with frontmatter containing `name`, a nonempty `description`, `systemPromptMode: replace`, `inheritProjectContext: false`, `inheritSkills: false`, explicit `tools`, and explicit empty `skills`/`extensions`. Omit `model`, `fallbackModels`, and `thinking`; pinned `pi-subagents@0.56.0` treats the absent model as parent-session inheritance, and tests normalize it to `inherit`. Put the rendered validator path only in `subagentOnlyExtensions`. Keep existing repository role contracts visible in the body: explorer/reviewer are read-only and never implement; validator refuses direct Bash and runs checks only through `run_validation`; implementers state parent scope, no credential changes, no network/publication without authorization; commit-pusher requires separate requests for `git commit` and `git push`, never force-pushes, and never changes credentials. Write `rules/PI_SUBAGENT_ROUTING.md` from the shared safe routing policy and test that it is absent unless the existing global-routing opt-in is selected.
+Write each agent with frontmatter containing `name`, a nonempty `description`, `systemPromptMode: replace`, `inheritProjectContext: false`, `inheritSkills: false`, explicit `tools`, and explicit empty `skills`/`extensions`. Omit `model`, `fallbackModels`, and `thinking`; pinned `pi-subagents@0.56.0` treats the absent model as parent-session inheritance, and tests normalize it to `inherit`. The generated frontmatter never sets a global or per-role model/thinking default. Put the rendered validator path only in `subagentOnlyExtensions`. Keep existing repository role contracts visible in the body: explorer/reviewer are read-only and never implement; validator refuses direct Bash and runs checks only through `run_validation`; implementers state parent scope, no credential changes, no network/publication without authorization; commit-pusher requires separate requests for `git commit` and `git push`, never force-pushes, and never changes credentials. Write `rules/PI_SUBAGENT_ROUTING.md` from the shared safe routing policy and test that it is absent unless the existing global-routing opt-in is selected.
 
 Implement `pi/extensions/run-validation.ts` with this fixed behavior:
 
@@ -413,6 +520,7 @@ Run `git diff --check`, then commit: `git add pi/agents pi/extensions/run-valida
 - Modify: `subagents_configs/planning.py`
 - Modify: `subagents_configs/orchestrator.py`
 - Modify: `subagents_configs/transaction.py`
+- Modify: `subagents_configs/recovery.py`
 - Modify: `subagents_configs/state.py`
 - Modify: `subagents_configs/pi_catalog.py`
 - Modify: `subagents_configs/pi_package.py`
@@ -421,12 +529,12 @@ Run `git diff --check`, then commit: `git add pi/agents pi/extensions/run-valida
 - Modify: `tests/test_transaction_install.py`
 
 **Interfaces:**
-- Consumes: validated Pi package evidence/catalog contracts and Plan 1 descriptor-relative transaction APIs.
+- Consumes: validated Pi package evidence/catalog contracts, an explicit validated absolute `project_root: Path` supplied by the Plan 1 invocation seam, and Plan 1 descriptor-relative transaction APIs. Planning must reject a missing/non-directory/symlinked project root and must never call `Path.cwd()` or consult ambient process cwd internally.
 - Produces: a `TransactionPlan` containing only repository-owned Pi files plus a separate `PiExternalPlan`; package actions and the durable receipt are never local journal operations.
 
 - [ ] **Step 1: Write RED phase-boundary tests**
 
-Add tests using an absolute fake Pi executable and temporary `PI_CODING_AGENT_DIR` that assert `preflight_install()` returns exactly five repository catalog writes, one validator extension write, and the validation runtime writes, while `external_plan.package_source == "npm:pi-subagents@0.56.0"` is a separate field. Cover absent-package and exact-pre-existing-package paths. For absent state, assert the order is pre-package conflict check → official install → post-package manifest/bundled/effective verification → durable receipt → local catalog apply. Inject post-package verification, receipt-write, and local catalog failures; assert the package/settings remain installed, the receipt exists only when it was durably written, the local journal contains only repository operations, the phase-specific error is sanitized, and no remove command is recorded. Inject package-install failure and assert zero receipt/local writes.
+Add tests using an absolute fake Pi executable, temporary `PI_CODING_AGENT_DIR`, and an explicit temporary `project_root` that assert `preflight_install(..., project_root=project_root)` returns exactly five repository catalog writes, one validator extension write, and the validation runtime writes, while `external_plan.package_source == "npm:pi-subagents@0.56.0"` is a separate field. Cover absent-package and exact-pre-existing-package paths. For absent state, assert the order is pre-package conflict check → official install → post-package manifest/bundled/effective verification → durable receipt → local catalog apply. Inject post-package verification, receipt-write, and local catalog failures; assert the package/settings remain installed, the receipt exists only when it was durably written, the local journal contains only repository operations, the phase-specific error is sanitized, and no remove command is recorded. Inject package-install failure and assert zero receipt/local writes.
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
@@ -444,6 +552,7 @@ class PiExternalPlan:
     action: Literal["install", "remove", "none"]
     executable: Path
     agent_dir: Path
+    project_root: Path
     package_source: str
     before: PiPackageEvidence
     consent_third_party_code: bool
@@ -456,7 +565,7 @@ class PiInstallPlan:
     external: PiExternalPlan
 ```
 
-Render `{{PI_VALIDATION_EXTENSION}}` to `<agent_dir>/extensions/subagents-configs-run-validation.ts` only after `normalized_absolute`, containment, regular-source, and final source identity checks. Keep `PiExternalPlan` and the receipt outside `PlannedOperation` and `JournalOperation`. Under Plan 1's persistent Pi-home lock, the orchestrator must execute: all pre-package read-only source/settings/config/collision checks; official external install only when state is absent; post-package manifest, package-policy, bundled-inventory, and effective-contract verification; durable receipt creation only for a newly created exact entry; then local `apply_transaction`. An exact pre-existing pin skips installation, creates no ownership receipt, and remains preserved on later uninstall. On any post-install/local failure, preserve external state and receipt evidence and raise a sanitized phase-boundary error. For normal uninstall execute the local transaction first and never remove the package; for `--remove-pi-package`, remove only after local success and only through exact durable receipt/hash evidence. A package failure never starts the local transaction.
+Render `{{PI_VALIDATION_EXTENSION}}` to `<agent_dir>/extensions/subagents-configs-run-validation.ts` only after `normalized_absolute`, containment, regular-source, and final source identity checks. `PiExternalPlan.agent_dir` is a derived value copied from `request.homes[Target.PI]`, never an independently parsed or persisted request input; `PiExternalPlan.project_root` is likewise a validated absolute directory supplied by the caller. All public selection and home precedence use the mapping as the sole source of truth, and all project-resource discovery uses the explicit project root. Keep `PiExternalPlan` and the receipt outside `PlannedOperation` and `JournalOperation`. Under Plan 1's persistent Pi-home lock, the orchestrator must execute: all pre-package read-only source/settings/config/collision checks; official external install only when state is absent; post-package manifest, package-policy, bundled-inventory, and effective-contract verification; durable receipt creation only for a newly created exact entry; then local `apply_transaction`. An exact pre-existing pin skips installation, creates no ownership receipt, and remains preserved on later uninstall. On any post-install/local failure, preserve external state and receipt evidence and raise a sanitized phase-boundary error. For normal uninstall execute the local transaction first and never remove the package; for `--remove-pi-package`, remove only after local success and only through exact durable receipt/hash evidence. A package failure never starts the local transaction.
 
 - [ ] **Step 4: Verify phase behavior, idempotency, and no journal leakage**
 
@@ -466,7 +575,7 @@ Expected: PASS; a pinned existing package produces `action="none"`, repeated loc
 
 - [ ] **Step 5: Commit**
 
-Run `git diff --check`, then commit: `git add subagents_configs/models.py subagents_configs/planning.py subagents_configs/orchestrator.py subagents_configs/transaction.py subagents_configs/state.py subagents_configs/pi_catalog.py subagents_configs/pi_package.py tests/test_pi_integration.py tests/test_planning.py tests/test_transaction_install.py && git commit -m "feat: separate pi package and catalog phases"`.
+Run `git diff --check`, then commit: `git add subagents_configs/models.py subagents_configs/planning.py subagents_configs/orchestrator.py subagents_configs/transaction.py subagents_configs/recovery.py subagents_configs/state.py subagents_configs/pi_catalog.py subagents_configs/pi_package.py tests/test_pi_integration.py tests/test_planning.py tests/test_transaction_install.py && git commit -m "feat: separate pi package and catalog phases"`.
 
 ---
 
@@ -486,12 +595,12 @@ Run `git diff --check`, then commit: `git add subagents_configs/models.py subage
 - Modify: `tests/test_policy_diff.py`
 
 **Interfaces:**
-- Consumes: rendered `PiAgentContract` values, strict Pi settings JSON, package manifest metadata, and the selected user-scope agent directory.
-- Produces: `PiEffectiveCatalog`, `PiConflict`, and `inspect_effective_catalog(agent_dir: Path, rendered: Mapping[str, PiAgentContract], package: PiPackageEvidence) -> PiEffectiveCatalog`.
+- Consumes: rendered `PiAgentContract` values, strict Pi settings JSON, package manifest metadata, the selected user-scope agent directory, and an explicit validated absolute `project_root: Path`.
+- Produces: `PiEffectiveCatalog`, `PiConflict`, and `inspect_effective_catalog(agent_dir: Path, rendered: Mapping[str, PiAgentContract], package: PiPackageEvidence, *, project_root: Path) -> PiEffectiveCatalog`.
 
 - [ ] **Step 1: Write RED effective-contract tests**
 
-Test each failure independently with temporary settings/config and agent files: an existing unmanaged `agents/code-explorer.md`; duplicate/object-form `packages` entries; an unpinned `npm:pi-subagents`; a second package identity; custom `npmCommand`; `subagents.agentOverrides.code-explorer.tools` containing `bash`; overrides for `extensions`, `subagentOnlyExtensions`, `skills`, `model`, `fallbackModels`, `thinking`, `inheritSkills`, or `inheritProjectContext`; aliases equal to a managed role; a package manifest whose discovered names collide; and a user/project ambient extension or project agent that would widen a managed role. Assert each returns a `PiConflict(kind, role, source_id, field, safe_value, observed_value)` with redacted values and no mutation. Add catalog-policy RED tests that require a deterministic `catalogs/pi.json` and report Pi role, tool, extension, package, destination, source-hash, and authority broadening without reading a user home or running Pi.
+Test each failure independently with temporary settings/config and agent files, always invoking `inspect_effective_catalog(..., project_root=validated_project_root)` rather than relying on process cwd: an existing unmanaged `agents/code-explorer.md`; duplicate/object-form `packages` entries; an unpinned `npm:pi-subagents`; a second package identity; custom `npmCommand`; `subagents.agentOverrides.code-explorer.tools` containing `bash`; overrides for `extensions`, `subagentOnlyExtensions`, `skills`, `model`, `fallbackModels`, `thinking`, `inheritSkills`, or `inheritProjectContext`; aliases equal to a managed role; a package manifest whose discovered names collide; and project-root ambient extensions or project agents that would widen a managed role. Assert each returns a `PiConflict(kind, role, source_id, field, safe_value, observed_value)` with redacted values and no mutation, and assert missing, relative, symlinked, or non-directory project roots fail closed before discovery. Add catalog-policy RED tests that require a deterministic `catalogs/pi.json` and report Pi role, tool, extension, package, destination, source-hash, and authority broadening without reading a user home or running Pi.
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
@@ -522,9 +631,9 @@ class PiEffectiveCatalog:
     source_hashes: Mapping[str, str]
 ```
 
-The public evaluator is `inspect_effective_catalog(agent_dir: Path, rendered: Mapping[str, PiAgentContract], package: PiPackageEvidence) -> PiEffectiveCatalog`.
+The public evaluator is `inspect_effective_catalog(agent_dir: Path, rendered: Mapping[str, PiAgentContract], package: PiPackageEvidence, *, project_root: Path) -> PiEffectiveCatalog`. Validate both paths as normalized absolute no-follow directories before any read; enumerate project agents/extensions only beneath the supplied `project_root`, never via `Path.cwd()`, ambient environment, or a user-home fallback. A project-root mismatch or any project resource that widens a managed role is a fail-closed conflict.
 
-Parse `settings.json` and package config strictly and inspect `packages`, `npmCommand`, `subagents.agentOverrides`, `subagents.defaultExtensions`, `extensions`, `skills`, aliases, project-resource discovery, and package inventory. Before installation, accept only `absent` or one exact pin; after installation require one exact pin. Require no project settings/project agents in the selected working directory and no unmanaged managed-role path. Treat any override that changes a protected field as a conflict; inherited parent model is allowed only when the role omits `model`, and the first release rejects every explicit model/fallback/thinking value. Require exact source identity/hash for every rendered file. Keep the six reviewed bundled roles in `bundled_roles`, never in `managed_roles`, and fail closed before directory creation when any unreviewed bundled role appears.
+Parse `settings.json` and package config strictly and inspect `packages`, `npmCommand`, `subagents.agentOverrides`, `subagents.defaultModel`, `subagents.defaultThinking`, `subagents.defaultExtensions`, `extensions`, `skills`, aliases, project-resource discovery, and package inventory. Before installation, accept only `absent` or one exact pin; after installation require one exact pin. Require no project settings/project agents in the selected working directory and no unmanaged managed-role path. Treat any override that changes a protected field as a conflict; inherited parent model is allowed only when the role omits `model`, and the first release rejects every global or per-role `defaultModel`, `defaultThinking`, `model`, `fallbackModels`, or `thinking` value for managed roles. Require exact source identity/hash for every rendered file. Keep the six reviewed bundled roles in `bundled_roles`, never in `managed_roles`, and fail closed before directory creation when any unreviewed bundled role appears.
 
 Extend the canonical generator so `python scripts/generate-catalogs.py --write --target pi` renders `catalogs/pi.json` from the authoritative Pi capability, repository role/routing/extension sources, and `pi/package-policy.json`; `--check --target pi` compares it byte-for-byte. Extend normalized policy loading so Pi package and extension authority maps to the existing closed `AuthorityCapability` enum. Policy diff remains a local read-only operation over explicit revision/catalog paths and never inspects `PI_CODING_AGENT_DIR`, executes Pi, or invokes package/network code.
 
@@ -567,7 +676,7 @@ Expected: FAIL because dry-run currently reaches no Pi-aware path and diagnostic
 
 - [ ] **Step 3: Implement fail-closed output and phase handling**
 
-Add stable codes `PI_CONSENT_REQUIRED`, `PI_EXECUTABLE_INVALID`, `PI_RUNTIME_INCOMPATIBLE`, `PI_SETTINGS_INVALID`, `PI_PACKAGE_DRIFT`, `PI_RECEIPT_INVALID`, `PI_CATALOG_CONFLICT`, `PI_PACKAGE_PHASE_FAILED`, `PI_CATALOG_PHASE_FAILED`, and `PI_UNINSTALL_PRESERVED`. Add `sanitize_pi_context(code, *, target, phase, safe_identifier, normalized_home) -> Mapping[str, str]` that allows only target, phase, role/source identifier, package source, and normalized home label; never interpolate exception text or child output. In `orchestrator.run`, branch after Plan 1's lock-free double-collection read-only Pi preflight for `dry_run`, render the versioned JSON/text plan with either the caller-supplied compatibility fact or `runtime_version_evidence="maintained-matrix-only"`, and return without calling the lock API, `validate_pi_executable(execute=True)`, receipt stores, package installation/removal, Node, npm, filesystem preparation, or journal cleanup. Require both consent flags only in non-dry install immediately before package phase, and preserve package/receipt state on every later error.
+Add stable codes `PI_CONSENT_REQUIRED`, `PI_EXECUTABLE_INVALID`, `PI_RUNTIME_INCOMPATIBLE`, `PI_SETTINGS_INVALID`, `PI_PACKAGE_DRIFT`, `PI_RECEIPT_INVALID`, `PI_CATALOG_CONFLICT`, `PI_PACKAGE_PHASE_FAILED`, `PI_CATALOG_PHASE_FAILED`, and `PI_UNINSTALL_PRESERVED`. Add `sanitize_pi_context(code, *, target, phase, safe_identifier, normalized_home) -> Mapping[str, str]` that allows only target, phase, role/source identifier, package source, and normalized home label; never interpolate exception text or child output. In `orchestrator.run`, branch after Plan 1's lock-free double-collection read-only Pi preflight for `dry_run`, render the versioned JSON/text plan with either the caller-supplied compatibility fact or `runtime_version_evidence="maintained-matrix-only"`, and return without calling the lock API, `validate_pi_executable(validated_executable, agent_dir=validated_home, execute=True)`, receipt stores, package installation/removal, Node, npm, filesystem preparation, or journal cleanup. Every non-dry caller passes the same validated `request.homes[Target.PI]` to executable validation and package inspection; the orchestrator passes the validated explicit `project_root` to effective discovery. Require both consent flags only in non-dry install immediately before package phase, and preserve package/receipt state on every later error.
 
 - [ ] **Step 4: Verify exact dry-run and sanitized failures**
 
@@ -587,6 +696,7 @@ Run `git diff --check`, then commit: `git add subagents_configs/orchestrator.py 
 - Modify: `subagents_configs/planning.py`
 - Modify: `subagents_configs/orchestrator.py`
 - Modify: `subagents_configs/transaction.py`
+- Modify: `subagents_configs/recovery.py`
 - Modify: `subagents_configs/state.py`
 - Modify: `tests/test_pi_integration.py`
 - Modify: `tests/test_transaction_uninstall.py`
@@ -597,7 +707,7 @@ Run `git diff --check`, then commit: `git add subagents_configs/orchestrator.py 
 
 - [ ] **Step 1: Write RED uninstall/recovery tests**
 
-Cover these exact cases: unchanged created role/runtime files are removed; changed, missing, symlinked, hard-linked, or pre-existing files remain unresolved; routing is absent by default; an unchanged opt-in Pi `APPEND_SYSTEM.md` managed block is removed while a changed block remains unresolved; default uninstall leaves the pinned package, receipt, and settings unchanged; `--remove-pi-package` refuses missing/hostile receipts, pre-existing, drifted, duplicate, or settings/manifest/policy-hash-mismatched package entries; successful explicit removal invokes only `pi remove npm:pi-subagents` and removes the receipt after post-removal verification; package removal failure after local success reports `PI_PACKAGE_PHASE_FAILED` without recreating files or deleting the receipt; local failure after package install never invokes remove; interrupted local transaction recovers only through the existing journal and persistent lock path.
+Cover these exact cases: unchanged created role/runtime files are removed; changed, missing, symlinked, hard-linked, or pre-existing files remain unresolved; routing is absent by default; an unchanged opt-in Pi `APPEND_SYSTEM.md` managed block is removed while a changed block remains unresolved; default uninstall leaves the pinned package, receipt, and settings unchanged; `--remove-pi-package` refuses missing/hostile receipts, pre-existing, drifted, duplicate, or settings/manifest/policy-hash-mismatched package entries; successful explicit removal invokes only `pi remove npm:pi-subagents` and removes the receipt after post-removal verification; package removal failure after local success reports `PI_PACKAGE_PHASE_FAILED` without recreating files or deleting the receipt; local failure after package install never invokes remove; interrupted local transaction recovers through `subagents_configs.recovery.recover_transaction` using only the existing journal and persistent lock path, never through a duplicate public recovery function in `transaction.py`.
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
@@ -607,7 +717,7 @@ Expected: FAIL for package ownership/receipt assertions and Pi-specific phase re
 
 - [ ] **Step 3: Implement exact ownership and recovery rules**
 
-Persist only safe manifest evidence for Pi repository files: identifier, relative path, installed hash/mode, ownership, managed block hash, and backup metadata. Persist the separate strict receipt with only schema/source/remove-source, settings before/after hashes, package manifest hash, package-policy hash, and `created_exact_entry`; never persist package contents or raw settings. Require `created_exact_entry is True`, `receipt.settings_after_hash == current.settings_hash`, exactly one `npm:pi-subagents@0.56.0` entry, and exact package manifest/policy identity/hash before optional removal. Use Plan 1's `locked_target_homes` around planning, package evidence, official Pi commands, receipt mutation, local apply, recovery, and journal cleanup. On every package/catalog boundary error, preserve the external package and repository/receipt evidence and return the phase-specific diagnostic; never delete a package store directory recursively.
+Persist only safe manifest evidence for Pi repository files: identifier, relative path, installed hash/mode, ownership, managed block hash, and backup metadata. Persist the separate strict receipt with only schema/source/remove-source, settings before/after hashes, package manifest hash, package-policy hash, and `created_exact_entry`; never persist package contents or raw settings. Require `created_exact_entry is True`, `receipt.settings_after_hash == current.settings_hash`, exactly one `npm:pi-subagents@0.56.0` entry in `<agent_dir>/npm/package-lock.json`, and exact installed package manifest/policy identity/hash before optional removal. Use Plan 1's `locked_target_homes` around planning, package evidence, official Pi commands, receipt mutation, local apply, recovery through `subagents_configs.recovery`, and journal cleanup. On every package/catalog boundary error, preserve the external package and repository/receipt evidence and return the phase-specific diagnostic; never delete a package store directory recursively.
 
 - [ ] **Step 4: Verify recovery, drift, and idempotency**
 
@@ -617,7 +727,7 @@ Expected: PASS; no unsafe or drifted file/package state is removed, exact owners
 
 - [ ] **Step 5: Commit**
 
-Run `git diff --check`, then commit: `git add subagents_configs/planning.py subagents_configs/orchestrator.py subagents_configs/transaction.py subagents_configs/state.py tests/test_pi_integration.py tests/test_transaction_uninstall.py && git commit -m "fix: preserve pi ownership and recovery evidence"`.
+Run `git diff --check`, then commit: `git add subagents_configs/planning.py subagents_configs/orchestrator.py subagents_configs/transaction.py subagents_configs/recovery.py subagents_configs/state.py tests/test_pi_integration.py tests/test_transaction_uninstall.py && git commit -m "fix: preserve pi ownership and recovery evidence"`.
 
 ---
 
@@ -726,7 +836,7 @@ Expected: FAIL because current docs explicitly say Pi is unsupported and do not 
 
 - [ ] **Step 3: Write the exact documentation and matrix**
 
-Update the canonical `catalogs/client-compatibility.json` Pi row to exact tested support and render `docs/COMPATIBILITY.md` from it with columns `Client`, `Supported scope`, `Home variable/default`, `Native format`, `Runtime/package evidence`, `Validation backends`, `Unsupported scope`; a contract test rejects drift between JSON and Markdown. The Pi row must say exact Pi 0.84.1, `PI_CODING_AGENT_DIR`/`~/.pi/agent`, Markdown agents plus TypeScript extension, `pi --offline --version`/`--help`, package `npm:pi-subagents@0.56.0`, package peer `@earendil-works/pi-ai >=0.80.0`, macOS/Linux only, and Windows fail-closed. README must show the exact commands:
+Update the canonical `catalogs/client-compatibility.json` Pi row as an explicit unreleased entry (`supported: false`, `status: "unreleased"`) and render `docs/COMPATIBILITY.md` from it with columns `Client`, `Supported scope`, `Home variable/default`, `Native format`, `Runtime/package evidence`, `Validation backends`, `Unsupported scope`; a contract test rejects drift between JSON and Markdown. The unreleased Pi row must still state the intended exact evidence boundary: Pi 0.84.1, `PI_CODING_AGENT_DIR`/`~/.pi/agent`, Markdown agents plus TypeScript extension, `pi --offline --version`/`--help`, package `npm:pi-subagents@0.56.0`, package peer `@earendil-works/pi-ai >=0.80.0`, macOS/Linux only, and Windows fail-closed. README must show the exact commands:
 
 ```sh
 ./install.sh --target pi --pi-executable /absolute/path/to/pi \
@@ -743,7 +853,7 @@ State that dry-run neither requires consent nor executes the executable, non-dry
 
 Run: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tests.test_readme_contract tests.test_docs tests.test_compatibility -v`, `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python scripts/validate-catalogs.py`, and `git diff --check`.
 
-Expected: PASS; docs state the supported boundary exactly and do not claim package atomicity, prompt-only enforcement, real-provider testing, or Windows support.
+Expected: PASS; docs state the unreleased boundary exactly, identify the mandatory Task 11 transition, and do not claim package atomicity, prompt-only enforcement, real-provider testing, or Windows support.
 
 - [ ] **Step 5: Commit**
 
@@ -758,7 +868,10 @@ Commit: `git add catalogs/client-compatibility.json docs/COMPATIBILITY.md README
 - Create: `tests/test_pi_provider_smoke.py`
 - Modify: `.github/workflows/ci.yml`
 - Modify: `docs/RELEASING.md`
+- Modify: `catalogs/client-compatibility.json`
+- Modify: `docs/COMPATIBILITY.md`
 - Modify: `tests/test_ci.py`
+- Modify: `tests/test_compatibility.py`
 - Modify: `tests/test_security_static.py`
 
 **Interfaces:**
@@ -777,7 +890,7 @@ Expected: FAIL until the new Pi selectors, forbidden-fallback scans, and evidenc
 
 - [ ] **Step 3: Implement no-network default CI and opt-in release smoke**
 
-Keep ordinary CI limited to checked-in source/package-policy metadata, Python tests, catalog validation, Ruff, format, ShellCheck, compileall, and explicit-unavailable real-smoke behavior. Add a release job that requires an absolute identity-checked `PI_EXECUTABLE`, rejects every version except 0.84.1, and must pass `PiReleaseSmokeTests`; unavailable evidence fails this job.
+Keep ordinary CI limited to checked-in source/package-policy metadata, Python tests, catalog validation, Ruff, format, ShellCheck, compileall, and explicit-unavailable real-smoke behavior. Add a release job that requires an absolute identity-checked `PI_EXECUTABLE`, rejects every version except 0.84.1, and must pass `PiReleaseSmokeTests`; unavailable evidence fails this job. Only after that smoke and every other Task 11 gate passes, update the canonical compatibility row from `supported: false, status: "unreleased"` to `supported: true` and regenerate `docs/COMPATIBILITY.md`; the transition is itself covered by a compatibility contract test and is never performed by Task 1 or Task 10.
 
 Implement `scripts/run-pi-provider-smoke.py` as a separate release-only command accepting exact flags `--authorize-provider-smoke --pi-executable ABSOLUTE --model PROVIDER/ID --output SAFE_JSON_PATH`. It refuses missing authorization, non-0.84.1 Pi, non-private output paths, and non-interactive environments; sends one fixed non-sensitive prompt whose expected answer is the constant `PI_PROVIDER_SMOKE_OK`; inherits only the credential variables required by the explicitly selected provider through a reviewed provider allowlist; disables tools, sessions, project context, telemetry, and update checks; caps stdout/stderr; writes only schema version, Pi/package/model identifiers, start/end status, exit code, and response-hash match. It never writes the prompt, response, credentials, environment, or transcript. Unit tests use a fake executable and synthetic credentials. The real provider command remains a separately approved manual action, never runs in ordinary CI, and is not required for the base Pi support claim; if release notes claim live provider interoperability, this command and safe result become mandatory.
 
@@ -804,7 +917,7 @@ Expected: every ordinary-CI command exits 0, the selector reports explicit unava
 
 - [ ] **Step 5: Review and commit the final integration**
 
-Inspect the complete diff for the one-component/no-service boundary, exact `--all` behavior, explicit consent, package/catalog phase ownership, no automatic Pi package rollback, redaction, fail-closed errors, and documentation parity. Commit: `git add scripts/run-pi-provider-smoke.py tests/test_pi_provider_smoke.py .github/workflows/ci.yml docs/RELEASING.md tests/test_ci.py tests/test_security_static.py && git commit -m "ci: verify pi integration contracts"`.
+Inspect the complete diff for the one-component/no-service boundary, exact `--all` behavior, explicit consent, package/catalog phase ownership, no automatic Pi package rollback, redaction, fail-closed errors, and documentation parity. Commit every file changed by this task, including the final compatibility transition and generated projection: `git add scripts/run-pi-provider-smoke.py tests/test_pi_provider_smoke.py .github/workflows/ci.yml docs/RELEASING.md catalogs/client-compatibility.json docs/COMPATIBILITY.md tests/test_ci.py tests/test_compatibility.py tests/test_security_static.py && git commit -m "ci: verify pi integration contracts"`.
 
 ---
 
@@ -855,8 +968,8 @@ Plan 1 feature integration retained for Pi:
 | Plan 1 feature | Pi extension point | Covered by |
 | --- | --- | --- |
 | N-01 versioned JSON/text dry-run | Pi emits the same versioned plan schema and remains non-executing/non-mutating | Task 6 |
-| N-02 client compatibility matrix | The predeclared unsupported row transitions to exact Pi/runtime/package/platform/scope evidence | Tasks 1, 10–11 |
-| N-03 declarative profiles | A profile may contribute safe defaults only after explicit CLI `--target pi`; it cannot store consent or package authority | Task 1 |
+| N-02 client compatibility matrix | Tasks 1 and 10 maintain an explicit unreleased/unsupported row; Task 11 transitions it to exact Pi/runtime/package/platform/scope evidence only after mandatory release smoke | Tasks 1, 10–11 |
+| N-03 declarative profiles | Closed optional `target_defaults.pi.home` may contribute only a validated home after explicit CLI `--target pi`; profile targets cannot contain Pi, profile homes still exactly match profile targets, and no consent/package authority is stored | Task 1 |
 | N-04 catalog policy diff | Deterministic `catalogs/pi.json` generation and closed-enum package/extension authority comparison | Task 5 |
 
 Audit-ID coverage (no row may be removed during execution):
