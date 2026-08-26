@@ -137,6 +137,30 @@ class DocumentationContractTests(unittest.TestCase):
         )
         self.assertNotRegex(technical, r"`unlink`/`rmdir`.{0,100}overwrite")
 
+    def test_cleanup_evidence_boundary_does_not_claim_local_authenticity(self):
+        security = " ".join(
+            (ROOT / "SECURITY.md").read_text(encoding="utf-8").lower().split()
+        )
+        schema = " ".join(
+            (ROOT / "docs" / "STATE_SCHEMA.md")
+            .read_text(encoding="utf-8")
+            .lower()
+            .split()
+        )
+        for text in (security, schema):
+            for token in (
+                "same-uid actor",
+                "self-consistent",
+                "external key",
+                "tpm",
+                "privileged service",
+                "without rewriting every anchor",
+            ):
+                self.assertIn(token, text)
+            self.assertRegex(text, r"fail[- ]closed")
+        self.assertIn("not an authenticated append-only store", security)
+        self.assertIn("not an append-only trust service", schema)
+
     def test_release_guidance_keeps_governance_manual(self):
         text = (ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
         lower = text.lower()

@@ -14,6 +14,8 @@ from typing import Any
 from . import filesystem
 from .locks import IdentityEvidence, capture_evidence
 from .models import (
+    COMMITMENT_ANCHOR_COUNT,
+    COMMITMENT_ANCHOR_SIZE,
     Journal,
     JournalOperation,
     Manifest,
@@ -31,7 +33,11 @@ from .paths import (
 )
 from .targets import capability_for
 
-SCHEMA_VERSION = 2
+MANIFEST_SCHEMA_VERSION = 2
+JOURNAL_SCHEMA_VERSION = 3
+# Public compatibility constant remains the manifest schema version. Journal
+# decoding has its own version policy because cleanup evidence evolved alone.
+SCHEMA_VERSION = MANIFEST_SCHEMA_VERSION
 _OWNERSHIPS = {"created", "replaced", "preexisting"}
 _ACTIONS = {
     "create",
@@ -50,7 +56,13 @@ _STATUSES = {
     "rolled-back",
     "ambiguous",
 }
-_ROLLBACK_STATUSES = {"not-started", "in-progress", "complete", "incomplete"}
+_ROLLBACK_STATUSES = {
+    "not-started",
+    "in-progress",
+    "complete",
+    "incomplete",
+    "cleanup",
+}
 
 
 def _managed_blocks(descriptor: TargetDescriptor) -> frozenset[str]:
@@ -81,6 +93,10 @@ _JOURNAL_KEYS = {
     "operation",
     "operations",
     "rollback_status",
+}
+_JOURNAL_V3_KEYS = _JOURNAL_KEYS | {
+    "cleanup_participant_digests",
+    "cleanup_commitment_evidence",
 }
 _OPERATION_KEYS = {
     "operation_id",
@@ -114,8 +130,17 @@ def _dict(value: object, expected: set[str], label: str) -> dict[str, Any]:
     return value
 
 
-def _schema(value: object, *, allow_legacy: bool = False) -> int:
-    versions = {SCHEMA_VERSION}
+def _manifest_schema(value: object, *, allow_legacy: bool = False) -> int:
+    versions = {MANIFEST_SCHEMA_VERSION}
+    if allow_legacy:
+        versions.add(1)
+    if type(value) is not int or value not in versions:
+        raise ValueError("unsupported schema_version")
+    return value
+
+
+def _journal_schema(value: object, *, allow_legacy: bool = False) -> int:
+    versions = {2, JOURNAL_SCHEMA_VERSION}
     if allow_legacy:
         versions.add(1)
     if type(value) is not int or value not in versions:
@@ -256,7 +281,12 @@ def _supported_identifiers(descriptor: TargetDescriptor) -> dict[str, str]:
 
 
 def _backup(
-    home: Path, backup_path: object, backup_hash: object, *, verify: bool = True
+    home: Path,
+    backup_path: object,
+    backup_hash: object,
+    *,
+    verify: bool = True,
+    allow_missing: bool = False,
 ) -> tuple[str | None, str | None]:
     if backup_path is None and backup_hash is None:
         return None, None
@@ -282,7 +312,11 @@ def _backup(
         if stat.S_IMODE(backups_stat.st_mode) & ~0o700:
             raise ValueError("backup directory must be private")
     backup_stat = lstat_existing(absolute, "backup")
-    if backup_stat is not None and stat.S_IMODE(backup_stat.st_mode) & ~0o600:
+    if backup_stat is None:
+        if allow_missing:
+            return relative, digest
+        raise ValueError("referenced backup is unavailable")
+    if stat.S_IMODE(backup_stat.st_mode) & ~0o600:
         raise ValueError("backup files must be private")
     try:
         actual = _sha256_backup(absolute)
@@ -406,7 +440,9 @@ def _decode_manifest(
     verify_backups: bool,
 ) -> Manifest:
     value = _dict(raw, _MANIFEST_KEYS, "manifest")
-    schema_version = _schema(value["schema_version"], allow_legacy=allow_legacy)
+    schema_version = _manifest_schema(
+        value["schema_version"], allow_legacy=allow_legacy
+    )
     target = _target(value["target"], descriptor)
     if type(value["entries"]) is not list:
         raise ValueError("manifest entries must be an array")
@@ -429,13 +465,17 @@ def _operation(
     descriptor: TargetDescriptor,
     home: Path,
     *,
-    schema_version: int = SCHEMA_VERSION,
+    schema_version: int = JOURNAL_SCHEMA_VERSION,
     verify_backups: bool = True,
+    allow_missing_backups: bool = False,
 ) -> JournalOperation:
-    expected_keys = _OPERATION_KEYS | {
+    evidence_keys = {
         "expected_before_evidence",
         "expected_after_evidence",
     }
+    expected_keys = _OPERATION_KEYS | evidence_keys
+    if schema_version >= 3:
+        expected_keys.update({"backup_identity_evidence", "cleanup_backup_evidence"})
     value = _dict(
         raw,
         expected_keys if schema_version >= 2 else _OPERATION_KEYS,
@@ -481,6 +521,16 @@ def _operation(
         if schema_version >= 2
         else None
     )
+    cleanup_backup_identity = (
+        _evidence(value["cleanup_backup_evidence"], "cleanup_backup_evidence")
+        if schema_version >= 3
+        else None
+    )
+    backup_identity = (
+        _evidence(value["backup_identity_evidence"], "backup_identity_evidence")
+        if schema_version >= 3
+        else None
+    )
     if schema_version >= 2:
         if (before_hash is None) != (before_identity is None):
             raise ValueError("before hash and identity evidence must agree")
@@ -505,6 +555,7 @@ def _operation(
         value["backup_path"],
         value["backup_hash"],
         verify=verify_backups,
+        allow_missing=allow_missing_backups,
     )
     has_before = before_hash is not None
     has_after = after_hash is not None
@@ -545,6 +596,15 @@ def _operation(
             valid = has_backup
     if not valid:
         raise ValueError("journal action has ambiguous rollback evidence")
+    if schema_version >= 3:
+        if (backup_path is None) != (backup_identity is None):
+            raise ValueError("backup identity evidence is incomplete")
+        if backup_identity is not None and (
+            backup_identity.sha256 != backup_hash
+            or backup_identity.nlink != 1
+            or backup_identity.mode & ~0o600
+        ):
+            raise ValueError("backup identity evidence disagrees with backup metadata")
     requires_reverse_backup = (
         action in {"replace", "remove", "restore"}
         or (action == "write-block" and has_before and not same_evidence)
@@ -564,6 +624,15 @@ def _operation(
     status = value["status"]
     if type(status) is not str or status not in _STATUSES:
         raise ValueError("invalid journal operation status")
+    if cleanup_backup_identity is not None:
+        if (
+            backup_hash is None
+            or cleanup_backup_identity.sha256 != backup_hash
+            or cleanup_backup_identity.nlink != 1
+            or cleanup_backup_identity.mode & ~0o600
+            or cleanup_backup_identity != backup_identity
+        ):
+            raise ValueError("cleanup backup evidence disagrees with backup metadata")
     return JournalOperation(
         operation_id=operation_id,
         identifier=identifier,
@@ -577,6 +646,8 @@ def _operation(
         status=status,
         expected_before_evidence=before_identity,
         expected_after_evidence=after_identity,
+        cleanup_backup_evidence=cleanup_backup_identity,
+        backup_identity_evidence=backup_identity,
     )
 
 
@@ -592,8 +663,13 @@ def _decode_journal(
     allow_legacy: bool = False,
     verify_backups: bool,
 ) -> Journal:
-    value = _dict(raw, _JOURNAL_KEYS, "journal")
-    schema_version = _schema(value["schema_version"], allow_legacy=allow_legacy)
+    raw_version = raw.get("schema_version") if type(raw) is dict else None
+    value = _dict(
+        raw,
+        _JOURNAL_V3_KEYS if raw_version == JOURNAL_SCHEMA_VERSION else _JOURNAL_KEYS,
+        "journal",
+    )
+    schema_version = _journal_schema(value["schema_version"], allow_legacy=allow_legacy)
     transaction_id = _safe_id(value["transaction_id"], "transaction_id")
     target = _target(value["target"], descriptor)
     if type(value["participants"]) is not list:
@@ -614,6 +690,9 @@ def _decode_journal(
     operation = value["operation"]
     if type(operation) is not str or operation not in {"install", "uninstall"}:
         raise ValueError("invalid journal operation")
+    rollback_status = value["rollback_status"]
+    if type(rollback_status) is not str or rollback_status not in _ROLLBACK_STATUSES:
+        raise ValueError("invalid rollback status")
     if type(value["operations"]) is not list:
         raise ValueError("journal operations must be an array")
     operations = tuple(
@@ -623,6 +702,10 @@ def _decode_journal(
             home,
             schema_version=schema_version,
             verify_backups=verify_backups,
+            # A durable cleanup phase is written before the first backup is
+            # removed.  Only absence is relaxed in that phase; any remaining
+            # backup still goes through strict no-follow validation.
+            allow_missing_backups=verify_backups and rollback_status == "cleanup",
         )
         for item in value["operations"]
     )
@@ -640,9 +723,56 @@ def _decode_journal(
     ]
     if len(canonical_paths) != len(set(canonical_paths)):
         raise ValueError("journal contains duplicate canonical destinations")
-    rollback_status = value["rollback_status"]
-    if type(rollback_status) is not str or rollback_status not in _ROLLBACK_STATUSES:
-        raise ValueError("invalid rollback status")
+    if rollback_status == "cleanup" and {item.status for item in operations} not in (
+        {"applied"},
+        {"rolled-back"},
+    ):
+        raise ValueError("cleanup journal operations must share one final status")
+    if schema_version >= 3:
+        raw_commitment_evidence = value["cleanup_commitment_evidence"]
+        if (
+            type(raw_commitment_evidence) is not list
+            or len(raw_commitment_evidence)
+            != len(participants) * COMMITMENT_ANCHOR_COUNT
+        ):
+            raise ValueError("commitment anchor evidence is incomplete")
+        decoded_commitment_evidence = tuple(
+            _evidence(item, "cleanup_commitment_evidence")
+            for item in raw_commitment_evidence
+        )
+        if any(item is None for item in decoded_commitment_evidence):
+            raise ValueError("commitment anchor evidence must be complete")
+        cleanup_commitment_evidence = tuple(
+            item for item in decoded_commitment_evidence if item is not None
+        )
+        if any(
+            item.nlink != 1 or item.mode != 0o600 or item.size != COMMITMENT_ANCHOR_SIZE
+            for item in cleanup_commitment_evidence
+        ):
+            raise ValueError("commitment anchor evidence is unsafe")
+    else:
+        cleanup_commitment_evidence = ()
+
+    if rollback_status == "cleanup":
+        if schema_version < 3:
+            raise ValueError("cleanup journal requires schema-v3 backup evidence")
+        if any(
+            (item.backup_path is None) != (item.cleanup_backup_evidence is None)
+            for item in operations
+        ):
+            raise ValueError("cleanup journal backup evidence is incomplete")
+        raw_digests = value["cleanup_participant_digests"]
+        if type(raw_digests) is not list or len(raw_digests) != len(participants):
+            raise ValueError("cleanup participant digests are incomplete")
+        cleanup_participant_digests = tuple(
+            _hash(item, "cleanup_participant_digest") for item in raw_digests
+        )
+    elif any(item.cleanup_backup_evidence is not None for item in operations):
+        raise ValueError("cleanup backup evidence requires cleanup status")
+    else:
+        cleanup_participant_digests = ()
+        if schema_version >= 3 and (value["cleanup_participant_digests"] != []):
+            raise ValueError("cleanup group evidence requires cleanup status")
     return Journal(
         schema_version,
         transaction_id,
@@ -651,6 +781,8 @@ def _decode_journal(
         operation,
         operations,
         rollback_status,
+        cleanup_participant_digests,
+        cleanup_commitment_evidence,
     )
 
 
@@ -733,6 +865,11 @@ def encode_journal(journal: Journal) -> bytes:
         "operations": [_operation_json(operation) for operation in journal.operations],
         "rollback_status": journal.rollback_status,
     }
+    if journal.schema_version >= 3:
+        value["cleanup_participant_digests"] = list(journal.cleanup_participant_digests)
+        value["cleanup_commitment_evidence"] = [
+            _evidence_json(item) for item in journal.cleanup_commitment_evidence
+        ]
     if journal.schema_version >= 2:
         for operation_value, operation in zip(
             value["operations"], journal.operations, strict=True
@@ -743,6 +880,13 @@ def encode_journal(journal: Journal) -> bytes:
             operation_value["expected_after_evidence"] = _evidence_json(
                 operation.expected_after_evidence
             )
+            if journal.schema_version >= 3:
+                operation_value["backup_identity_evidence"] = _evidence_json(
+                    operation.backup_identity_evidence
+                )
+                operation_value["cleanup_backup_evidence"] = _evidence_json(
+                    operation.cleanup_backup_evidence
+                )
     from .targets import descriptor_for
 
     _decode_journal(
@@ -1097,7 +1241,7 @@ def migrate_manifest_schema(
             or evidence.mode != entry.installed_mode
         ):
             raise ValueError("legacy manifest live evidence does not match")
-    return Manifest(SCHEMA_VERSION, legacy.target, legacy.entries)
+    return Manifest(MANIFEST_SCHEMA_VERSION, legacy.target, legacy.entries)
 
 
 def inspect_legacy_journal(

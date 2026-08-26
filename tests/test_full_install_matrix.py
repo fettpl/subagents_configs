@@ -162,6 +162,7 @@ class FullInstallMatrixTests(unittest.TestCase):
     def _expected_commitment_files(self, journals):
         payloads = {
             target: {
+                "schema_version": journal.schema_version,
                 "transaction_id": journal.transaction_id,
                 "target": journal.target.value,
                 "participants": [
@@ -179,6 +180,18 @@ class FullInstallMatrixTests(unittest.TestCase):
                         "expected_after_mode": operation.expected_after_mode,
                         "backup_path": operation.backup_path,
                         "backup_hash": operation.backup_hash,
+                        "backup_identity_evidence": (
+                            {
+                                "device": operation.backup_identity_evidence.device,
+                                "inode": operation.backup_identity_evidence.inode,
+                                "size": operation.backup_identity_evidence.size,
+                                "nlink": operation.backup_identity_evidence.nlink,
+                                "mode": operation.backup_identity_evidence.mode,
+                                "sha256": operation.backup_identity_evidence.sha256,
+                            }
+                            if operation.backup_identity_evidence is not None
+                            else None
+                        ),
                     }
                     for operation in journal.operations
                 ],
@@ -283,7 +296,7 @@ class FullInstallMatrixTests(unittest.TestCase):
             evidence = self._expected_commitment_files({Target.CODEX: journal})
         self.assertEqual(
             set(evidence[Target.CODEX]),
-            {".subagents_configs/backups/commitment-" + "0" * 32},
+            set(),
         )
 
     def _journal_relative(self, target: Target, identifier: str) -> str:
@@ -309,46 +322,9 @@ class FullInstallMatrixTests(unittest.TestCase):
         return relative
 
     def _expected_commitment_files_from_payloads(self, payloads):
-        records = []
-        ordered_targets = tuple(target for target in TARGETS if target in payloads)
-        self.assertTrue(ordered_targets)
-        for target in ordered_targets:
-            payload = payloads[target]
-            records.append(
-                {
-                    "target": payload["target"],
-                    "participants": payload["participants"],
-                    "operation": payload["operation"],
-                    "operations": [
-                        {
-                            "operation_id": operation["operation_id"],
-                            "identifier": self._journal_relative(
-                                target, operation["identifier"]
-                            ),
-                            "canonical_path": self._journal_relative(
-                                target, operation["identifier"]
-                            ),
-                            "action": operation["action"],
-                            "expected_before_hash": operation["expected_before_hash"],
-                            "expected_after_hash": operation["expected_after_hash"],
-                            "expected_before_mode": operation["expected_before_mode"],
-                            "expected_after_mode": operation["expected_after_mode"],
-                            "backup_path": operation["backup_path"],
-                            "backup_hash": operation["backup_hash"],
-                        }
-                        for operation in payload["operations"]
-                    ],
-                }
-            )
-        digest = hashlib.sha256(
-            json.dumps(records, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        nonce = payloads[ordered_targets[0]]["transaction_id"].rsplit("-", 1)[0]
-        content = f"{nonce}:{digest}".encode()
-        return {
-            target: {f".subagents_configs/backups/commitment-{nonce}": (content, 0o600)}
-            for target in payloads
-        }
+        # Commitment anchors are transaction-scoped recovery roots. Successful
+        # cleanup removes both fixed slots after every journal is absent.
+        return {target: {} for target in payloads}
 
     def _permanent_backup_evidence(self, manifest, known_contents):
         evidence = {}
@@ -774,7 +750,7 @@ class FullInstallMatrixTests(unittest.TestCase):
                             if path.is_file()
                         }
                         commitment_files = set(commitment_files_by_target[target])
-                        self.assertTrue(commitment_files, target)
+                        self.assertFalse(commitment_files, target)
                         self.assertEqual(
                             {
                                 path
@@ -1498,9 +1474,12 @@ class FullInstallMatrixTests(unittest.TestCase):
                     real_cleanup = (
                         "subagents_configs.transaction._sync_and_remove_journal"
                     )
-                    with patch(
-                        real_cleanup,
-                        side_effect=OSError("leave recovery evidence"),
+                    with (
+                        patch(
+                            real_cleanup,
+                            side_effect=OSError("leave recovery evidence"),
+                        ),
+                        patch("subagents_configs.transaction._stage_prepared_cleanup"),
                     ):
                         status, _output, error = self._run(
                             "install",

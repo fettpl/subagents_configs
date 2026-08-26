@@ -11,6 +11,8 @@ from typing import ClassVar, Literal
 ParserName = Literal["toml", "yaml-frontmatter"]
 ValidatorName = Literal["agent"]
 LifecycleCapability = Literal["file", "block", "manifest", "runtime"]
+COMMITMENT_ANCHOR_COUNT = 3
+COMMITMENT_ANCHOR_SIZE = 4096
 
 
 @dataclass(frozen=True)
@@ -629,6 +631,8 @@ class JournalOperation:
     ]
     expected_before_evidence: object | None = None
     expected_after_evidence: object | None = None
+    cleanup_backup_evidence: IdentityEvidence | None = None
+    backup_identity_evidence: IdentityEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -639,7 +643,11 @@ class Journal:
     participants: tuple[Target, ...]
     operation: Literal["install", "uninstall"]
     operations: tuple[JournalOperation, ...]
-    rollback_status: Literal["not-started", "in-progress", "complete", "incomplete"]
+    rollback_status: Literal[
+        "not-started", "in-progress", "complete", "incomplete", "cleanup"
+    ]
+    cleanup_participant_digests: tuple[str, ...] = ()
+    cleanup_commitment_evidence: tuple[IdentityEvidence, ...] = ()
 
 
 @dataclass(frozen=True)

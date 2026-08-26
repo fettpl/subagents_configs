@@ -123,6 +123,38 @@ class TransactionPreparationTests(unittest.TestCase):
         self.assertTrue((backups / "user-backup").exists())
         self.assertTrue(unrelated.exists())
 
+    def test_preparation_short_anchor_write_removes_owned_structural_identity(self):
+        home = self.root / "codex-home"
+        home.mkdir(mode=0o700)
+        plan = preflight_install(
+            self.repository,
+            planning_request("install", {Target.CODEX: home}),
+        )
+        injected = False
+
+        def short_write_then_fail(path, _before, content, _label):
+            nonlocal injected
+            if not injected:
+                injected = True
+                with path.open("r+b") as marker:
+                    marker.write(content[:83])
+                    marker.flush()
+                    os.fsync(marker.fileno())
+                raise OSError("injected short anchor write")
+            raise AssertionError("preparation continued after failed anchor seal")
+
+        with transaction.locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+            before = tree_snapshot(home)
+            evidence = transaction._collect_readonly_evidence(plan)
+            with patch.object(
+                transaction.filesystem,
+                "rewrite_regular_in_place",
+                side_effect=short_write_then_fail,
+            ):
+                with self.assertRaises(transaction.TransactionPreparationError):
+                    transaction._prepare(plan, evidence)
+            self.assertEqual(before, tree_snapshot(home))
+
     def test_failed_exclusive_backup_is_cleaned_before_ownership_recording(self):
         home = self.root / "codex-home"
         destination = home / "agents/code-explorer.toml"
@@ -317,6 +349,47 @@ class TransactionPreparationTests(unittest.TestCase):
         self.assertTrue(journal_path.exists())
         self.assertEqual(backup_path.read_bytes(), b"attacker backup\n")
 
+    def test_backup_cleanup_failure_preserves_all_backup_evidence(self):
+        home = self.root / "codex-home"
+        for name, content in (
+            ("code-explorer.toml", b"old explorer\n"),
+            ("code-reviewer.toml", b"old reviewer\n"),
+        ):
+            destination = home / "agents" / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(content)
+            destination.chmod(0o600)
+        prepared = self._prepared(home)
+        journal = prepared.journals[Target.CODEX]
+        journal_path = home / ".subagents_configs/journal.json"
+        backup_paths = [
+            home / ".subagents_configs" / operation.backup_path
+            for operation in journal.operations
+            if operation.backup_path is not None
+        ]
+        self.assertGreaterEqual(len(backup_paths), 2)
+        real_cas = transaction.filesystem.compare_and_swap
+
+        def fail_on_second_backup(path, before, content, mode, action):
+            if action == "unlink" and path == backup_paths[1]:
+                raise OSError("injected second backup cleanup failure")
+            return real_cas(path, before, content, mode, action)
+
+        with patch.object(
+            transaction.filesystem,
+            "compare_and_swap",
+            side_effect=fail_on_second_backup,
+        ):
+            with self.assertRaises(transaction.TransactionError):
+                transaction._sync_and_remove_journal(
+                    home,
+                    journal,
+                    journal_evidence=prepared.journal_evidence[Target.CODEX],
+                    backup_evidence=prepared.backup_evidence,
+                )
+        self.assertTrue(journal_path.exists())
+        self.assertTrue(all(path.exists() for path in backup_paths))
+
     def test_missing_journal_or_backup_fails_closed(self):
         home = self.root / "codex-home"
         prepared = self._prepared(home, preexisting=True)
@@ -352,25 +425,43 @@ class TransactionPreparationTests(unittest.TestCase):
     def test_journal_restore_does_not_overwrite_replacement(self):
         home = self.root / "codex-home"
         prepared = self._prepared(home)
-        journal = prepared.journals[Target.CODEX]
+        journal = replace(
+            prepared.journals[Target.CODEX],
+            operations=tuple(
+                replace(operation, status="applied")
+                for operation in prepared.journals[Target.CODEX].operations
+            ),
+            rollback_status="complete",
+        )
         journal_path = home / ".subagents_configs/journal.json"
-        expected = transaction.capture_evidence(journal_path, "test journal")
+        journal, expected = transaction._write_progress_journal(
+            home,
+            prepared.journals[Target.CODEX],
+            journal,
+            expected_before=prepared.journal_evidence[Target.CODEX],
+        )
         real_cas = transaction.filesystem.compare_and_swap
+        real_sync = transaction.filesystem.sync_directory
 
         def race(path, before, content, mode, action):
-            if action == "unlink":
+            if path == journal_path and action == "unlink":
                 result = real_cas(path, before, content, mode, action)
                 journal_path.write_bytes(b"attacker replacement\n")
                 journal_path.chmod(0o600)
                 return result
             return real_cas(path, before, content, mode, action)
 
+        def fail_state_sync(path):
+            if path == home / ".subagents_configs":
+                raise OSError("sync failure")
+            return real_sync(path)
+
         with (
             patch.object(transaction.filesystem, "compare_and_swap", side_effect=race),
             patch.object(
                 transaction.filesystem,
                 "sync_directory",
-                side_effect=[OSError("sync failure"), None],
+                side_effect=fail_state_sync,
             ),
         ):
             with self.assertRaises(transaction.TransactionError):
@@ -491,6 +582,64 @@ class TransactionPreparationTests(unittest.TestCase):
             with self.assertRaises(transaction.TransactionError):
                 transaction._recover_participants(homes)
         self.assertEqual(replaced_path.read_bytes(), b"attacker participant journal\n")
+
+    def test_participant_recovery_rejects_one_observed_journal_disappearing_on_load(
+        self,
+    ):
+        from subagents_configs import recovery
+
+        homes = {
+            Target.CODEX: self.root / "codex-home",
+            Target.OPENCODE: self.root / "opencode-home",
+        }
+        plan = preflight_install(
+            self.repository,
+            planning_request("install", homes),
+        )
+        with patch.object(transaction, "_sync_and_remove_journal"):
+            transaction.apply_transaction(plan)
+        real_load = recovery.load_journal
+
+        def disappear_codex(home, descriptor):
+            if descriptor.target is Target.CODEX:
+                return None
+            return real_load(home, descriptor)
+
+        with patch.object(recovery, "load_journal", side_effect=disappear_codex):
+            with self.assertRaises(transaction.IncompleteRollbackError):
+                transaction._recover_participants(homes)
+        self.assertTrue(
+            all(
+                (home / ".subagents_configs/journal.json").exists()
+                for home in homes.values()
+            )
+        )
+
+    def test_participant_recovery_rejects_all_observed_journals_disappearing_on_load(
+        self,
+    ):
+        from subagents_configs import recovery
+
+        homes = {
+            Target.CODEX: self.root / "codex-home",
+            Target.OPENCODE: self.root / "opencode-home",
+        }
+        plan = preflight_install(
+            self.repository,
+            planning_request("install", homes),
+        )
+        with patch.object(transaction, "_sync_and_remove_journal"):
+            transaction.apply_transaction(plan)
+
+        with patch.object(recovery, "load_journal", return_value=None):
+            with self.assertRaises(transaction.IncompleteRollbackError):
+                transaction._recover_participants(homes)
+        self.assertTrue(
+            all(
+                (home / ".subagents_configs/journal.json").exists()
+                for home in homes.values()
+            )
+        )
 
     def test_prepare_consumes_precomputed_backup_derivations(self):
         home = self.root / "codex-home"

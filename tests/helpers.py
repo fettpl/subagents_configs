@@ -1,3 +1,4 @@
+import os
 import shutil
 import stat
 import tempfile
@@ -41,6 +42,35 @@ def private_tempdir(*, prefix: str = "subagents-configs-"):
         temporary.cleanup()
         raise RuntimeError("private temporary directory is not mode 0700")
     return temporary
+
+
+def replace_file_with_same_content_new_inode(path: Path) -> None:
+    """Atomically replace a regular file while preserving its bytes and mode."""
+
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        raise AssertionError("same-content replacement requires a regular file")
+    content = path.read_bytes()
+    mode = stat.S_IMODE(before.st_mode)
+    descriptor, replacement_name = tempfile.mkstemp(
+        prefix=f".{path.name}.replacement-", dir=path.parent
+    )
+    replacement = Path(replacement_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+        replacement.chmod(mode)
+        candidate = replacement.lstat()
+        if (candidate.st_dev, candidate.st_ino) == (before.st_dev, before.st_ino):
+            raise AssertionError("replacement unexpectedly reused the original inode")
+        os.replace(replacement, path)
+        after = path.lstat()
+        if (after.st_dev, after.st_ino) != (candidate.st_dev, candidate.st_ino):
+            raise AssertionError("atomic replacement identity changed unexpectedly")
+        if path.read_bytes() != content or stat.S_IMODE(after.st_mode) != mode:
+            raise AssertionError("same-content replacement changed bytes or mode")
+    finally:
+        replacement.unlink(missing_ok=True)
 
 
 def tree_snapshot(root: Path) -> dict[str, tuple[str, int, bytes | str | None]]:
