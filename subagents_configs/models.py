@@ -8,7 +8,9 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import ClassVar, Literal
 
-ParserName = Literal["toml", "yaml-frontmatter"]
+from .paths import validate_profile_home_path
+
+ParserName = Literal["toml", "yaml-frontmatter", "markdown"]
 ValidatorName = Literal["agent"]
 LifecycleCapability = Literal["file", "block", "manifest", "runtime"]
 COMMITMENT_ANCHOR_COUNT = 3
@@ -452,6 +454,17 @@ class Target(enum.StrEnum):
     CODEX = "codex"
     OPENCODE = "opencode"
     CLAUDE_CODE = "claude-code"
+    PI = "pi"
+
+
+@dataclass(frozen=True)
+class TargetProfileDefaults:
+    """Safe, immutable defaults that a profile may provide for Pi."""
+
+    home: Path
+
+    def __post_init__(self) -> None:
+        validate_profile_home_path(self.home)
 
 
 @dataclass(frozen=True)
@@ -488,6 +501,9 @@ class ProfileRequest:
     targets: tuple[Target, ...]
     homes: Mapping[Target, Path]
     options: ProfileOptions
+    target_defaults: Mapping[Target, TargetProfileDefaults] = field(
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or self.schema_version != 1:
@@ -498,6 +514,8 @@ class ProfileRequest:
             raise ValueError("profile targets must be a non-empty tuple")
         if any(type(target) is not Target for target in self.targets):
             raise TypeError("profile targets must use Target values")
+        if Target.PI in self.targets:
+            raise ValueError("Pi cannot be selected by a profile")
         if len(set(self.targets)) != len(self.targets):
             raise ValueError("profile targets must be unique")
         canonical_targets = tuple(
@@ -535,7 +553,21 @@ class ProfileRequest:
             raise ValueError("profile homes must be distinct after normalization")
         if type(self.options) is not ProfileOptions:
             raise TypeError("profile options must use ProfileOptions")
+        if not isinstance(self.target_defaults, Mapping):
+            raise TypeError("profile target_defaults must be a mapping")
+        if any(target is not Target.PI for target in self.target_defaults):
+            raise ValueError("only Pi target defaults are supported")
+        if any(
+            type(value) is not TargetProfileDefaults
+            for value in self.target_defaults.values()
+        ):
+            raise TypeError("profile target defaults have the wrong type")
+        for defaults in self.target_defaults.values():
+            validate_profile_home_path(defaults.home)
         object.__setattr__(self, "homes", MappingProxyType(dict(self.homes)))
+        object.__setattr__(
+            self, "target_defaults", MappingProxyType(dict(self.target_defaults))
+        )
 
 
 @dataclass(frozen=True)
@@ -549,6 +581,10 @@ class Request:
     dry_run: bool
     dry_run_format: DryRunFormat = "text"
     client_versions: Mapping[str, str] = field(default_factory=dict)
+    pi_executable: Path | None = None
+    consent_third_party_code: bool = False
+    consent_network: bool = False
+    remove_pi_package: bool = False
 
 
 @dataclass(frozen=True)

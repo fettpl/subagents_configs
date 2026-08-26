@@ -124,14 +124,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--write", action="store_true")
     parser.add_argument("--check", action="store_true")
+    generated_capabilities = [item for item in CAPABILITIES if item.include_in_all]
     parser.add_argument(
-        "--target", choices=[item.target.value for item in CAPABILITIES]
+        "--target", choices=[item.target.value for item in generated_capabilities]
     )
     args = parser.parse_args(argv)
     if args.write == args.check:
         parser.error("choose exactly one of --write or --check")
     targets = (
-        [Target(args.target)] if args.target else [item.target for item in CAPABILITIES]
+        [Target(args.target)]
+        if args.target
+        else [item.target for item in generated_capabilities]
     )
     catalog_dir = ROOT / "catalogs"
     if args.write:

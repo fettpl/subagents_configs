@@ -24,6 +24,7 @@ from tests.helpers import environment
 def _row(**overrides):
     row = {
         "target": "codex",
+        "status": "released",
         "supported": True,
         "format_version": "toml",
         "features": ["agents", "managed-blocks", "validation-runtime"],
@@ -76,6 +77,22 @@ class CompatibilityLoaderTests(unittest.TestCase):
         self.assertIsNone(pi.tested_client_version)
         self.assertIsNone(pi.package_source)
         self.assertEqual(pi.supported_platforms, ())
+        self.assertEqual(pi.status, "unreleased")
+
+    def test_status_is_required_and_closed(self):
+        valid = _row(status="released")
+        invalid = (
+            {**valid, "status": "unreleased"},
+            {key: value for key, value in valid.items() if key != "status"},
+            {**valid, "status": "preview"},
+        )
+        for row in invalid:
+            with self.subTest(row=row):
+                with tempfile.TemporaryDirectory() as raw:
+                    path = Path(raw) / "matrix.json"
+                    path.write_text(json.dumps({"schema_version": 1, "rows": [row]}))
+                    with self.assertRaises(ValueError):
+                        load_compatibility_matrix(path)
 
     def test_loader_rejects_unknown_keys_duplicate_targets_and_invalid_versions(self):
         cases = (
@@ -117,19 +134,40 @@ class CompatibilityLoaderTests(unittest.TestCase):
                 load_compatibility_matrix(path)
 
     def test_loader_rejects_supported_pi_and_missing_optional_pi_fields(self):
+        pi_release_claim = _row(
+            target="pi",
+            status="released",
+            supported=True,
+            format_version="markdown",
+            features=["agents", "managed-blocks", "validation-runtime"],
+            tested_client_version="1.0.0",
+            supported_platforms=["linux", "macos"],
+            scope="user",
+        )
         for changes in (
-            {"target": "pi", "supported": True},
+            {"target": "pi", "status": "released", "supported": True},
             {"target": "pi", "supported": False, "tested_client_version": "1.0.0"},
             {"target": "pi", "supported": False, "features": ["agents"]},
         ):
             with self.subTest(changes=changes), tempfile.TemporaryDirectory() as raw:
                 path = Path(raw) / "matrix.json"
-                row = _row(**changes)
-                if changes["target"] == "pi":
+                if changes.get("supported") is True:
+                    rows = [
+                        _row(),
+                        _row(target="opencode", format_version="yaml-frontmatter"),
+                        _row(target="claude-code", format_version="yaml-frontmatter"),
+                        pi_release_claim,
+                    ]
+                else:
+                    row = _row(**changes)
                     row["supported_platforms"] = []
                     row["scope"] = None
                     row["package_source"] = None
-                path.write_text(json.dumps([row]), encoding="utf-8")
+                    rows = [row]
+                path.write_text(
+                    json.dumps({"schema_version": 1, "rows": rows}),
+                    encoding="utf-8",
+                )
                 with self.assertRaises(ValueError):
                     load_compatibility_matrix(path)
 
@@ -143,17 +181,19 @@ class CompatibilityAdapterTests(unittest.TestCase):
 
     def test_unsupported_pi_is_queryable_without_runtime_registration(self):
         pi = next(row for row in self.rows if row.target == "pi")
-        codex = capability_for(Target.CODEX)
+        pi_capability = capability_for(Target.PI)
         result = validate_client_compatibility(
-            codex, pi, requested_features=frozenset()
+            pi_capability, pi, requested_features=frozenset()
         )
         self.assertFalse(result.supported)
         self.assertEqual(result.reasons, ("target_unsupported",))
-        self.assertNotIn("pi", {target.value for target in Target})
-        self.assertNotIn("pi", {target.value for target in DESCRIPTORS})
+        self.assertIn("pi", {target.value for target in Target})
+        self.assertIn("pi", {target.value for target in DESCRIPTORS})
 
     def test_current_rows_validate_their_capability_contract(self):
         for capability in CAPABILITIES:
+            if capability.target is Target.PI:
+                continue
             row = next(
                 row for row in self.rows if row.target == capability.target.value
             )
@@ -181,6 +221,7 @@ class CompatibilityAdapterTests(unittest.TestCase):
             Target.CLAUDE_CODE: frozenset(
                 {"agents", "managed-blocks", "validation-runtime", "command-gate"}
             ),
+            Target.PI: frozenset({"agents", "managed-blocks", "validation-runtime"}),
         }
         self.assertEqual(
             {
@@ -440,6 +481,80 @@ class ClientVersionCliTests(unittest.TestCase):
                         payload["compatibility"]["reasons"], ["client_version_too_old"]
                     )
                 self.assertEqual(set(root.rglob("*")), before)
+
+    def test_unsupported_pi_stops_before_sources_writes_or_commands(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "pi-home"
+            out, err = io.StringIO(), io.StringIO()
+            with (
+                patch("subagents_configs.planning._selected_sources") as sources,
+                patch("subagents_configs.orchestrator.apply_transaction") as apply,
+                patch("subagents_configs.orchestrator._journal_groups") as journals,
+            ):
+                status = run(
+                    "install",
+                    [
+                        "--target",
+                        "pi",
+                        "--home",
+                        f"pi={home}",
+                        "--pi-executable",
+                        "/opt/pi",
+                        "--consent-third-party-code",
+                        "--consent-network",
+                        "--dry-run",
+                    ],
+                    repo_root=Path(__file__).parents[1],
+                    environ={"HOME": str(root)},
+                    stdout=out,
+                    stderr=err,
+                )
+            self.assertEqual(status, EXIT_PREFLIGHT_ERROR)
+            self.assertIn("target_unsupported", err.getvalue())
+            sources.assert_not_called()
+            apply.assert_not_called()
+            journals.assert_not_called()
+            self.assertFalse(home.exists())
+
+    def test_pi_dry_run_reports_required_consents_without_recording_them(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for format_args in ([], ["--format", "json"]):
+                outputs = []
+                for extra in ([], ["--consent-third-party-code", "--consent-network"]):
+                    out, err = io.StringIO(), io.StringIO()
+                    status = run(
+                        "install",
+                        [
+                            "--target",
+                            "pi",
+                            "--home",
+                            f"pi={root / 'pi-home'}",
+                            "--pi-executable",
+                            "/opt/pi",
+                            "--dry-run",
+                            *format_args,
+                            *extra,
+                        ],
+                        repo_root=Path(__file__).parents[1],
+                        environ={"HOME": str(root)},
+                        stdout=out,
+                        stderr=err,
+                    )
+                    self.assertEqual(status, EXIT_PREFLIGHT_ERROR)
+                    outputs.append(out.getvalue())
+                self.assertEqual(outputs[0], outputs[1])
+                if format_args:
+                    payload = json.loads(outputs[0])
+                    self.assertEqual(
+                        payload["compatibility"]["required_consents"],
+                        ["third-party-code", "network"],
+                    )
+                else:
+                    self.assertIn(
+                        "required_consents=third-party-code,network", outputs[0]
+                    )
 
 
 if __name__ == "__main__":

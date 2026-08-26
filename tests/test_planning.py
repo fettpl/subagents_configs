@@ -1167,6 +1167,77 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(actions["code-explorer"], "remove")
         self.assertEqual(actions["code-reviewer"], "restore")
 
+    def test_direct_pi_request_requires_consent_before_planning(self):
+        home = self.root / "pi-home"
+        request = Request(
+            "install",
+            (Target.PI,),
+            {Target.PI: home},
+            False,
+            False,
+            False,
+            False,
+            pi_executable=Path("/opt/pi"),
+        )
+        with patch("subagents_configs.planning.validate_validation_helper"):
+            with self.assertRaises(ValueError):
+                from subagents_configs.planning import validate_request_shape
+
+                validate_request_shape(request, "install")
+
+    def test_direct_pi_request_rejects_non_absolute_executable(self):
+        home = self.root / "pi-home"
+        request = Request(
+            "install",
+            (Target.PI,),
+            {Target.PI: home},
+            False,
+            False,
+            False,
+            True,
+            pi_executable=Path("~/pi"),
+        )
+        with patch("subagents_configs.planning.validate_validation_helper"):
+            with self.assertRaises(ValueError):
+                from subagents_configs.planning import validate_request_shape
+
+                validate_request_shape(request, "install")
+
+    def test_direct_pi_dry_run_rejects_retained_consent(self):
+        request = Request(
+            "install",
+            (Target.PI,),
+            {Target.PI: self.root / "pi-home"},
+            False,
+            False,
+            False,
+            True,
+            pi_executable=Path("/opt/pi"),
+            consent_third_party_code=True,
+        )
+        with patch("subagents_configs.planning.validate_validation_helper"):
+            with self.assertRaises(ValueError):
+                from subagents_configs.planning import validate_request_shape
+
+                validate_request_shape(request, "install")
+
+    def test_direct_pi_uninstall_package_removal_requires_executable(self):
+        request = Request(
+            "uninstall",
+            (Target.PI,),
+            {Target.PI: self.root / "pi-home"},
+            False,
+            False,
+            False,
+            False,
+            remove_pi_package=True,
+        )
+        with patch("subagents_configs.planning.validate_validation_helper"):
+            with self.assertRaises(ValueError):
+                from subagents_configs.planning import validate_request_shape
+
+                validate_request_shape(request, "uninstall")
+
     def _snapshot(self, home):
         if not home.exists():
             return None

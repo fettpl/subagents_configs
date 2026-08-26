@@ -35,7 +35,7 @@ from tests.helpers import (
 )
 from tests.validation_isolated_test_support import system_executable
 
-TARGETS = DESCRIPTOR_ORDER
+TARGETS = tuple(target for target in DESCRIPTOR_ORDER if target is not Target.PI)
 COMBINATIONS = tuple(
     combination
     for size in range(1, len(TARGETS) + 1)

@@ -20,6 +20,7 @@ from .models import (
     Target,
     TargetCapability,
     TargetDescriptor,
+    TargetProfileDefaults,
     decode_lifecycle_action,
 )
 from .targets import (
@@ -48,6 +49,7 @@ __all__ = [
     "Target",
     "TargetCapability",
     "TargetDescriptor",
+    "TargetProfileDefaults",
     "capability_for",
     "decode_lifecycle_action",
     "load_compatibility_matrix",

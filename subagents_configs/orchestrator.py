@@ -61,7 +61,7 @@ HELP_TEXT = {
         "Usage: install.sh (--target TARGET ... | --all) [OPTIONS]\n"
         "\n"
         "Install the selected roles, routing source, and private validation runtime.\n"
-        "Targets: codex, opencode, claude-code; --all selects all three.\n"
+        "Targets: codex, opencode, claude-code, pi; --all selects the first three.\n"
         "Defaults: homes use TARGET-specific environment variables, then HOME;\n"
         "CLI --home TARGET=PATH overrides environment/default homes.\n"
         "Default install excludes commit-pusher and does not edit global instructions\n"
@@ -78,18 +78,22 @@ HELP_TEXT = {
         "--format json selects the versioned structured dry-run output.\n"
         "--client-version TARGET=VERSION supplies caller-owned version evidence;\n"
         "absent versions use the maintained tested matrix row.\n"
+        "Pi is explicit-only; --pi-executable and both consent flags authorize\n"
+        "later Pi package work, while --dry-run reports missing consent safely.\n"
         "Options: --target TARGET, --all, --home TARGET=PATH, --profile PATH,\n"
         "         --enable-global-routing/--no-global-routing,\n"
         "         --enable-codex-multi-agent/--no-codex-multi-agent,\n"
         "         --include-commit-pusher/--no-commit-pusher,\n"
-        "         --client-version TARGET=VERSION, --dry-run/--no-dry-run,\n"
+        "         --client-version TARGET=VERSION, --pi-executable PATH,\n"
+        "         --consent-third-party-code, --consent-network,\n"
+        "         --dry-run/--no-dry-run,\n"
         "         --format text|json, --help\n"
     ),
     "uninstall": (
         "Usage: uninstall.sh (--target TARGET ... | --all) [OPTIONS]\n"
         "\n"
         "Conservatively remove exact managed files/blocks and restore proven backups.\n"
-        "Targets: codex, opencode, claude-code; --all selects all three.\n"
+        "Targets: codex, opencode, claude-code, pi; --all selects the first three.\n"
         "Defaults: homes use TARGET-specific environment variables, then HOME;\n"
         "CLI --home TARGET=PATH overrides environment/default homes.\n"
         "Unresolved, changed, missing, unsafe, or preexisting entries are retained\n"
@@ -103,8 +107,10 @@ HELP_TEXT = {
         "targets, homes, booleans, dry-run, and format values take precedence.\n"
         "--client-version TARGET=VERSION supplies caller-owned version evidence;\n"
         "absent versions use the maintained tested matrix row.\n"
+        "Pi package removal is explicit and requires --target pi.\n"
         "Options: --target TARGET, --all, --home TARGET=PATH, --profile PATH,\n"
-        "         --client-version TARGET=VERSION, --dry-run/--no-dry-run,\n"
+        "         --client-version TARGET=VERSION, --pi-executable PATH,\n"
+        "         --remove-pi-package, --dry-run/--no-dry-run,\n"
         "         --format text|json, --help\n"
     ),
 }
@@ -187,6 +193,12 @@ def _compatibility_output(
                         "target": failure.target,
                         "supported": False,
                         "reasons": list(failure.result.reasons),
+                        **(
+                            {"required_consents": ["third-party-code", "network"]}
+                            if failure.target == Target.PI.value
+                            and request.operation == "install"
+                            else {}
+                        ),
                     },
                 },
                 sort_keys=True,
@@ -199,6 +211,10 @@ def _compatibility_output(
             f"compatibility: target={failure.target} supported=false "
             f"reasons={','.join(failure.result.reasons)}\n"
         )
+        if failure.target == Target.PI.value and request.operation == "install":
+            rendered = (
+                rendered.rstrip("\n") + " required_consents=third-party-code,network\n"
+            )
     return _write_output(stdout, rendered)
 
 

@@ -46,6 +46,7 @@ _PLATFORMS = frozenset({"linux", "macos"})
 _ROW_KEYS = frozenset(
     {
         "target",
+        "status",
         "supported",
         "format_version",
         "features",
@@ -113,6 +114,7 @@ def _target_features(
 @dataclass(frozen=True)
 class ClientCompatibility:
     target: CompatibilityTarget
+    status: Literal["released", "unreleased"]
     supported: bool
     format_version: str
     features: frozenset[str]
@@ -127,8 +129,12 @@ class ClientCompatibility:
     def __post_init__(self) -> None:
         if self.target not in COMPATIBILITY_TARGETS:
             raise ValueError("unknown compatibility target")
+        if self.status not in ("released", "unreleased"):
+            raise ValueError("unsupported compatibility status")
         if type(self.supported) is not bool:
             raise TypeError("supported must be a bool")
+        if self.target == _FUTURE_TARGET and self.supported:
+            raise ValueError("Pi compatibility cannot be released in this task")
         if self.format_version not in _FORMATS:
             raise ValueError("unsupported compatibility format")
         if (
@@ -173,6 +179,8 @@ class ClientCompatibility:
         if self.scope not in (None, "user"):
             raise ValueError("unsupported compatibility scope")
         if self.supported:
+            if self.status != "released":
+                raise ValueError("supported rows must be released")
             if (
                 self.minimum_client_version is None
                 or self.tested_client_version is None
@@ -187,6 +195,8 @@ class ClientCompatibility:
                 "only the compatibility-only future row may be unsupported"
             )
         else:
+            if self.status != "unreleased":
+                raise ValueError("unsupported future row must be unreleased")
             if (
                 self.minimum_client_version is not None
                 or self.tested_client_version is not None
@@ -232,6 +242,9 @@ def _decode_row(raw: object) -> ClientCompatibility:
     target = raw["target"]
     if target not in COMPATIBILITY_TARGETS:
         raise ValueError("unknown compatibility target")
+    status = raw["status"]
+    if status not in ("released", "unreleased"):
+        raise ValueError("unsupported compatibility status")
     supported = raw["supported"]
     if type(supported) is not bool:
         raise ValueError("supported must be a bool")
@@ -258,6 +271,7 @@ def _decode_row(raw: object) -> ClientCompatibility:
         raise ValueError("unsupported compatibility scope")
     return ClientCompatibility(
         target=target,
+        status=status,
         supported=supported,
         format_version=format_version,
         features=frozenset(features),

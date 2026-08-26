@@ -111,7 +111,7 @@ class ReadmeContractTests(unittest.TestCase):
         cls.text = README.read_text(encoding="utf-8")
         cls.lower = cls.text.lower()
 
-    def test_readme_is_standalone_and_names_supported_targets_and_pi_exclusion(self):
+    def test_readme_is_standalone_and_names_supported_targets_and_pi_boundary(self):
         for target in DESCRIPTOR_ORDER:
             self.assertIn(target.value, self.lower)
             descriptor = descriptor_for(target)
@@ -119,17 +119,10 @@ class ReadmeContractTests(unittest.TestCase):
             self.assertIn(descriptor.default_home, self.text)
             self.assertIn(descriptor.global_filename, self.text)
         self.assertIn("pi", self.lower)
-        self.assertIn("pi-coding-agent", self.lower)
         self.assertRegex(
             self.lower,
-            r"pi(?:-coding-agent)?[^.\n]{0,80}(?:excluded|out of scope|not supported)",
+            r"pi[^.\n]{0,100}(?:unreleased|unsupported|explicitly selected)",
         )
-        active_text = "\n".join(
-            source.source.as_posix()
-            for target in DESCRIPTOR_ORDER
-            for source in descriptor_for(target).sources
-        )
-        self.assertNotIn("pi", active_text.lower())
         self.assertFalse(list(ROOT.glob("*pi*.sh")))
 
     def test_role_and_target_model_facts_are_derived_from_catalog(self):
@@ -149,6 +142,7 @@ class ReadmeContractTests(unittest.TestCase):
         expected = {
             (target.value, role): _catalog_policy(target, role)
             for target in DESCRIPTOR_ORDER
+            if target is not Target.PI
             for role in sorted(roles)
         }
         actual = _policy_table(self.text)
@@ -172,6 +166,8 @@ class ReadmeContractTests(unittest.TestCase):
     def test_default_and_opt_in_inventory_comes_from_descriptors(self):
         for target in DESCRIPTOR_ORDER:
             descriptor = descriptor_for(target)
+            if target is Target.PI:
+                continue
             default_sources = selected_sources(descriptor, include_commit_pusher=False)
             selected_ids = {source.identifier for source in default_sources}
             self.assertNotIn("commit-pusher", selected_ids)
