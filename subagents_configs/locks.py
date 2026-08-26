@@ -186,9 +186,14 @@ def _create_and_publish_home(
         raise ValueError("cannot allocate private home publication")
 
     descriptor = None
+    temporary_identity = None
     identity = None
     published = False
     try:
+        created = os.stat(temporary_name, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(created.st_mode) or created.st_uid != os.getuid():
+            raise ValueError("target home ownership is invalid")
+        temporary_identity = (created.st_dev, created.st_ino)
         descriptor = os.open(temporary_name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
         result = os.fstat(descriptor)
         if not stat.S_ISDIR(result.st_mode) or result.st_uid != os.getuid():
@@ -208,9 +213,10 @@ def _create_and_publish_home(
             raise ValueError("target home identity changed")
         return descriptor, identity
     except BaseException:
-        if identity is not None:
+        cleanup_identity = identity or temporary_identity
+        if cleanup_identity is not None:
             cleanup_name = normalized.name if published else temporary_name
-            _cleanup_owned_directory(parent_fd, cleanup_name, identity)
+            _cleanup_owned_directory(parent_fd, cleanup_name, cleanup_identity)
         if descriptor is not None:
             os.close(descriptor)
         raise

@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import stat
 import threading
 import unittest
@@ -6,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+import subagents_configs.locks as locks
 from subagents_configs import filesystem, recovery
 from subagents_configs.locks import (
     capture_evidence,
@@ -166,6 +168,59 @@ class LockAndEvidenceTests(unittest.TestCase):
                 [entry.name for entry in parent.iterdir() if ".tmp-" in entry.name],
                 [],
             )
+
+    def test_absent_home_temp_open_failure_cleans_owned_temp(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            parent = root / "parent"
+            parent.mkdir(mode=0o700)
+            home = parent / "home"
+            real_open = locks.os.open
+
+            def fail_temp_open(path, *args, **kwargs):
+                if isinstance(path, str) and path.startswith(".home.tmp-"):
+                    raise OSError(errno.EIO, "injected temporary open failure")
+                return real_open(path, *args, **kwargs)
+
+            with patch.object(locks.os, "open", side_effect=fail_temp_open):
+                with self.assertRaisesRegex(OSError, "temporary open failure"):
+                    with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                        pass
+            self.assertEqual(
+                [entry.name for entry in parent.iterdir() if ".tmp-" in entry.name],
+                [],
+            )
+
+    def test_absent_home_temp_open_replacement_is_preserved(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            parent = root / "parent"
+            parent.mkdir(mode=0o700)
+            home = parent / "home"
+            replacement = parent / "replacement"
+            replacement.mkdir(mode=0o700)
+            real_open = locks.os.open
+
+            def fail_after_replacement(path, *args, **kwargs):
+                if isinstance(path, str) and path.startswith(".home.tmp-"):
+                    temporary_entry = next(
+                        entry for entry in parent.iterdir() if ".tmp-" in entry.name
+                    )
+                    temporary_entry.rmdir()
+                    temporary_entry.symlink_to(replacement, target_is_directory=True)
+                    raise OSError(errno.EIO, "injected temporary open failure")
+                return real_open(path, *args, **kwargs)
+
+            with patch.object(locks.os, "open", side_effect=fail_after_replacement):
+                with self.assertRaisesRegex(OSError, "temporary open failure"):
+                    with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                        pass
+            temporary_entries = [
+                entry for entry in parent.iterdir() if ".tmp-" in entry.name
+            ]
+            self.assertEqual(len(temporary_entries), 1)
+            self.assertTrue(temporary_entries[0].is_symlink())
+            self.assertEqual(temporary_entries[0].resolve(), replacement)
 
     def test_home_and_ancestor_symlinks_are_rejected_without_redirected_lock(self):
         with private_tempdir() as temporary:
