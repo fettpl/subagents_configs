@@ -1877,20 +1877,28 @@ def recover_incomplete_journal(home: Path, descriptor) -> None:
     if descriptor.target not in set(registry_target_order()):
         raise ValueError("unsupported target descriptor")
     assert_safe_home(home)
-    journal = load_journal(home, descriptor)
-    if journal is None:
-        return
-    if len(journal.participants) != 1:
-        participants = ", ".join(item.value for item in journal.participants)
-        raise ValueError(
-            f"multi-participant recovery requires all homes: {participants}"
-        )
-    _recover_participants({descriptor.target: home})
+    with locked_target_homes({descriptor.target: home}, (descriptor.target,)):
+        journal = load_journal(home, descriptor)
+        if journal is None:
+            return
+        if len(journal.participants) != 1:
+            participants = ", ".join(item.value for item in journal.participants)
+            raise ValueError(
+                f"multi-participant recovery requires all homes: {participants}"
+            )
+        _recover_participants({descriptor.target: home})
 
 
 def recover_participants(homes: Mapping[Target, Path]) -> None:
     """Public participant recovery adapter used by the recovery module."""
-    _recover_participants(homes)
+    from .recovery import recover_transaction
+
+    targets = tuple(
+        target
+        for target in registry_target_order()
+        if isinstance(homes, Mapping) and target in homes
+    )
+    recover_transaction(homes, targets)
 
 
 # Recovery helpers are public implementation seams so the recovery module can

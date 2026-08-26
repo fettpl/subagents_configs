@@ -3,6 +3,7 @@ import json
 import os
 import stat
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1840,6 +1841,53 @@ class TransactionInstallTests(unittest.TestCase):
         self.assertIn("codex", str(recovery_error.exception))
         self.assertIn("opencode", str(recovery_error.exception))
         self.assertTrue((self._home() / ".subagents_configs/journal.json").exists())
+
+    def test_public_single_recovery_locks_before_journal_discovery(self):
+        from subagents_configs import transaction
+
+        home = self._home()
+        home.mkdir()
+        events = []
+
+        @contextmanager
+        def recording_lock(_homes, _targets):
+            events.append("lock")
+            yield
+
+        def no_journal(_home, _descriptor):
+            events.append("journal")
+            return None
+
+        with patch.object(transaction, "locked_target_homes", recording_lock):
+            with patch.object(transaction, "load_journal", side_effect=no_journal):
+                transaction.recover_incomplete_journal(
+                    home, descriptor_for(Target.CODEX)
+                )
+
+        self.assertEqual(events, ["lock", "journal"])
+
+    def test_public_participant_recovery_delegates_to_canonical_recovery(self):
+        from subagents_configs import recovery, transaction
+
+        homes = {
+            Target.OPENCODE: self._home(Target.OPENCODE),
+            Target.CODEX: self._home(Target.CODEX),
+        }
+        for home in homes.values():
+            home.mkdir()
+        calls = []
+
+        def record_recovery(received_homes, targets):
+            calls.append((received_homes, targets))
+
+        with patch.object(
+            recovery, "recover_transaction", side_effect=record_recovery
+        ):
+            with patch.object(recovery, "recover_participants_impl") as implementation:
+                transaction.recover_participants(homes)
+
+        self.assertEqual(calls, [(homes, (Target.CODEX, Target.OPENCODE))])
+        implementation.assert_not_called()
 
 
 if __name__ == "__main__":
