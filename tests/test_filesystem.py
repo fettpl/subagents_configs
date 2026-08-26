@@ -7,8 +7,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from subagents_configs import filesystem
+from subagents_configs.errors import TransactionError
 from subagents_configs.filesystem import (
     atomic_write,
+    capture_evidence,
+    compare_and_swap,
     ensure_private_directory,
     exclusive_backup,
     sha256_bytes,
@@ -20,6 +24,83 @@ TEMP_DIR = "/private/tmp" if Path("/private/tmp").is_dir() else None
 
 
 class FilesystemTests(unittest.TestCase):
+    def test_create_race_preserves_late_target_and_fails(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+
+            def attacker_before_create(_parent):
+                path.write_bytes(b"user create race")
+                path.chmod(0o600)
+
+            with patch.object(
+                filesystem, "_before_create_mutation", attacker_before_create
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, None, b"installer bytes", 0o600, "create")
+            self.assertEqual(path.read_bytes(), b"user create race")
+
+    def test_replace_race_preserves_late_target_and_fails(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+
+            def attacker_before_replace(_parent):
+                path.unlink()
+                path.write_bytes(b"user replace race")
+                path.chmod(0o600)
+
+            with patch.object(
+                filesystem, "_before_replace_mutation", attacker_before_replace
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, before, b"installer bytes", 0o600, "replace")
+            self.assertEqual(path.read_bytes(), b"user replace race")
+
+    def test_unlink_race_preserves_late_target_and_fails(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+
+            def attacker_before_unlink(_parent):
+                path.unlink()
+                path.write_bytes(b"user unlink race")
+                path.chmod(0o600)
+
+            with patch.object(
+                filesystem, "_before_unlink_mutation", attacker_before_unlink
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, before, None, None, "unlink")
+            self.assertEqual(path.read_bytes(), b"user unlink race")
+
+    def test_chmod_race_preserves_late_target_and_fails(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+
+            def attacker_before_chmod(_parent):
+                path.unlink()
+                path.write_bytes(b"user chmod race")
+                path.chmod(0o640)
+
+            with patch.object(
+                filesystem, "_before_chmod_mutation", attacker_before_chmod
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, before, None, 0o644, "chmod")
+            self.assertEqual(path.read_bytes(), b"user chmod race")
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
+
     def test_hash_helpers_match_sha256(self):
         content = b"known bytes\x00"
         expected = hashlib.sha256(content).hexdigest()

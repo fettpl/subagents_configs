@@ -9,6 +9,7 @@ import secrets
 import stat
 from collections.abc import Callable
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,21 @@ _CHUNK_SIZE = 1024 * 1024
 _DIRECTORY_FLAGS = (
     os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 )
+_ATOMIC_EXPECTATION_UNSET = object()
+_ATOMIC_EXPECTATION: ContextVar[object] = ContextVar(
+    "subagents_configs_atomic_expectation", default=_ATOMIC_EXPECTATION_UNSET
+)
+
+
+@contextmanager
+def expected_atomic_identity(before: IdentityEvidence | None):
+    """Bind an expected identity for callers that retain the atomic-write seam."""
+
+    token = _ATOMIC_EXPECTATION.set(before)
+    try:
+        yield
+    finally:
+        _ATOMIC_EXPECTATION.reset(token)
 
 
 def _after_parent_pin(operation: str, parent: Path) -> None:
@@ -359,7 +375,14 @@ def compare_and_swap(
     after_mode: int | None,
     action: str,
 ) -> IdentityEvidence | None:
-    """Mutate a regular target only when complete descriptor evidence matches."""
+    """Mutate a regular target only when complete descriptor evidence matches.
+
+    Creates use a same-directory hard link so a late-created target can never
+    be overwritten. Replacements and removals detach the proven target into a
+    private quarantine name before installing/removing anything; if the
+    detached identity is not the expected one, it is restored without
+    overwriting a concurrent replacement.
+    """
 
     if action not in {"create", "replace", "unlink", "chmod"}:
         raise ValueError("unsupported compare-and-swap action")
@@ -402,27 +425,76 @@ def compare_and_swap(
         if not _same_evidence(current, before):
             raise TransactionError("target identity evidence does not match")
         if action == "unlink":
-            try:
-                os.unlink(target.name, dir_fd=parent_fd)
-            except FileNotFoundError as exc:
-                raise TransactionError("target disappeared during unlink") from exc
-            _sync_parent_directory_fd(parent_fd)
-            return None
-        if action == "chmod":
-            if current is None or after_mode is None:
-                raise TransactionError("chmod requires an existing target")
+            if current is None:
+                raise TransactionError("unlink requires an existing target")
+            _before_unlink_mutation(target.parent)
             descriptor = os.open(
                 target.name,
                 os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
                 dir_fd=parent_fd,
             )
             try:
+                revalidated = _evidence_from_descriptor(descriptor, "unlink target")
+            finally:
+                os.close(descriptor)
+            if revalidated != before:
+                raise TransactionError("target identity changed before unlink")
+            quarantine = _quarantine_path(target.parent, target).name
+            try:
+                os.rename(
+                    target.name,
+                    quarantine,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                )
+            except OSError as exc:
+                raise TransactionError("target disappeared during unlink") from exc
+            detached = None
+            try:
+                descriptor = os.open(
+                    quarantine,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+                try:
+                    detached = _evidence_from_descriptor(
+                        descriptor, "unlink quarantine"
+                    )
+                finally:
+                    os.close(descriptor)
+                if detached != before:
+                    _restore_quarantine(parent_fd, quarantine, target.name, detached)
+                    raise TransactionError("target identity changed during unlink")
+                os.unlink(quarantine, dir_fd=parent_fd)
+            except BaseException:
+                if detached != before:
+                    _restore_quarantine(parent_fd, quarantine, target.name, before)
+                raise
+            _sync_parent_directory_fd(parent_fd)
+            if capture_evidence(target, "unlinked target") is not None:
+                raise TransactionError("unlink postcondition could not be proved")
+            return None
+        if action == "chmod":
+            if current is None or after_mode is None:
+                raise TransactionError("chmod requires an existing target")
+            _before_chmod_mutation(target.parent)
+            descriptor = os.open(
+                target.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            try:
+                revalidated = _evidence_from_descriptor(descriptor, "chmod target")
+                if revalidated != before:
+                    raise TransactionError("target identity changed before chmod")
                 os.fchmod(descriptor, after_mode)
                 os.fsync(descriptor)
                 result = _evidence_from_descriptor(descriptor, "chmod target")
             finally:
                 os.close(descriptor)
             _sync_parent_directory_fd(parent_fd)
+            if capture_evidence(target, "chmod target") != result:
+                raise TransactionError("chmod target was replaced during mutation")
             return result
         if after_content is None or after_mode is None:
             raise TransactionError("replacement content is missing")
@@ -431,7 +503,7 @@ def compare_and_swap(
         temporary = _temporary_path(target.parent, target)
         descriptor = None
         created = False
-        replaced = False
+        installed = False
         try:
             descriptor = os.open(
                 temporary.name,
@@ -443,39 +515,134 @@ def compare_and_swap(
             _write_all(descriptor, after_content)
             os.fchmod(descriptor, after_mode)
             os.fsync(descriptor)
-            expected = os.fstat(descriptor)
-            os.replace(
-                temporary.name, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd
+            temporary_evidence = _evidence_from_descriptor(
+                descriptor, "CAS temporary", known_content=after_content
             )
-            replaced = True
-            installed = _stat_at_no_follow(parent_fd, target.name)
-            if installed is None or (installed.st_dev, installed.st_ino) != (
-                expected.st_dev,
-                expected.st_ino,
-            ):
-                raise TransactionError("replacement identity mismatch")
-            os.close(descriptor)
-            descriptor = None
+            if action == "create":
+                _before_create_mutation(target.parent)
+                current = _stat_at(parent_fd, target.name, "create target")
+                if current is not None:
+                    raise TransactionError("create target appeared during mutation")
+                mutation = "create"
+            else:
+                _before_replace_mutation(target.parent)
+                mutation = "replace"
+                # The first check is intentionally after the temporary has
+                # been flushed. A second descriptor-relative proof happens
+                # immediately before detaching the target below.
+                descriptor_target = os.open(
+                    target.name,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+                try:
+                    if (
+                        _evidence_from_descriptor(descriptor_target, "replace target")
+                        != before
+                    ):
+                        raise TransactionError(
+                            "target identity changed before replacement"
+                        )
+                finally:
+                    os.close(descriptor_target)
+
+            temporary_stat = _stat_at_no_follow(parent_fd, temporary.name)
+            if temporary_stat is None or (
+                temporary_stat.st_dev,
+                temporary_stat.st_ino,
+            ) != (temporary_evidence.device, temporary_evidence.inode):
+                raise TransactionError("CAS temporary identity changed")
+
+            if mutation == "create":
+                try:
+                    _link_no_replace(parent_fd, temporary.name, target.name)
+                except FileExistsError as exc:
+                    raise TransactionError(
+                        "create target appeared during mutation"
+                    ) from exc
+                installed = True
+            else:
+                quarantine = _quarantine_path(target.parent, target).name
+                detached: IdentityEvidence | None = None
+                try:
+                    os.rename(
+                        target.name,
+                        quarantine,
+                        src_dir_fd=parent_fd,
+                        dst_dir_fd=parent_fd,
+                    )
+                    descriptor_target = os.open(
+                        quarantine,
+                        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=parent_fd,
+                    )
+                    try:
+                        detached = _evidence_from_descriptor(
+                            descriptor_target, "replace quarantine"
+                        )
+                    finally:
+                        os.close(descriptor_target)
+                    if detached != before:
+                        _restore_quarantine(
+                            parent_fd, quarantine, target.name, detached
+                        )
+                        raise TransactionError(
+                            "target identity changed during replacement"
+                        )
+                    try:
+                        _link_no_replace(parent_fd, temporary.name, target.name)
+                    except FileExistsError as exc:
+                        _remove_owned_quarantine(parent_fd, quarantine, before)
+                        raise TransactionError(
+                            "replacement target appeared during mutation"
+                        ) from exc
+                    installed = True
+                    _remove_owned_quarantine(parent_fd, quarantine, before)
+                except BaseException:
+                    if not installed and detached == before:
+                        _restore_quarantine(parent_fd, quarantine, target.name, before)
+                    raise
+
+            _remove_owned_temp(parent_fd, temporary.name, temporary_evidence)
             _sync_parent_directory_fd(parent_fd)
         except OSError as exc:
             raise TransactionError("compare-and-swap replacement failed") from exc
         finally:
             if descriptor is not None:
                 os.close(descriptor)
-            if created and not replaced:
+            if created and not installed:
                 try:
-                    os.unlink(temporary.name, dir_fd=parent_fd)
+                    temporary_stat = _stat_at_no_follow(parent_fd, temporary.name)
+                    if temporary_stat is not None:
+                        descriptor_temp = os.open(
+                            temporary.name,
+                            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                            dir_fd=parent_fd,
+                        )
+                        try:
+                            owned_temp = _evidence_from_descriptor(
+                                descriptor_temp, "CAS temporary cleanup"
+                            )
+                        finally:
+                            os.close(descriptor_temp)
+                        if owned_temp.sha256 == sha256_bytes(after_content):
+                            os.unlink(temporary.name, dir_fd=parent_fd)
                 except OSError:
                     pass
+        if action == "create" and not installed:
+            raise TransactionError("create target was not installed")
         descriptor = os.open(
             target.name,
             os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
             dir_fd=parent_fd,
         )
         try:
-            return _evidence_from_descriptor(descriptor, f"{action} target")
+            result = _evidence_from_descriptor(descriptor, f"{action} target")
         finally:
             os.close(descriptor)
+        if result.sha256 != sha256_bytes(after_content) or result.mode != after_mode:
+            raise TransactionError("replacement postcondition could not be proved")
+        return result
 
 
 def safe_mutate(
@@ -636,6 +803,110 @@ def _temporary_path(parent: Path, target: Path) -> Path:
     return parent / f".{target.name}.tmp-{secrets.token_hex(16)}"
 
 
+def _quarantine_path(parent: Path, target: Path) -> Path:
+    return parent / f".{target.name}.cas-{secrets.token_hex(16)}"
+
+
+def _before_create_mutation(_parent: Path) -> None:
+    """Stable seam immediately before a no-overwrite create."""
+
+
+def _before_replace_mutation(_parent: Path) -> None:
+    """Stable seam immediately before a replacement revalidation."""
+
+
+def _before_unlink_mutation(_parent: Path) -> None:
+    """Stable seam immediately before an unlink revalidation."""
+
+
+def _before_chmod_mutation(_parent: Path) -> None:
+    """Stable seam immediately before a chmod revalidation."""
+
+
+def _link_no_replace(parent_fd: int, source: str, target: str) -> None:
+    os.link(
+        source,
+        target,
+        src_dir_fd=parent_fd,
+        dst_dir_fd=parent_fd,
+        follow_symlinks=False,
+    )
+
+
+def _restore_quarantine(
+    parent_fd: int, quarantine: str, target: str, expected: IdentityEvidence
+) -> None:
+    """Restore a detached expected file without overwriting a replacement."""
+
+    try:
+        quarantine_stat = _stat_at_no_follow(parent_fd, quarantine)
+        if quarantine_stat is None:
+            return
+        descriptor = os.open(
+            quarantine,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        try:
+            if _evidence_from_descriptor(descriptor, "CAS quarantine") != expected:
+                return
+        finally:
+            os.close(descriptor)
+        try:
+            _link_no_replace(parent_fd, quarantine, target)
+        except FileExistsError:
+            return
+        os.unlink(quarantine, dir_fd=parent_fd)
+    except (FileNotFoundError, OSError):
+        return
+
+
+def _remove_owned_quarantine(
+    parent_fd: int, quarantine: str, expected: IdentityEvidence
+) -> None:
+    descriptor = os.open(
+        quarantine,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=parent_fd,
+    )
+    try:
+        actual = _evidence_from_descriptor(descriptor, "CAS quarantine")
+    finally:
+        os.close(descriptor)
+    if actual != expected:
+        raise TransactionError("CAS quarantine identity changed")
+    os.unlink(quarantine, dir_fd=parent_fd)
+
+
+def _remove_owned_temp(
+    parent_fd: int, temporary: str, expected: IdentityEvidence
+) -> None:
+    descriptor = os.open(
+        temporary,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=parent_fd,
+    )
+    try:
+        actual = _evidence_from_descriptor(descriptor, "CAS temporary cleanup")
+    finally:
+        os.close(descriptor)
+    if (
+        actual.device,
+        actual.inode,
+        actual.size,
+        actual.mode,
+        actual.sha256,
+    ) != (
+        expected.device,
+        expected.inode,
+        expected.size,
+        expected.mode,
+        expected.sha256,
+    ):
+        raise TransactionError("CAS temporary identity changed")
+    os.unlink(temporary, dir_fd=parent_fd)
+
+
 def atomic_write(path: Path, content: bytes, mode: int = 0o600) -> IdentityEvidence:
     """Replace a regular target with complete, durably flushed bytes."""
 
@@ -643,6 +914,17 @@ def atomic_write(path: Path, content: bytes, mode: int = 0o600) -> IdentityEvide
         raise TypeError("content must be bytes")
     if mode < 0 or mode > 0o777 or mode & 0o077:
         raise ValueError("managed file mode must not grant group or other access")
+    expected = _ATOMIC_EXPECTATION.get()
+    if expected is not _ATOMIC_EXPECTATION_UNSET:
+        if expected is not None and not isinstance(expected, IdentityEvidence):
+            raise TypeError("atomic expected identity has the wrong type")
+        return compare_and_swap(
+            path,
+            expected,
+            content,
+            mode,
+            "create" if expected is None else "replace",
+        )
     target = normalized_absolute(path)
     parent = target.parent
     with _pinned_directory(parent, "atomic-write parent") as parent_fd:

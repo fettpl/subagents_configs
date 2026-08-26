@@ -160,6 +160,31 @@ class TransactionPreparationTests(unittest.TestCase):
             )
         self.assertEqual(path.read_bytes(), encode_journal(replacement))
 
+    def test_journal_update_requires_expected_identity_and_preserves_replacement(self):
+        home = self.root / "codex-home"
+        prepared = self._prepared(home)
+        journal = prepared.journals[Target.CODEX]
+        path = home / ".subagents_configs/journal.json"
+        expected = prepared.journal_evidence[Target.CODEX]
+        replacement = replace(journal, transaction_id="attacker-journal-replacement")
+        path.write_bytes(encode_journal(replacement))
+        path.chmod(0o600)
+        with self.assertRaises(transaction.TransactionError):
+            transaction.write_journal(home, journal, expected_before=expected)
+        self.assertEqual(path.read_bytes(), encode_journal(replacement))
+
+    def test_initial_journal_creation_does_not_overwrite_existing_evidence(self):
+        home = self.root / "codex-home"
+        prepared = self._prepared(home)
+        journal = prepared.journals[Target.CODEX]
+        path = home / ".subagents_configs/journal.json"
+        attacker = b"attacker initial journal\n"
+        path.write_bytes(attacker)
+        path.chmod(0o600)
+        with self.assertRaises(transaction.TransactionError):
+            transaction.write_journal(home, journal)
+        self.assertEqual(path.read_bytes(), attacker)
+
     def test_backup_replacement_after_validation_is_retained_with_journal(self):
         home = self.root / "codex-home"
         prepared = self._prepared(home, preexisting=True)

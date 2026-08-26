@@ -878,12 +878,19 @@ def _journal_operation(
     )
 
 
-def _write_journal(home: Path, journal: Journal) -> IdentityEvidence:
-    identity = filesystem.atomic_write(
-        _journal_path(home), encode_journal(journal), 0o600
-    )
+def _write_journal(
+    home: Path,
+    journal: Journal,
+    *,
+    expected_before: IdentityEvidence | None = None,
+) -> IdentityEvidence:
+    """Create or CAS-update a journal while preserving concurrent evidence."""
+
+    path = _journal_path(home)
+    with filesystem.expected_atomic_identity(expected_before):
+        identity = filesystem.atomic_write(path, encode_journal(journal), 0o600)
     if not isinstance(identity, IdentityEvidence):
-        identity = capture_evidence(_journal_path(home), "written journal")
+        identity = capture_evidence(path, "written journal")
     if identity is None:
         raise TransactionPreparationError("written journal is missing")
     return identity
@@ -1231,7 +1238,7 @@ def _prepare(
                     _record_owned(
                         prepared.owned, journal_path, "journal", journal_identity
                     )
-                    prepared.journal_evidence[target_plan.target] = journal_identity
+                prepared.journal_evidence[target_plan.target] = journal_identity
     except BaseException as primary:
         _cleanup_preparation(prepared.owned)
         if not isinstance(primary, Exception):
@@ -1251,7 +1258,12 @@ def _update_operation(
     journal = replace(journal, operations=operations)
     prepared.journals[target] = journal
     target_plan = next(item for item in prepared.plan.targets if item.target is target)
-    prepared.journal_evidence[target] = _write_journal(target_plan.home, journal)
+    current = prepared.journal_evidence.get(target)
+    if current is None:
+        raise TransactionError("journal update lacks current identity evidence")
+    prepared.journal_evidence[target] = _write_journal(
+        target_plan.home, journal, expected_before=current
+    )
 
 
 def _apply_operation(
@@ -1352,7 +1364,7 @@ def _reverse_operation(
             before_identity,
             before,
             operation.expected_before_mode or 0o600,
-            "replace",
+            "create" if before_identity is None else "replace",
         )
     result = capture_evidence(path, "rollback target")
     _check_evidence(
@@ -1458,8 +1470,11 @@ def _rollback(prepared: _Prepared, primary: BaseException) -> None:
         journal = replace(journal, rollback_status="in-progress")
         prepared.journals[target_plan.target] = journal
         try:
+            current = prepared.journal_evidence.get(target_plan.target)
+            if current is None:
+                raise TransactionError("journal update lacks current identity evidence")
             prepared.journal_evidence[target_plan.target] = _write_journal(
-                target_plan.home, journal
+                target_plan.home, journal, expected_before=current
             )
         except BaseException as exc:
             rollback_error = rollback_error or exc
@@ -1507,8 +1522,11 @@ def _rollback(prepared: _Prepared, primary: BaseException) -> None:
         )
         prepared.journals[target_plan.target] = journal
         try:
+            current = prepared.journal_evidence.get(target_plan.target)
+            if current is None:
+                raise TransactionError("journal update lacks current identity evidence")
             prepared.journal_evidence[target_plan.target] = _write_journal(
-                target_plan.home, journal
+                target_plan.home, journal, expected_before=current
             )
         except BaseException as exc:
             rollback_error = rollback_error or exc
@@ -1588,8 +1606,11 @@ def _apply_transaction_unlocked(
                 prepared.journals[target_plan.target], rollback_status="complete"
             )
             prepared.journals[target_plan.target] = journal
+            current = prepared.journal_evidence.get(target_plan.target)
+            if current is None:
+                raise TransactionError("journal update lacks current identity evidence")
             prepared.journal_evidence[target_plan.target] = _write_journal(
-                target_plan.home, journal
+                target_plan.home, journal, expected_before=current
             )
     except BaseException as primary:
         _rollback(prepared, primary)
@@ -1902,8 +1923,13 @@ def check_evidence(path: Path, expected_hash, expected_mode, **kwargs):
     return _check_evidence(path, expected_hash, expected_mode, **kwargs)
 
 
-def write_journal(home: Path, journal: Journal):
-    return _write_journal(home, journal)
+def write_journal(
+    home: Path,
+    journal: Journal,
+    *,
+    expected_before: IdentityEvidence | None = None,
+):
+    return _write_journal(home, journal, expected_before=expected_before)
 
 
 def backup_bytes(home: Path, journal_operation: JournalOperation) -> bytes:

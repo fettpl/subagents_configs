@@ -176,7 +176,9 @@ def recover_participants_impl(homes: Mapping[Target, Path]) -> None:
         for target in participants:
             journal = replace(journals[target], rollback_status="in-progress")
             journals[target] = journal
-            journal_evidence[target] = write_journal(homes[target], journal)
+            journal_evidence[target] = write_journal(
+                homes[target], journal, expected_before=journal_evidence[target]
+            )
         for target in reversed(participants):
             journal = journals[target]
             for index in reversed(range(len(journal.operations))):
@@ -203,7 +205,9 @@ def recover_participants_impl(homes: Mapping[Target, Path]) -> None:
                     ),
                 )
                 journals[target] = journal
-                journal_evidence[target] = write_journal(homes[target], journal)
+                journal_evidence[target] = write_journal(
+                    homes[target], journal, expected_before=journal_evidence[target]
+                )
         for target in participants:
             journal = replace(
                 journals[target],
@@ -214,7 +218,9 @@ def recover_participants_impl(homes: Mapping[Target, Path]) -> None:
                 rollback_status="complete",
             )
             journals[target] = journal
-            journal_evidence[target] = write_journal(homes[target], journal)
+            journal_evidence[target] = write_journal(
+                homes[target], journal, expected_before=journal_evidence[target]
+            )
         for target in participants:
             sync_and_remove_journal(
                 homes[target],
