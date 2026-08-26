@@ -1,3 +1,4 @@
+import asyncio
 import stat
 import threading
 import unittest
@@ -5,10 +6,12 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from subagents_configs import filesystem
+from subagents_configs import filesystem, recovery
 from subagents_configs.locks import (
     capture_evidence,
     compare_and_swap,
+    homes_locked,
+    lock_held,
     locked_target_homes,
 )
 from subagents_configs.models import Target
@@ -17,6 +20,73 @@ from tests.helpers import private_tempdir
 
 
 class LockAndEvidenceTests(unittest.TestCase):
+    def test_inherited_asyncio_and_thread_contexts_cannot_claim_released_lease(self):
+        with private_tempdir() as temporary:
+            home = Path(temporary) / "home"
+
+            async def exercise():
+                released = asyncio.Event()
+
+                async def child_task():
+                    await released.wait()
+                    return lock_held(), homes_locked({Target.CODEX: home})
+
+                thread_gate = threading.Event()
+
+                def child_thread():
+                    thread_gate.wait(2)
+                    return lock_held(), homes_locked({Target.CODEX: home})
+
+                with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                    task = asyncio.create_task(child_task())
+                    thread = asyncio.create_task(asyncio.to_thread(child_thread))
+                    await asyncio.sleep(0)
+                released.set()
+                thread_gate.set()
+                return await task, await thread
+
+            self.assertEqual(
+                asyncio.run(exercise()),
+                ((False, False), (False, False)),
+            )
+
+    def test_recovery_reuses_the_live_outer_lock_without_deadlock(self):
+        with private_tempdir() as temporary:
+            home = Path(temporary) / "home"
+            entered = threading.Event()
+
+            def recovery_body(_homes):
+                self.assertTrue(lock_held())
+                entered.set()
+
+            def run_recovery():
+                with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                    with patch.object(
+                        recovery, "recover_participants_impl", recovery_body
+                    ):
+                        recovery.recover_transaction(
+                            {Target.CODEX: home}, (Target.CODEX,)
+                        )
+
+            thread = threading.Thread(target=run_recovery)
+            thread.start()
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
+            self.assertTrue(entered.is_set())
+
+    def test_ensure_directory_checks_every_existing_component_against_home_lease(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            home.mkdir(mode=0o700)
+            with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                detached = root / "detached"
+                home.rename(detached)
+                home.mkdir(mode=0o700)
+                with self.assertRaises(ValueError):
+                    filesystem.ensure_private_directory(home / "nested")
+                self.assertFalse((home / "nested").exists())
+
     def test_absent_final_home_is_created_but_missing_ancestors_are_not(self):
         with private_tempdir() as temporary:
             root = Path(temporary)

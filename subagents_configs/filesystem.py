@@ -712,6 +712,7 @@ def ensure_directory(
                 created = True
             os.close(descriptor)
             descriptor = next_descriptor
+            verify_locked_home_descriptor(current, descriptor)
             if index == len(components) - 1 and not created and private:
                 if stat.S_IMODE(os.fstat(descriptor).st_mode) & 0o077:
                     raise ValueError(f"existing directory is not private: {current}")

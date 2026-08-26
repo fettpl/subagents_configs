@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import fcntl
 import os
 import stat
+import threading
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -15,17 +17,43 @@ from .models import IdentityEvidence, Target
 from .paths import assert_safe_home, normalized_absolute
 from .targets import targets_for_request
 
-_LOCK_DEPTH: ContextVar[int] = ContextVar("subagents_configs_lock_depth", default=0)
-_LOCK_HOMES: ContextVar[frozenset[Path]] = ContextVar(
-    "subagents_configs_lock_homes", default=frozenset()
-)
-_LOCK_HOME_IDENTITIES: ContextVar[dict[Path, tuple[int, int]] | None] = ContextVar(
-    "subagents_configs_lock_home_identities", default=None
+_LOCK_LEASE: ContextVar[object | None] = ContextVar(
+    "subagents_configs_lock_lease", default=None
 )
 
 _DIRECTORY_FLAGS = (
     os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 )
+
+
+class _LockLease:
+    def __init__(
+        self,
+        owner: tuple[int, asyncio.Task[object] | None],
+        homes: frozenset[Path],
+        identities: dict[Path, tuple[int, int]],
+    ) -> None:
+        self.owner = owner
+        self.homes = homes
+        self.identities = identities
+        self.released = False
+
+
+def _execution_owner() -> tuple[int, asyncio.Task[object] | None]:
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    return threading.get_ident(), task
+
+
+def _current_lease() -> _LockLease | None:
+    lease = _LOCK_LEASE.get()
+    if not isinstance(lease, _LockLease):
+        return None
+    if lease.released or lease.owner != _execution_owner():
+        return None
+    return lease
 
 
 def _after_home_validation(home: Path) -> None:
@@ -35,14 +63,15 @@ def _after_home_validation(home: Path) -> None:
 def lock_held() -> bool:
     """Return whether this execution context already owns target locks."""
 
-    return _LOCK_DEPTH.get() > 0
+    return _current_lease() is not None
 
 
 def homes_locked(homes: Mapping[Target, Path]) -> bool:
     """Return whether every requested home is held by this context."""
 
     requested = frozenset(normalized_absolute(path) for path in homes.values())
-    if not requested <= _LOCK_HOMES.get():
+    lease = _current_lease()
+    if lease is None or not requested <= lease.homes:
         return False
     for home in requested:
         if not _locked_home_path_matches(home):
@@ -50,17 +79,14 @@ def homes_locked(homes: Mapping[Target, Path]) -> bool:
     return True
 
 
-def _locked_home_identity(home: Path) -> tuple[int, int] | None:
-    normalized = normalized_absolute(home)
-    identities = _LOCK_HOME_IDENTITIES.get() or {}
-    return identities.get(normalized)
-
-
 def _locked_home_path_matches(path: Path) -> bool:
     """Check the lexical target path still names the locked directory inode."""
 
     normalized = normalized_absolute(path)
-    for home, identity in (_LOCK_HOME_IDENTITIES.get() or {}).items():
+    lease = _current_lease()
+    if lease is None:
+        return True
+    for home, identity in lease.identities.items():
         try:
             normalized.relative_to(home)
         except ValueError:
@@ -87,7 +113,10 @@ def verify_locked_home_descriptor(path: Path, descriptor: int) -> None:
     """Bind a pinned directory descriptor to the context's locked home inode."""
 
     normalized = normalized_absolute(path)
-    for home, identity in (_LOCK_HOME_IDENTITIES.get() or {}).items():
+    lease = _current_lease()
+    if lease is None:
+        return
+    for home, identity in lease.identities.items():
         try:
             normalized.relative_to(home)
         except ValueError:
@@ -260,6 +289,13 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
     """Hold persistent exclusive locks in canonical descriptor order."""
 
     normalized = _validate_target_sequence(homes, targets)
+    current = _current_lease()
+    requested_homes = frozenset(normalized.values())
+    if current is not None:
+        if requested_homes <= current.homes:
+            yield
+            return
+        raise ValueError("incompatible nested target lock set")
     descriptors: list[int] = []
     home_descriptors: list[int] = []
     home_identities: dict[Path, tuple[int, int]] = {}
@@ -290,19 +326,15 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
                 os.close(descriptor)
                 raise
             descriptors.append(descriptor)
-        token = _LOCK_DEPTH.set(_LOCK_DEPTH.get() + 1)
-        homes_token = _LOCK_HOMES.set(
-            _LOCK_HOMES.get() | frozenset(normalized.values())
+        lease = _LockLease(
+            _execution_owner(), frozenset(normalized.values()), home_identities
         )
-        identities_token = _LOCK_HOME_IDENTITIES.set(
-            {**(_LOCK_HOME_IDENTITIES.get() or {}), **home_identities}
-        )
+        lease_token = _LOCK_LEASE.set(lease)
         try:
             yield
         finally:
-            _LOCK_HOME_IDENTITIES.reset(identities_token)
-            _LOCK_HOMES.reset(homes_token)
-            _LOCK_DEPTH.reset(token)
+            lease.released = True
+            _LOCK_LEASE.reset(lease_token)
     finally:
         for descriptor in reversed(descriptors):
             try:
