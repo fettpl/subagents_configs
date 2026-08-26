@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from subagents_configs.cli import parse_request
 from subagents_configs.errors import CliError
-from subagents_configs.models import Target
+from subagents_configs.models import Target, TargetProfileDefaults
 from subagents_configs.orchestrator import (
     EXIT_BLOCKED_VALIDATION,
     EXIT_PREFLIGHT_ERROR,
@@ -90,6 +90,109 @@ class ProfileTests(unittest.TestCase):
         )
         profile = load_profile(path)
         self.assertEqual(profile.options.dry_run_format, "text")
+
+    def test_target_defaults_pi_home_is_optional_and_immutable(self):
+        value = _profile()
+        value["target_defaults"] = {
+            "pi": {"home": "/var/tmp/profile-pi"},  # noqa: S108
+        }
+        profile = load_profile(self.write_json(value))
+        self.assertEqual(
+            profile.target_defaults[Target.PI].home,
+            Path("/var/tmp/profile-pi"),  # noqa: S108
+        )
+        with self.assertRaises(TypeError):
+            profile.target_defaults[Target.PI] = TargetProfileDefaults(  # type: ignore[index]
+                Path("/var/tmp/other")  # noqa: S108
+            )
+
+    def test_target_defaults_rejects_pi_as_profile_target_and_unknown_authority(self):
+        value = _profile(targets=["pi"], homes={"pi": "/var/tmp/pi"})  # noqa: S108
+        with self.assertRaises(ValueError):
+            load_profile(self.write_json(value))
+        for defaults in (
+            {"codex": {"home": "/var/tmp/x"}},  # noqa: S108
+            {"pi": {"pi_executable": "/opt/pi"}},
+            {"pi": {"home": "relative"}},
+            {"pi": {"home": "/var/tmp/x", "network": True}},  # noqa: S108
+        ):
+            value = _profile()
+            value["target_defaults"] = defaults
+            with self.subTest(defaults=defaults), self.assertRaises(ValueError):
+                load_profile(self.write_json(value))
+
+    def test_direct_target_profile_defaults_and_mapping_invariants(self):
+        options = ProfileOptions(False, False, False, False, "text")
+        with self.assertRaises((TypeError, ValueError)):
+            TargetProfileDefaults("/var/tmp/pi")  # type: ignore[arg-type] # noqa: S108
+        with self.assertRaises(ValueError):
+            TargetProfileDefaults(Path("relative"))
+        original = {Target.PI: TargetProfileDefaults(Path("/var/tmp/pi"))}  # noqa: S108
+        profile = ProfileRequest(
+            1,
+            "install",
+            (Target.CODEX,),
+            {Target.CODEX: Path("/var/tmp/codex")},  # noqa: S108
+            options,
+            original,
+        )
+        original[Target.PI] = TargetProfileDefaults(Path("/var/tmp/changed"))  # noqa: S108
+        self.assertEqual(
+            profile.target_defaults[Target.PI].home,
+            Path("/var/tmp/pi"),  # noqa: S108
+        )
+        with self.assertRaises(TypeError):
+            profile.target_defaults[Target.PI] = original[Target.PI]  # type: ignore[index]
+
+    def test_profile_defaults_revalidate_forged_values_and_lstat_errors(self):
+        options = ProfileOptions(False, False, False, False, "text")
+        forged = object.__new__(TargetProfileDefaults)
+        object.__setattr__(forged, "home", Path("relative"))
+        with self.assertRaises(ValueError):
+            ProfileRequest(
+                1,
+                "install",
+                (Target.CODEX,),
+                {Target.CODEX: Path("/var/tmp/codex")},  # noqa: S108
+                options,
+                {Target.PI: forged},
+            )
+        with patch.object(
+            Path,
+            "lstat",
+            side_effect=PermissionError("denied"),
+        ):
+            with self.assertRaises(ValueError):
+                TargetProfileDefaults(Path("/var/tmp/pi"))  # noqa: S108
+
+    def test_profile_pi_platform_uses_explicit_seam_not_environment(self):
+        profile = load_profile(
+            self.write_json(
+                {
+                    **_profile(),
+                    "target_defaults": {
+                        "pi": {"home": "/var/tmp/profile-pi"}  # noqa: S108
+                    },
+                }
+            )
+        )
+        with self.assertRaises(CliError):
+            merge_profile_with_cli(
+                profile,
+                ["--target", "pi", "--dry-run"],
+                {**self.environ, "platform_name": "linux"},
+                platform_name="win32",
+            )
+
+    def test_profile_pi_executable_must_be_lexically_absolute(self):
+        profile = load_profile(self.write_json(_profile()))
+        with self.assertRaises(CliError):
+            merge_profile_with_cli(
+                profile,
+                ["--target", "pi", "--pi-executable", "~/pi", "--dry-run"],
+                self.environ,
+                platform_name="linux",
+            )
 
     def test_direct_profile_model_rejects_noncanonical_or_unsafe_homes(self):
         options = ProfileOptions(False, False, False, False, "text")

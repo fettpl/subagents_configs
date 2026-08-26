@@ -4,17 +4,24 @@ from __future__ import annotations
 
 import json
 import stat
+import sys
 import tomllib
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
 from .errors import CliError
-from .models import ProfileOptions, ProfileRequest, Request, Target
+from .models import (
+    ProfileOptions,
+    ProfileRequest,
+    Request,
+    Target,
+    TargetProfileDefaults,
+)
 from .targets import descriptor_for, targets_for_request
 
 _PROFILE_KEYS = frozenset(
-    {"schema_version", "operation", "targets", "homes", "options"}
+    {"schema_version", "operation", "targets", "homes", "options", "target_defaults"}
 )
 _OPTION_KEYS = frozenset(
     {
@@ -93,7 +100,7 @@ def _absolute_profile_home(raw: object) -> Path:
         raise ValueError("profile home must be an absolute string path")
     if not Path(raw).is_absolute():
         raise ValueError("profile home must be absolute")
-    if "\\" in raw or (len(raw) >= 2 and raw[1] == ":"):
+    if len(raw) >= 2 and raw[1] == ":":
         raise ValueError("profile home must be a POSIX path")
     lexical = PurePosixPath(raw)
     if raw != "/" and (raw.startswith("//") or raw.endswith("/") or "//" in raw):
@@ -107,7 +114,17 @@ def _absolute_profile_home(raw: object) -> Path:
 
 def _decode_profile(raw: object) -> ProfileRequest:
     _reject_hostile_strings(raw)
-    if type(raw) is not dict or set(raw) != _PROFILE_KEYS:
+    if (
+        type(raw) is not dict
+        or not set(raw).issubset(_PROFILE_KEYS)
+        or not {
+            "schema_version",
+            "operation",
+            "targets",
+            "homes",
+            "options",
+        }.issubset(raw)
+    ):
         raise ValueError("profile has unknown or missing top-level keys")
     schema_version = raw["schema_version"]
     if type(schema_version) is not int or schema_version != 1:
@@ -129,6 +146,8 @@ def _decode_profile(raw: object) -> ProfileRequest:
         if target in targets:
             raise ValueError("profile targets must be unique")
         targets.append(target)
+    if Target.PI in targets:
+        raise ValueError("Pi cannot be selected by a profile")
     canonical_targets = targets_for_request(tuple(targets), False)
     if tuple(targets) != canonical_targets:
         raise ValueError("profile targets are not in canonical order")
@@ -161,8 +180,26 @@ def _decode_profile(raw: object) -> ProfileRequest:
         bools["dry_run"],
         dry_run_format,
     )
+    target_defaults: dict[Target, TargetProfileDefaults] = {}
+    raw_defaults = raw.get("target_defaults", {})
+    if type(raw_defaults) is not dict:
+        raise ValueError("target_defaults must be an object")
+    if set(raw_defaults) - {"pi"}:
+        raise ValueError("target_defaults contains an unsupported target")
+    if "pi" in raw_defaults:
+        pi_defaults = raw_defaults["pi"]
+        if type(pi_defaults) is not dict or set(pi_defaults) != {"home"}:
+            raise ValueError("Pi target defaults may contain only home")
+        target_defaults[Target.PI] = TargetProfileDefaults(
+            _absolute_profile_home(pi_defaults["home"])
+        )
     return ProfileRequest(
-        1, operation, tuple(targets), MappingProxyType(homes), options
+        1,
+        operation,
+        tuple(targets),
+        MappingProxyType(homes),
+        options,
+        MappingProxyType(target_defaults),
     )
 
 
@@ -196,7 +233,11 @@ def _resolve_bool(cli_value: bool | None, profile_value: bool | None) -> bool:
 
 
 def merge_profile_with_cli(
-    profile: ProfileRequest, argv: Sequence[str], environ: Mapping[str, str]
+    profile: ProfileRequest,
+    argv: Sequence[str],
+    environ: Mapping[str, str],
+    *,
+    platform_name: str | None = None,
 ) -> Request:
     """Merge explicit CLI values over a profile and return a validated request."""
 
@@ -225,7 +266,60 @@ def merge_profile_with_cli(
     else:
         targets = list(profile.targets)
 
+    pi_options_used = (
+        args.pi_executable is not None
+        or args.consent_third_party_code
+        or args.consent_network
+        or args.remove_pi_package
+    )
+    if pi_options_used and Target.PI not in targets:
+        raise CliError("Pi options require the pi target")
+    if Target.PI in targets:
+        selected_platform = platform_name if platform_name is not None else sys.platform
+        if selected_platform not in ("linux", "darwin", "macos"):
+            raise CliError("Pi is unsupported on this platform")
+    if profile.operation == "install" and args.remove_pi_package:
+        raise CliError("--remove-pi-package is uninstall-only")
+    if profile.operation == "uninstall" and (
+        args.pi_executable is not None and not args.remove_pi_package
+    ):
+        raise CliError("Pi executable requires --remove-pi-package on uninstall")
+    if profile.operation == "uninstall" and (
+        args.consent_third_party_code or args.consent_network
+    ):
+        raise CliError("Pi consent options are install-only")
     from .cli import default_home, expand_user
+
+    pi_executable = None
+    if args.pi_executable is not None:
+        if not Path(args.pi_executable).is_absolute():
+            raise CliError("--pi-executable must be a lexical absolute path")
+        pi_executable = expand_user(args.pi_executable, environ)
+        if not pi_executable.is_absolute():
+            raise CliError("--pi-executable must be an absolute path")
+    profile_dry_run = (
+        args.dry_run if args.dry_run is not None else profile.options.dry_run
+    )
+    if (
+        profile.operation == "install"
+        and Target.PI in targets
+        and pi_executable is None
+    ):
+        raise CliError("Pi install requires --pi-executable")
+    if (
+        profile.operation == "uninstall"
+        and Target.PI in targets
+        and args.remove_pi_package
+        and pi_executable is None
+    ):
+        raise CliError("Pi package removal requires --pi-executable")
+    if (
+        profile.operation == "install"
+        and Target.PI in targets
+        and not profile_dry_run
+        and not (args.consent_third_party_code and args.consent_network)
+    ):
+        raise CliError("Pi install requires third-party-code and network consent")
 
     homes: dict[Target, Path] = {
         target: profile.homes[target] for target in targets if target in profile.homes
@@ -247,7 +341,10 @@ def merge_profile_with_cli(
         homes[target] = expand_user(raw_path, environ)
     for target in targets:
         if target not in homes:
-            homes[target] = default_home(descriptor_for(target), environ)
+            if target is Target.PI and Target.PI in profile.target_defaults:
+                homes[target] = profile.target_defaults[Target.PI].home
+            else:
+                homes[target] = default_home(descriptor_for(target), environ)
 
     dry_run = _resolve_bool(args.dry_run, profile.options.dry_run)
     dry_run_format = (
@@ -298,6 +395,10 @@ def merge_profile_with_cli(
         dry_run=dry_run,
         dry_run_format=dry_run_format,
         client_versions=client_versions,
+        pi_executable=pi_executable,
+        consent_third_party_code=bool(args.consent_third_party_code and not dry_run),
+        consent_network=bool(args.consent_network and not dry_run),
+        remove_pi_package=bool(args.remove_pi_package),
     )
     from .planning import validate_request_shape
 

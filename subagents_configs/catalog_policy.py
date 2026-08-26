@@ -888,7 +888,9 @@ def load_revision(path: str | os.PathLike[str]) -> tuple[NormalizedCatalog, ...]
             if "sources" in raw or "catalog_sha256" in raw:
                 return (_parse_generated_catalog(raw),)
             return (_parse_catalog(raw),)
-        expected = sorted(f"{target.value}.json" for target in Target)
+        expected = sorted(
+            f"{target.value}.json" for target in Target if target is not Target.PI
+        )
         if names != expected:
             raise ValueError("revision directory is ambiguous")
         raw_catalogs: list[dict[str, object]] = []
@@ -906,7 +908,10 @@ def load_revision(path: str | os.PathLike[str]) -> tuple[NormalizedCatalog, ...]
         )
         for expected_name, expected_target, catalog in zip(
             names,
-            sorted(Target, key=lambda item: f"{item.value}.json"),
+            sorted(
+                (target for target in Target if target is not Target.PI),
+                key=lambda item: f"{item.value}.json",
+            ),
             catalogs,
             strict=True,
         ):
@@ -938,9 +943,13 @@ def validate_generated_catalogs(
     """Validate and normalize every checked-in generated target catalog."""
     catalog_root = Path(root) / "catalogs"
     loaded = tuple(
-        load_catalog(catalog_root / f"{target.value}.json") for target in Target
+        load_catalog(catalog_root / f"{target.value}.json")
+        for target in Target
+        if target is not Target.PI
     )
-    if {catalog.target for catalog in loaded} != set(Target):
+    if {catalog.target for catalog in loaded} != {
+        target for target in Target if target is not Target.PI
+    }:
         raise ValueError("generated catalog target set is incomplete")
     if len({catalog.revision for catalog in loaded}) != len(loaded):
         raise ValueError("generated catalog revisions are not unique")

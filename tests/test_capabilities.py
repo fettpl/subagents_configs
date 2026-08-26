@@ -28,16 +28,24 @@ class CapabilityRegistryTests(unittest.TestCase):
     def test_registry_owns_target_order_and_all_decision(self):
         self.assertEqual(
             tuple(capability.target for capability in CAPABILITIES),
-            (Target.CODEX, Target.OPENCODE, Target.CLAUDE_CODE),
+            (Target.CODEX, Target.OPENCODE, Target.CLAUDE_CODE, Target.PI),
         )
         self.assertEqual(
-            tuple(capability.order for capability in CAPABILITIES), (0, 1, 2)
+            tuple(capability.order for capability in CAPABILITIES), (0, 1, 2, 3)
         )
-        self.assertTrue(all(capability.include_in_all for capability in CAPABILITIES))
+        self.assertEqual(
+            tuple(
+                capability.target
+                for capability in CAPABILITIES
+                if capability.include_in_all
+            ),
+            (Target.CODEX, Target.OPENCODE, Target.CLAUDE_CODE),
+        )
         for capability in CAPABILITIES:
             self.assertIs(capability_for(capability.target), capability)
             self.assertTrue(capability.agent_directory.parts)
-            self.assertTrue(capability.runtime_sources)
+            if capability.target is not Target.PI:
+                self.assertTrue(capability.runtime_sources)
             self.assertIsNotNone(capability.parser)
             self.assertIsNotNone(capability.semantic_validator)
             self.assertIsNotNone(capability.global_instruction)
@@ -64,6 +72,7 @@ class CapabilityRegistryTests(unittest.TestCase):
                     Target.CODEX: 2,
                     Target.OPENCODE: 0,
                     Target.CLAUDE_CODE: 1,
+                    Target.PI: 3,
                 }[capability.target],
             )
             for capability in CAPABILITIES
@@ -71,7 +80,7 @@ class CapabilityRegistryTests(unittest.TestCase):
         with patch.object(targets_module, "CAPABILITIES", reordered):
             self.assertEqual(
                 registry_target_order(),
-                (Target.OPENCODE, Target.CLAUDE_CODE, Target.CODEX),
+                (Target.OPENCODE, Target.CLAUDE_CODE, Target.CODEX, Target.PI),
             )
             transaction.canonical_participant_order(
                 (Target.OPENCODE, Target.CLAUDE_CODE, Target.CODEX)
@@ -170,7 +179,7 @@ class CapabilityRegistryTests(unittest.TestCase):
             (Target.CODEX, Target.CLAUDE_CODE),
         )
 
-    def test_source_spec_extensions_are_closed_and_pi_is_absent(self):
+    def test_source_spec_extensions_are_closed(self):
         allowed_kinds = {
             "agent",
             "routing-source",
@@ -191,7 +200,6 @@ class CapabilityRegistryTests(unittest.TestCase):
             for source in (*capability.runtime_sources,):
                 self.assertIn(source.kind, allowed_kinds)
                 self.assertIn(source.source_format, allowed_formats)
-                self.assertNotIn("pi", source.identifier.lower())
 
     def test_lifecycle_constructors_require_typed_evidence_and_preserve_tags(self):
         desired = DesiredFile(content=b"safe\n", mode=0o600)

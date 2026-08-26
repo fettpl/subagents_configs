@@ -1246,6 +1246,15 @@ def validate_request_shape(request: Request, operation: str | None = None) -> No
         "json",
     ):
         raise ValueError("dry_run_format must be text or json")
+    if request.pi_executable is not None:
+        if (
+            not isinstance(request.pi_executable, Path)
+            or not request.pi_executable.is_absolute()
+        ):
+            raise ValueError("pi_executable must be an absolute Path")
+    for name in ("consent_third_party_code", "consent_network", "remove_pi_package"):
+        if type(getattr(request, name)) is not bool:
+            raise ValueError(f"{name} must be a bool")
     if not request.targets:
         raise ValueError("at least one target is required")
     if any(type(target) is not Target for target in request.targets):
@@ -1293,6 +1302,52 @@ def validate_request_shape(request: Request, operation: str | None = None) -> No
         raise ValueError("uninstall does not accept install-only options")
     if request.enable_codex_multi_agent and Target.CODEX not in request.targets:
         raise ValueError("Codex multi-agent configuration requires Codex")
+    pi_selected = Target.PI in request.targets
+    if (
+        any(
+            (
+                request.pi_executable is not None,
+                request.consent_third_party_code,
+                request.consent_network,
+                request.remove_pi_package,
+            )
+        )
+        and not pi_selected
+    ):
+        raise ValueError("Pi options require the Pi target")
+    if request.operation == "install" and request.remove_pi_package:
+        raise ValueError("Pi package removal is uninstall-only")
+    if request.operation == "install" and Target.PI in request.targets:
+        if request.pi_executable is None:
+            raise ValueError("Pi install requires pi_executable")
+        if request.dry_run and (
+            request.consent_third_party_code or request.consent_network
+        ):
+            raise ValueError("dry-run must not retain Pi consent")
+    if (
+        request.operation == "install"
+        and Target.PI in request.targets
+        and not request.dry_run
+        and not (request.consent_third_party_code and request.consent_network)
+    ):
+        raise ValueError("Pi install requires third-party-code and network consent")
+    if (
+        request.operation == "uninstall"
+        and request.pi_executable is not None
+        and not request.remove_pi_package
+    ):
+        raise ValueError("Pi executable requires package removal")
+    if (
+        request.operation == "uninstall"
+        and Target.PI in request.targets
+        and request.remove_pi_package
+        and request.pi_executable is None
+    ):
+        raise ValueError("Pi package removal requires pi_executable")
+    if request.operation == "uninstall" and (
+        request.consent_third_party_code or request.consent_network
+    ):
+        raise ValueError("Pi consent options are install-only")
 
 
 def _validate_request(request: Request, operation: str) -> None:

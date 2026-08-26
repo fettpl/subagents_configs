@@ -1,4 +1,5 @@
 import argparse
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal
@@ -78,6 +79,10 @@ def _parser() -> argparse.ArgumentParser:
     dry_run.add_argument("--no-dry-run", dest="dry_run", action="store_false")
     parser.add_argument("--format", choices=("text", "json"), default=None)
     parser.add_argument("--client-version", action="append")
+    parser.add_argument("--pi-executable")
+    parser.add_argument("--consent-third-party-code", action="store_true")
+    parser.add_argument("--consent-network", action="store_true")
+    parser.add_argument("--remove-pi-package", action="store_true")
     parser.add_argument("--profile")
     return parser
 
@@ -121,6 +126,8 @@ def parse_request(
     operation: Literal["install", "uninstall"],
     argv: Sequence[str],
     environ: Mapping[str, str],
+    *,
+    platform_name: str | None = None,
 ) -> Request:
     if operation not in ("install", "uninstall"):
         raise CliError(f"unsupported operation: {operation}")
@@ -138,7 +145,9 @@ def parse_request(
             raise CliError("invalid profile") from exc
         if profile.operation != operation:
             raise CliError("profile operation conflicts with CLI operation")
-        return merge_profile_with_cli(profile, argv, environ)
+        return merge_profile_with_cli(
+            profile, argv, environ, platform_name=platform_name
+        )
 
     dry_run_format: DryRunFormat = args.format or "text"
     dry_run = bool(args.dry_run)
@@ -173,6 +182,52 @@ def parse_request(
         raise CliError("install-only options are not valid for uninstall")
     if args.enable_codex_multi_agent and Target.CODEX not in targets:
         raise CliError("--enable-codex-multi-agent requires the codex target")
+
+    pi_options_used = (
+        args.pi_executable is not None
+        or args.consent_third_party_code
+        or args.consent_network
+        or args.remove_pi_package
+    )
+    if pi_options_used and Target.PI not in targets:
+        raise CliError("Pi options require the pi target")
+    if Target.PI in targets:
+        selected_platform = platform_name if platform_name is not None else sys.platform
+        if selected_platform not in ("linux", "darwin", "macos"):
+            raise CliError("Pi is unsupported on this platform")
+    if operation == "install" and args.remove_pi_package:
+        raise CliError("--remove-pi-package is uninstall-only")
+    if operation == "uninstall" and (
+        args.pi_executable is not None and not args.remove_pi_package
+    ):
+        raise CliError("Pi executable requires --remove-pi-package on uninstall")
+    if operation == "uninstall" and (
+        args.consent_third_party_code or args.consent_network
+    ):
+        raise CliError("Pi consent options are install-only")
+    pi_executable = None
+    if args.pi_executable is not None:
+        if not Path(args.pi_executable).is_absolute():
+            raise CliError("--pi-executable must be a lexical absolute path")
+        pi_executable = _expand_user(args.pi_executable, environ)
+        if not pi_executable.is_absolute():
+            raise CliError("--pi-executable must be an absolute path")
+    if operation == "install" and Target.PI in targets and pi_executable is None:
+        raise CliError("Pi install requires --pi-executable")
+    if (
+        operation == "uninstall"
+        and Target.PI in targets
+        and args.remove_pi_package
+        and pi_executable is None
+    ):
+        raise CliError("Pi package removal requires --pi-executable")
+    if (
+        operation == "install"
+        and Target.PI in targets
+        and not dry_run
+        and not (args.consent_third_party_code and args.consent_network)
+    ):
+        raise CliError("Pi install requires third-party-code and network consent")
 
     client_versions: dict[str, str] = {}
     for raw_version in args.client_version or []:
@@ -225,4 +280,8 @@ def parse_request(
         dry_run=dry_run,
         dry_run_format=dry_run_format,
         client_versions=client_versions,
+        pi_executable=pi_executable,
+        consent_third_party_code=bool(args.consent_third_party_code and not dry_run),
+        consent_network=bool(args.consent_network and not dry_run),
+        remove_pi_package=bool(args.remove_pi_package),
     )

@@ -39,6 +39,7 @@ COMPATIBILITY_FEATURES: dict[Target, frozenset[str]] = {
     Target.CODEX: _COMPATIBILITY_BASE_FEATURES | {"codex-multi-agent-v2"},
     Target.OPENCODE: _COMPATIBILITY_BASE_FEATURES,
     Target.CLAUDE_CODE: _COMPATIBILITY_BASE_FEATURES | {"command-gate"},
+    Target.PI: _COMPATIBILITY_BASE_FEATURES,
 }
 
 
@@ -71,6 +72,8 @@ def _runtime_sources() -> list[SourceSpec]:
 
 
 def _capability_sources(capability: TargetCapability) -> tuple[SourceSpec, ...]:
+    if capability.target is Target.PI:
+        return ()
     sources = [
         *_agent_sources(
             capability.agent_directory.as_posix(),
@@ -198,6 +201,30 @@ CAPABILITIES: tuple[TargetCapability, ...] = (
         project_template=PurePosixPath("templates/claude-code/CLAUDE.md.template"),
         agent_suffix=".md",
         compatibility_features=COMPATIBILITY_FEATURES[Target.CLAUDE_CODE],
+    ),
+    TargetCapability(
+        target=Target.PI,
+        order=3,
+        include_in_all=False,
+        agent_directory=PurePosixPath("pi/agents"),
+        source_format="markdown",
+        parser="markdown",
+        semantic_validator="agent",
+        global_instruction=GlobalInstructionSpec(
+            "routing-pi",
+            PurePosixPath("APPEND_SYSTEM.md"),
+            PurePosixPath("rules/PI_SUBAGENT_ROUTING.md"),
+        ),
+        optional_blocks=(),
+        runtime_sources=(),
+        lifecycle_capabilities=frozenset(),
+        external_lifecycle=None,
+        environment_variable="PI_CODING_AGENT_DIR",
+        default_home="~/.pi/agent",
+        config_filename=None,
+        project_template=PurePosixPath("templates/pi/AGENTS.md.template"),
+        agent_suffix=".md",
+        compatibility_features=COMPATIBILITY_FEATURES[Target.PI],
     ),
 )
 

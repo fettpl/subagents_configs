@@ -8,6 +8,38 @@ import stat
 from pathlib import Path, PurePosixPath
 
 
+def validate_profile_home_path(home: Path) -> Path:
+    """Validate one immutable profile home without following symlinks."""
+
+    if type(home) is not type(Path()):
+        raise TypeError("profile home must be a platform Path")
+    raw = os.fspath(home)
+    if not home.is_absolute():
+        raise ValueError("profile home must be absolute")
+    if "\\" in raw or any(
+        ord(character) < 32 or ord(character) == 127 for character in raw
+    ):
+        raise ValueError("profile home contains unsafe characters")
+    if raw != "/" and (raw.startswith("//") or raw.endswith("/") or "//" in raw):
+        raise ValueError("profile home is not canonical")
+    if any(component in {".", ".."} for component in raw.split("/")):
+        raise ValueError("profile home contains unsafe lexical components")
+    if os.path.normpath(os.path.abspath(raw)) != raw:
+        raise ValueError("profile home is not canonical")
+    try:
+        item = home.lstat()
+    except FileNotFoundError:
+        return home
+    except OSError as exc:
+        raise ValueError("profile home cannot be inspected") from exc
+    if stat.S_ISLNK(item.st_mode):
+        raise ValueError("profile home must not be a symlink")
+    return home
+
+
+_validate_profile_home_path = validate_profile_home_path
+
+
 def normalized_absolute(path: Path) -> Path:
     """Return an absolute, lexically normalized path without resolving links."""
 

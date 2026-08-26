@@ -1,9 +1,13 @@
 # Secure multi-client subagent distribution
 
 This repository distributes the same least-privilege role catalog and routing
-policy in the native formats of Codex, OpenCode, and Claude Code. Pi and
-pi-coding-agent are explicitly excluded from this release and are not
-supported. There is no active Pi target, source, or compatibility wrapper.
+policy in the native formats of Codex, OpenCode, Claude Code, and the
+explicitly selected Pi target. Pi remains unreleased and unsupported in the
+compatibility matrix; Task 1 only registers its safe explicit-selection
+boundary. Pi is never selected by `--all` and does not yet install
+Pi-specific sources or packages; its future instruction placeholder is
+`APPEND_SYSTEM.md`.
+See [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
 
 The installer is deliberately conservative: it plans every selected target
 before writing, uses private state and journal files, preserves user changes,
@@ -17,8 +21,9 @@ authority, credentials, network access, or approval rights.
 | Codex | `agents/*.toml` | `AGENTS.md` | `~/.codex` | `CODEX_HOME` |
 | OpenCode | `agents/*.md` with YAML frontmatter | `AGENTS.md` | `~/.config/opencode` | `OPENCODE_HOME` |
 | Claude Code | `agents/*.md` with YAML frontmatter | `CLAUDE.md` | `~/.claude` | `CLAUDE_CONFIG_DIR` |
+| Pi (unreleased) | reserved for a later task | reserved | `~/.pi/agent` | `PI_CODING_AGENT_DIR` |
 
-All six roles are rendered for each client:
+All six roles are rendered for the three released/supported clients:
 
 | Role | Responsibility |
 | --- | --- |
@@ -219,18 +224,25 @@ Install options are `--target TARGET`, `--all`, `--home TARGET=PATH`,
 `--enable-codex-multi-agent`/`--no-codex-multi-agent`,
 `--include-commit-pusher`/`--no-commit-pusher`,
 `--client-version TARGET=VERSION`, `--dry-run`/`--no-dry-run`,
+`--pi-executable PATH`, `--consent-third-party-code`, `--consent-network`,
 `--format text|json`, and sole-argument
 `--help`. `--format json` is accepted only with `--dry-run`.
 Uninstall accepts `--target`, `--all`, `--home`, `--client-version TARGET=VERSION`,
-`--dry-run`, and `--help`; the
+`--pi-executable PATH`, `--remove-pi-package`, `--dry-run`, and `--help`; the
 three install-only opt-ins are rejected during CLI parsing. Repeated targets,
 mixed `--all` and `--target`, unknown options, duplicate homes, homes for
 unselected targets, and `--enable-codex-multi-agent` without Codex are errors
-before any write.
+before any write. Pi package removal requires both explicit `--target pi`,
+`--remove-pi-package`, and an absolute `--pi-executable`; an executable without
+the removal request is rejected during uninstall parsing.
 
 Profiles are local, exact-schema JSON or TOML files. They contain only
 `schema_version = 1`, an `install` or `uninstall` operation, canonical target
-and absolute home mappings, and the five closed option fields. Duplicate keys,
+and absolute home mappings, and the five closed option fields. An optional
+`target_defaults` object may contain only `pi.home`; it is an immutable safe
+default used only when the CLI explicitly selects Pi. Profiles cannot select
+Pi or carry its executable, consent, network, package, credential, or provider
+authority. Duplicate keys,
 unknown fields, control or credential-like strings, traversal paths, symlinked
 homes, and unsupported targets are rejected. For example:
 
@@ -257,9 +269,11 @@ directions; absent values retain it. Profiles never add client versions,
 roles, permissions, consent, package, or network authority.
 
 The `--home TARGET=PATH` option takes precedence exactly as follows:
-`--home TARGET=PATH` > the target environment
-variable (`CODEX_HOME`, `OPENCODE_HOME`, or `CLAUDE_CONFIG_DIR`) > the
-documented default (`~/.codex`, `~/.config/opencode`, or `~/.claude`). The
+`--home TARGET=PATH` > `target_defaults.pi.home` (only for explicit Pi CLI
+selection) > the target environment variable (`CODEX_HOME`,
+`OPENCODE_HOME`, `CLAUDE_CONFIG_DIR`, or `PI_CODING_AGENT_DIR`) > the
+documented default (`~/.codex`, `~/.config/opencode`, `~/.claude`, or
+`~/.pi/agent` for explicit Pi selection). The
 plan displays normalized absolute homes before application. The displayed
 paths are not permission to escape the selected home; existing components,
 targets, state, and managed files must pass the symlink and containment checks.
@@ -289,12 +303,16 @@ reason codes `target_unsupported`, `format_unsupported`,
 expose only the target, support status, and these typed reasons.
 
 The matrix deliberately contains an unsupported, compatibility-only `pi` row.
-It does not register `Target.PI`, a descriptor, parser, selector, install or
-uninstall path, package source, platform, or client-version claim. Updating a
-row is a separately authorized release-owner action: obtain read-only version
+Pi can be selected explicitly for dry-run/contract validation, but it is not
+included in `--all`, has no install sources yet, and cannot be released by
+this task. Updating a row is a separately authorized release-owner action:
+obtain read-only version
 evidence from the client, review format/features/platform/scope/package
 identity, update the JSON and documentation together, and rerun catalog,
 focused, full, and static checks. Do not probe clients during installation.
+Pi Tasks 2–11 add the remaining lifecycle pieces incrementally; the final
+release gate requires mandatory isolated real-Pi smoke evidence for the exact
+`pi-coding-agent` and `pi-subagents` pins.
 
 ## Install, recovery, and uninstall behavior
 

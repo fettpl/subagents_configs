@@ -188,8 +188,6 @@ def _security_issues_from_source(source: str) -> list[str]:
         issues.append("privilege escalation")
     if "gpt-5.4-mini" in source:
         issues.append("stale model")
-    if re.search(r"pi-coding-agent|(^|[^a-z])pi([^a-z]|$)", source.casefold()):
-        issues.append("removed Pi client")
     for node in ast.walk(tree):
         if isinstance(node, ast.Subscript):
             base = _canonical_name(node.value, aliases)
@@ -376,6 +374,8 @@ class StaticSecurityTests(unittest.TestCase):
             "commit-pusher",
         }
         for target in DESCRIPTOR_ORDER:
+            if target is Target.PI:
+                continue
             descriptor = descriptor_for(target)
             source_directory = {
                 Target.CODEX: REPOSITORY / "agents",

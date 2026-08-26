@@ -3,6 +3,7 @@
   "rows": [
     {
       "target": "codex",
+      "status": "released",
       "supported": true,
       "format_version": "toml",
       "features": ["agents", "managed-blocks", "validation-runtime", "routing-codex", "codex-multi-agent-v2", "commit-pusher"],
@@ -16,6 +17,7 @@
     },
     {
       "target": "opencode",
+      "status": "released",
       "supported": true,
       "format_version": "yaml-frontmatter",
       "features": ["agents", "managed-blocks", "validation-runtime", "routing-opencode", "commit-pusher"],
@@ -29,6 +31,7 @@
     },
     {
       "target": "claude-code",
+      "status": "released",
       "supported": true,
       "format_version": "yaml-frontmatter",
       "features": ["agents", "managed-blocks", "validation-runtime", "command-gate", "routing-claude-code", "commit-pusher"],
@@ -42,6 +45,7 @@
     },
     {
       "target": "pi",
+      "status": "unreleased",
       "supported": false,
       "format_version": "markdown",
       "features": ["agents", "managed-blocks", "validation-runtime"],
