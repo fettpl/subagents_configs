@@ -24,6 +24,124 @@ TEMP_DIR = "/private/tmp" if Path("/private/tmp").is_dir() else None
 
 
 class FilesystemTests(unittest.TestCase):
+    def test_quarantine_evidence_failure_removes_only_created_link(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+            real_evidence = filesystem._evidence_from_descriptor
+
+            def fail_quarantine(descriptor, label, **kwargs):
+                if label == "CAS quarantine link":
+                    raise OSError("injected quarantine evidence failure")
+                return real_evidence(descriptor, label, **kwargs)
+
+            with patch.object(filesystem, "_evidence_from_descriptor", fail_quarantine):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, before, b"installer bytes", 0o600, "replace")
+            self.assertEqual(path.read_bytes(), b"original")
+            self.assertEqual(list(root.glob(".managed.cas-*")), [])
+
+    def test_quarantine_open_failure_removes_only_created_link(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+            real_open = filesystem.os.open
+
+            def fail_quarantine_open(name, flags, *args, **kwargs):
+                if isinstance(name, str) and Path(name).name.startswith(
+                    ".managed.cas-"
+                ):
+                    raise OSError("injected quarantine open failure")
+                return real_open(name, flags, *args, **kwargs)
+
+            with patch.object(filesystem.os, "open", side_effect=fail_quarantine_open):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, before, b"installer bytes", 0o600, "replace")
+            self.assertEqual(path.read_bytes(), b"original")
+            self.assertEqual(list(root.glob(".managed.cas-*")), [])
+
+    def test_replacement_target_appearance_preserves_original_and_attacker(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+            real_link = filesystem._link_no_replace
+
+            def target_appears(parent_fd, source, target):
+                if source.startswith(".managed.tmp-"):
+                    path.write_bytes(b"attacker replacement")
+                    path.chmod(0o600)
+                return real_link(parent_fd, source, target)
+
+            with patch.object(
+                filesystem, "_link_no_replace", side_effect=target_appears
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, before, b"installer bytes", 0o600, "replace")
+            self.assertEqual(path.read_bytes(), b"attacker replacement")
+            self.assertEqual(list(root.glob(".managed.cas-*")), [])
+
+    def test_quarantine_cleanup_has_no_target_appearance_gap(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+            real_remove = filesystem._remove_owned_quarantine
+
+            def appear_after_cleanup(parent_fd, quarantine, expected):
+                result = real_remove(parent_fd, quarantine, expected)
+                if not path.exists():
+                    path.write_bytes(b"attacker replacement")
+                    path.chmod(0o600)
+                return result
+
+            with patch.object(
+                filesystem,
+                "_remove_owned_quarantine",
+                side_effect=appear_after_cleanup,
+            ):
+                result = compare_and_swap(
+                    path, before, b"installer bytes", 0o600, "replace"
+                )
+            self.assertEqual(result.sha256, sha256_bytes(b"installer bytes"))
+            self.assertEqual(path.read_bytes(), b"installer bytes")
+            self.assertEqual(list(root.glob(".managed.cas-*")), [])
+
+    def test_quarantine_cleanup_error_after_removal_returns_proven_install(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+            real_remove = filesystem._remove_owned_quarantine
+
+            def remove_then_raise(parent_fd, quarantine, expected):
+                real_remove(parent_fd, quarantine, expected)
+                raise OSError("injected post-removal error")
+
+            with patch.object(
+                filesystem,
+                "_remove_owned_quarantine",
+                side_effect=remove_then_raise,
+            ):
+                result = compare_and_swap(
+                    path, before, b"installer bytes", 0o600, "replace"
+                )
+            self.assertEqual(result.sha256, sha256_bytes(b"installer bytes"))
+            self.assertEqual(path.read_bytes(), b"installer bytes")
+            self.assertEqual(list(root.glob(".managed.cas-*")), [])
+
     def test_quarantine_boundary_swap_never_overwrites_unowned_entry(self):
         with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
             root = Path(temporary)

@@ -95,6 +95,49 @@ class TransactionPreparationTests(unittest.TestCase):
         self.assertTrue((backups / "user-backup").exists())
         self.assertTrue(unrelated.exists())
 
+    def test_replace_quarantine_cleanup_failure_restores_preexisting_target(self):
+        home = self.root / "codex-home"
+        destination = home / "agents/code-explorer.toml"
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(b"user bytes\n")
+        destination.chmod(0o640)
+        plan = preflight_install(
+            self.repository,
+            planning_request("install", {Target.CODEX: home}),
+        )
+        real_remove = transaction.filesystem._remove_owned_quarantine
+        real_link = transaction.filesystem._link_no_replace
+        installed_temporary = []
+
+        def fail_target_quarantine(parent_fd, quarantine, expected):
+            if quarantine.startswith(".code-explorer.toml.cas-"):
+                raise OSError("injected quarantine cleanup failure")
+            return real_remove(parent_fd, quarantine, expected)
+
+        def track_temporary_install(parent_fd, source, target):
+            result = real_link(parent_fd, source, target)
+            if source.startswith(".code-explorer.toml.tmp-"):
+                installed_temporary.append(source)
+            return result
+
+        with (
+            patch.object(
+                transaction.filesystem,
+                "_remove_owned_quarantine",
+                side_effect=fail_target_quarantine,
+            ),
+            patch.object(
+                transaction.filesystem,
+                "_link_no_replace",
+                side_effect=track_temporary_install,
+            ),
+        ):
+            with self.assertRaises(transaction.TransactionError):
+                transaction.apply_transaction(plan)
+        self.assertEqual(destination.read_bytes(), b"user bytes\n")
+        self.assertEqual(len(installed_temporary), 1)
+        self.assertEqual(list(destination.parent.glob(".code-explorer.toml.cas-*")), [])
+
     def test_cleanup_failure_does_not_replace_primary_apply_status(self):
         home = self.root / "codex-home"
         plan_argv = ["--target", "codex", "--home", f"codex={home}"]
