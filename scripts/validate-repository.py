@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import selectors
 import stat
 import subprocess
@@ -35,6 +36,16 @@ _BACKEND_PROBE = (
 )
 _CAPTURE_LIMIT = 8192
 _DIRECT_CHECK_TIMEOUT = 900.0
+_UNIT_DIAGNOSTIC_MAX_ITEMS = 8
+_UNIT_DIAGNOSTIC_MAX_ITEM_LENGTH = 160
+_UNIT_HEADER = re.compile(
+    r"^(?P<kind>FAIL|ERROR): (?P<test>test[A-Za-z0-9_]*) "
+    r"\((?P<scope>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\)"
+    r"(?: \([ -~]{1,160}\))?$"
+)
+_UNIT_REASON = re.compile(
+    r"^(?P<name>[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Failure))(?::.*)?$"
+)
 
 
 class _StreamCapture:
@@ -244,14 +255,57 @@ def _run(argv: Sequence[str], *, env: dict[str, str], cwd: Path) -> _CheckResult
     return _CheckResult(returncode, stdout.finish(), stderr.finish())
 
 
+def _unit_diagnostic(result: _CheckResult) -> str:
+    """Extract only bounded, stable unittest failure context."""
+
+    failures: list[str] = []
+    reasons: list[str] = []
+    current = False
+    for line in (result.stdout.text + "\n" + result.stderr.text).splitlines():
+        header = _UNIT_HEADER.fullmatch(line)
+        if header is not None:
+            item = (
+                f"{header.group('kind')}:{header.group('test')} "
+                f"({header.group('scope')})"
+            )
+            if item not in failures and len(failures) < _UNIT_DIAGNOSTIC_MAX_ITEMS:
+                failures.append(item[:_UNIT_DIAGNOSTIC_MAX_ITEM_LENGTH])
+            current = True
+            continue
+        if not current:
+            continue
+        reason = _UNIT_REASON.fullmatch(line)
+        if reason is None:
+            continue
+        category = (
+            "assertion"
+            if reason.group("name").rsplit(".", 1)[-1] == "AssertionError"
+            else "exception"
+        )
+        if category not in reasons:
+            reasons.append(category)
+
+    fields = []
+    if failures:
+        fields.append("unit-failures=" + ",".join(failures))
+    if reasons:
+        fields.append("unit-reasons=" + ",".join(reasons))
+    return "; ".join(fields)
+
+
 def _diagnostic(label: str, status: str, result: _CheckResult) -> str:
-    return (
+    diagnostic = (
         f"validation failed: {label}; status={status}; "
         f"stdout-bytes={result.stdout.byte_count}; "
         f"stdout-sha256={result.stdout.sha256}; "
         f"stderr-bytes={result.stderr.byte_count}; "
         f"stderr-sha256={result.stderr.sha256}"
     )
+    if label == "unit test discovery":
+        details = _unit_diagnostic(result)
+        if details:
+            diagnostic += "; " + details
+    return diagnostic
 
 
 def _status(code: int) -> str:
