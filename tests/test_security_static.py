@@ -43,6 +43,7 @@ EXPECTED_ACTIVE_PYTHON = frozenset(
         "subagents_configs/blocks.py",
         "subagents_configs/compatibility.py",
         "subagents_configs/cli.py",
+        "subagents_configs/catalog_policy.py",
         "subagents_configs/diagnostics.py",
         "subagents_configs/errors.py",
         "subagents_configs/filesystem.py",
