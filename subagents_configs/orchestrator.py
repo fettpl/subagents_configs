@@ -67,6 +67,8 @@ HELP_TEXT = {
         "outside selected homes. --include-commit-pusher opts that role in;\n"
         "--enable-global-routing opts in one managed routing block;\n"
         "--enable-codex-multi-agent opts in the Codex TOML feature block.\n"
+        "--profile PATH loads a strict local JSON/TOML request; explicit CLI\n"
+        "targets, homes, booleans, dry-run, and format values take precedence.\n"
         "Installed files are home/agents/<role>, the private\n"
         "home/.subagents_configs/validation runtime, and only opted-in managed\n"
         "AGENTS.md/CLAUDE.md or Codex config blocks.\n"
@@ -74,10 +76,12 @@ HELP_TEXT = {
         "--format json selects the versioned structured dry-run output.\n"
         "--client-version TARGET=VERSION supplies caller-owned version evidence;\n"
         "absent versions use the maintained tested matrix row.\n"
-        "Options: --target TARGET, --all, --home TARGET=PATH,\n"
-        "         --enable-global-routing, --enable-codex-multi-agent,\n"
-        "         --include-commit-pusher, --client-version TARGET=VERSION,\n"
-        "         --dry-run, --format text|json, --help\n"
+        "Options: --target TARGET, --all, --home TARGET=PATH, --profile PATH,\n"
+        "         --enable-global-routing/--no-global-routing,\n"
+        "         --enable-codex-multi-agent/--no-codex-multi-agent,\n"
+        "         --include-commit-pusher/--no-commit-pusher,\n"
+        "         --client-version TARGET=VERSION, --dry-run/--no-dry-run,\n"
+        "         --format text|json, --help\n"
     ),
     "uninstall": (
         "Usage: uninstall.sh (--target TARGET ... | --all) [OPTIONS]\n"
@@ -93,11 +97,13 @@ HELP_TEXT = {
         "Uninstall never accepts install-only routing, Codex, or role options.\n"
         "--dry-run prints normalized homes and exact effects without any writes;\n"
         "--format json selects the versioned structured dry-run output.\n"
+        "--profile PATH loads a strict local JSON/TOML request; explicit CLI\n"
+        "targets, homes, booleans, dry-run, and format values take precedence.\n"
         "--client-version TARGET=VERSION supplies caller-owned version evidence;\n"
         "absent versions use the maintained tested matrix row.\n"
-        "Options: --target TARGET, --all, --home TARGET=PATH,\n"
-        "         --client-version TARGET=VERSION,\n"
-        "         --dry-run, --format text|json, --help\n"
+        "Options: --target TARGET, --all, --home TARGET=PATH, --profile PATH,\n"
+        "         --client-version TARGET=VERSION, --dry-run/--no-dry-run,\n"
+        "         --format text|json, --help\n"
     ),
 }
 

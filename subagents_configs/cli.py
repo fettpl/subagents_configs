@@ -14,17 +14,71 @@ class _ArgumentParser(argparse.ArgumentParser):
         raise CliError(message)
 
 
+def profile_parser() -> argparse.ArgumentParser:
+    """Return the shared parser used by profile/CLI request merging."""
+
+    return _parser()
+
+
+def reject_duplicate_flags(argv: Sequence[str]) -> None:
+    """Apply the CLI duplicate-option rule to profile merges."""
+
+    _reject_duplicate_flags(argv)
+
+
+def expand_user(raw: str, environ: Mapping[str, str]) -> Path:
+    """Expand one CLI home spelling using only the supplied environment."""
+
+    return _expand_user(raw, environ)
+
+
+def default_home(descriptor, environ: Mapping[str, str]) -> Path:
+    """Resolve one target's existing environment/default home policy."""
+
+    return _default_home(descriptor, environ)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument("--target", action="append")
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--home", action="append")
-    parser.add_argument("--enable-global-routing", action="store_true")
-    parser.add_argument("--enable-codex-multi-agent", action="store_true")
-    parser.add_argument("--include-commit-pusher", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--format", choices=("text", "json"), default="text")
+    routing = parser.add_mutually_exclusive_group()
+    routing.add_argument(
+        "--enable-global-routing",
+        dest="enable_global_routing",
+        action="store_true",
+        default=None,
+    )
+    routing.add_argument(
+        "--no-global-routing", dest="enable_global_routing", action="store_false"
+    )
+    multi_agent = parser.add_mutually_exclusive_group()
+    multi_agent.add_argument(
+        "--enable-codex-multi-agent",
+        dest="enable_codex_multi_agent",
+        action="store_true",
+        default=None,
+    )
+    multi_agent.add_argument(
+        "--no-codex-multi-agent", dest="enable_codex_multi_agent", action="store_false"
+    )
+    commit_pusher = parser.add_mutually_exclusive_group()
+    commit_pusher.add_argument(
+        "--include-commit-pusher",
+        dest="include_commit_pusher",
+        action="store_true",
+        default=None,
+    )
+    commit_pusher.add_argument(
+        "--no-commit-pusher", dest="include_commit_pusher", action="store_false"
+    )
+    dry_run = parser.add_mutually_exclusive_group()
+    dry_run.add_argument("--dry-run", dest="dry_run", action="store_true", default=None)
+    dry_run.add_argument("--no-dry-run", dest="dry_run", action="store_false")
+    parser.add_argument("--format", choices=("text", "json"), default=None)
     parser.add_argument("--client-version", action="append")
+    parser.add_argument("--profile")
     return parser
 
 
@@ -75,7 +129,19 @@ def parse_request(
     args, unknown = parser.parse_known_args(list(argv))
     if unknown:
         raise CliError(f"unknown option: {unknown[0]}")
-    dry_run_format: DryRunFormat = args.format
+    if args.profile is not None:
+        from .profiles import load_profile, merge_profile_with_cli
+
+        try:
+            profile = load_profile(Path(args.profile))
+        except (OSError, TypeError, ValueError) as exc:
+            raise CliError("invalid profile") from exc
+        if profile.operation != operation:
+            raise CliError("profile operation conflicts with CLI operation")
+        return merge_profile_with_cli(profile, argv, environ)
+
+    dry_run_format: DryRunFormat = args.format or "text"
+    dry_run = bool(args.dry_run)
     if dry_run_format == "json" and not args.dry_run:
         raise CliError("--format json requires --dry-run")
 
@@ -153,10 +219,10 @@ def parse_request(
         operation=operation,
         targets=tuple(targets),
         homes=homes,
-        enable_global_routing=args.enable_global_routing,
-        enable_codex_multi_agent=args.enable_codex_multi_agent,
-        include_commit_pusher=args.include_commit_pusher,
-        dry_run=args.dry_run,
+        enable_global_routing=bool(args.enable_global_routing),
+        enable_codex_multi_agent=bool(args.enable_codex_multi_agent),
+        include_commit_pusher=bool(args.include_commit_pusher),
+        dry_run=dry_run,
         dry_run_format=dry_run_format,
         client_versions=client_versions,
     )
