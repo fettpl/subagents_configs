@@ -38,6 +38,34 @@ class TransactionPreparationTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def test_apply_transaction_rejects_swapped_nested_target_home_bindings(self):
+        homes = {
+            Target.CODEX: self.root / "codex-home",
+            Target.OPENCODE: self.root / "opencode-home",
+        }
+        for home in homes.values():
+            home.mkdir(mode=0o700)
+        plan = preflight_install(
+            self.repository,
+            planning_request("install", homes, targets=(Target.CODEX, Target.OPENCODE)),
+        )
+        swapped = {
+            Target.CODEX: homes[Target.OPENCODE],
+            Target.OPENCODE: homes[Target.CODEX],
+        }
+        swapped_plan = replace(
+            plan,
+            targets=tuple(
+                replace(target_plan, home=swapped[target_plan.target])
+                for target_plan in plan.targets
+            ),
+        )
+        with transaction.locked_target_homes(homes, (Target.CODEX, Target.OPENCODE)):
+            with self.assertRaises(ValueError):
+                transaction.apply_transaction(swapped_plan)
+        for home in homes.values():
+            self.assertFalse((home / ".subagents_configs").exists())
+
     def test_readonly_evidence_failure_writes_nothing_after_lock(self):
         home = self.root / "codex-home"
         home.mkdir(mode=0o700)

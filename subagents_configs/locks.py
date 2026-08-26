@@ -16,6 +16,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
+from types import MappingProxyType
 
 from .models import IdentityEvidence, Target
 from .paths import assert_safe_home, normalized_absolute
@@ -34,11 +35,11 @@ class _LockLease:
     def __init__(
         self,
         owner: tuple[int, asyncio.Task[object] | None],
-        homes: frozenset[Path],
+        bindings: Mapping[Target, Path],
         identities: dict[Path, tuple[int, int]],
     ) -> None:
         self.owner = owner
-        self.homes = homes
+        self.bindings = MappingProxyType(dict(bindings))
         self.identities = identities
         self.released = False
 
@@ -234,11 +235,13 @@ def lock_held() -> bool:
 def homes_locked(homes: Mapping[Target, Path]) -> bool:
     """Return whether every requested home is held by this context."""
 
-    requested = frozenset(normalized_absolute(path) for path in homes.values())
+    requested = {target: normalized_absolute(path) for target, path in homes.items()}
     lease = _current_lease()
-    if lease is None or not requested <= lease.homes:
+    if lease is None or any(
+        lease.bindings.get(target) != home for target, home in requested.items()
+    ):
         return False
-    for home in requested:
+    for home in requested.values():
         if not _locked_home_path_matches(home):
             raise ValueError("locked target home identity changed")
     return True
@@ -455,9 +458,12 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
 
     normalized = _validate_target_sequence(homes, targets)
     current = _current_lease()
-    requested_homes = frozenset(normalized.values())
     if current is not None:
-        if requested_homes <= current.homes:
+        if all(
+            current.bindings.get(target) == home for target, home in normalized.items()
+        ):
+            if any(not _locked_home_path_matches(home) for home in normalized.values()):
+                raise ValueError("locked target home identity changed")
             yield
             return
         raise ValueError("incompatible nested target lock set")
@@ -491,9 +497,7 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
                 os.close(descriptor)
                 raise
             descriptors.append(descriptor)
-        lease = _LockLease(
-            _execution_owner(), frozenset(normalized.values()), home_identities
-        )
+        lease = _LockLease(_execution_owner(), normalized, home_identities)
         lease_token = _LOCK_LEASE.set(lease)
         try:
             yield

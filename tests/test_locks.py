@@ -370,6 +370,25 @@ class LockAndEvidenceTests(unittest.TestCase):
                 with locked_target_homes(homes, (Target.CODEX, Target.CODEX)):
                     pass
 
+    def test_nested_lock_rejects_swapped_target_home_bindings(self):
+        with private_tempdir() as temporary:
+            homes = {
+                Target.CODEX: Path(temporary) / "codex",
+                Target.OPENCODE: Path(temporary) / "opencode",
+            }
+            for home in homes.values():
+                home.mkdir(mode=0o700)
+            swapped = {
+                Target.CODEX: homes[Target.OPENCODE],
+                Target.OPENCODE: homes[Target.CODEX],
+            }
+            with locked_target_homes(homes, (Target.CODEX, Target.OPENCODE)):
+                self.assertTrue(homes_locked(homes))
+                self.assertFalse(homes_locked(swapped))
+                with self.assertRaises(ValueError):
+                    with locked_target_homes(swapped, (Target.CODEX, Target.OPENCODE)):
+                        pass
+
     def test_compare_and_swap_rejects_each_identity_field_change(self):
         with private_tempdir() as temporary:
             path = Path(temporary) / "managed"
