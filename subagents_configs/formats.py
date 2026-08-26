@@ -37,6 +37,19 @@ _ROLES = (
     "implementer",
     "commit-pusher",
 )
+# This repository's Codex catalog schema is intentionally narrower than the
+# external Codex ConfigToml schema: only fields used by managed agent sources
+# may enter the normalized catalog.
+_CODEX_AGENT_FIELDS = frozenset(
+    {
+        "name",
+        "description",
+        "developer_instructions",
+        "model",
+        "model_reasoning_effort",
+        "sandbox_mode",
+    }
+)
 ROLE_POLICY = {
     "codex": {
         role: {
@@ -435,9 +448,18 @@ def validate_agent_semantics(
             "hooks",
         }
     else:
-        allowed_fields = set(parsed)
+        allowed_fields = _CODEX_AGENT_FIELDS
     if set(parsed) - allowed_fields:
         raise ValueError(f"unknown {target.value} agent frontmatter field")
+    if target is Target.CODEX:
+        for field in _CODEX_AGENT_FIELDS:
+            if field in parsed and type(parsed[field]) is not str:
+                raise ValueError("Codex agent field must be a string")
+        for field in ("description", "developer_instructions"):
+            if field not in parsed:
+                raise ValueError(f"Codex agent field is required: {field}")
+            if not parsed[field].strip():
+                raise ValueError(f"Codex agent field must be non-empty: {field}")
     policy = ROLE_POLICY[target.value][role]["overlay"]
 
     if target is Target.CODEX:
