@@ -488,6 +488,7 @@ class UninstallTests(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 home = self._home() / scenario
                 if scenario == "state-symlink":
+                    home.parent.mkdir(mode=0o700)
                     installed = self._install_at(home)
                     state = installed / ".subagents_configs"
                     real_state = self.root / f"real-state-{scenario}"

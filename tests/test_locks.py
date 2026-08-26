@@ -1,8 +1,11 @@
+import stat
 import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
+from subagents_configs import filesystem
 from subagents_configs.locks import (
     capture_evidence,
     compare_and_swap,
@@ -14,6 +17,94 @@ from tests.helpers import private_tempdir
 
 
 class LockAndEvidenceTests(unittest.TestCase):
+    def test_absent_final_home_is_created_but_missing_ancestors_are_not(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            parent = root / "existing"
+            parent.mkdir(mode=0o700)
+            home = parent / "home"
+            with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                self.assertTrue(home.is_dir())
+                self.assertEqual(stat.S_IMODE(home.stat().st_mode), 0o700)
+                self.assertTrue((home / ".subagents_configs.lock").is_file())
+            missing = root / "missing" / "nested" / "home"
+            with self.assertRaises(ValueError):
+                with locked_target_homes({Target.CODEX: missing}, (Target.CODEX,)):
+                    pass
+            self.assertFalse((root / "missing").exists())
+
+    def test_home_and_ancestor_symlinks_are_rejected_without_redirected_lock(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            real = root / "real"
+            real.mkdir(mode=0o700)
+            home_link = root / "home"
+            home_link.symlink_to(real, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                with locked_target_homes({Target.CODEX: home_link}, (Target.CODEX,)):
+                    pass
+            ancestor_link = root / "linked-parent"
+            ancestor_link.symlink_to(root, target_is_directory=True)
+            nested = ancestor_link / "new-home"
+            with self.assertRaises(ValueError):
+                with locked_target_homes({Target.CODEX: nested}, (Target.CODEX,)):
+                    pass
+            self.assertFalse((root / "new-home" / ".subagents_configs.lock").exists())
+
+    def test_ancestor_real_directory_swap_between_validation_and_open_fails(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            anchor = root / "anchor"
+            anchor.mkdir(mode=0o700)
+            home = anchor / "home"
+
+            def swap(_home):
+                detached = root / "detached-anchor"
+                anchor.rename(detached)
+                anchor.mkdir(mode=0o700)
+
+            with patch("subagents_configs.locks._after_home_validation", swap):
+                with self.assertRaises(ValueError):
+                    with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                        pass
+            self.assertFalse((anchor / "home").exists())
+            self.assertFalse((root / "detached-anchor" / "home").exists())
+
+    def test_replacing_locked_home_with_real_directory_fails_before_write(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            home.mkdir(mode=0o700)
+            with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                detached = root / "detached"
+                home.rename(detached)
+                home.mkdir(mode=0o700)
+                with self.assertRaises(ValueError):
+                    filesystem.atomic_write(home / "managed", b"must not write")
+                self.assertFalse((home / "managed").exists())
+                self.assertFalse((detached / "managed").exists())
+
+    def test_home_swap_after_parent_pin_fails_closed(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            home.mkdir(mode=0o700)
+            swapped = False
+
+            def swap(_operation, parent):
+                nonlocal swapped
+                if parent == home and not swapped:
+                    detached = root / "detached"
+                    home.rename(detached)
+                    home.mkdir(mode=0o700)
+                    swapped = True
+
+            with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                with patch.object(filesystem, "_after_parent_pin", swap):
+                    with self.assertRaises(ValueError):
+                        filesystem.atomic_write(home / "managed", b"must not write")
+            self.assertFalse((home / "managed").exists())
+
     def test_second_lock_waits_until_first_releases(self):
         with private_tempdir() as temporary:
             home = Path(temporary) / "home"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import os
 import stat
@@ -18,6 +19,17 @@ _LOCK_DEPTH: ContextVar[int] = ContextVar("subagents_configs_lock_depth", defaul
 _LOCK_HOMES: ContextVar[frozenset[Path]] = ContextVar(
     "subagents_configs_lock_homes", default=frozenset()
 )
+_LOCK_HOME_IDENTITIES: ContextVar[dict[Path, tuple[int, int]] | None] = ContextVar(
+    "subagents_configs_lock_home_identities", default=None
+)
+
+_DIRECTORY_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+)
+
+
+def _after_home_validation(home: Path) -> None:
+    """Race-test seam between lexical validation and descriptor traversal."""
 
 
 def lock_held() -> bool:
@@ -30,7 +42,60 @@ def homes_locked(homes: Mapping[Target, Path]) -> bool:
     """Return whether every requested home is held by this context."""
 
     requested = frozenset(normalized_absolute(path) for path in homes.values())
-    return requested <= _LOCK_HOMES.get()
+    if not requested <= _LOCK_HOMES.get():
+        return False
+    for home in requested:
+        if not _locked_home_path_matches(home):
+            raise ValueError("locked target home identity changed")
+    return True
+
+
+def _locked_home_identity(home: Path) -> tuple[int, int] | None:
+    normalized = normalized_absolute(home)
+    identities = _LOCK_HOME_IDENTITIES.get() or {}
+    return identities.get(normalized)
+
+
+def _locked_home_path_matches(path: Path) -> bool:
+    """Check the lexical target path still names the locked directory inode."""
+
+    normalized = normalized_absolute(path)
+    for home, identity in (_LOCK_HOME_IDENTITIES.get() or {}).items():
+        try:
+            normalized.relative_to(home)
+        except ValueError:
+            continue
+        try:
+            result = os.lstat(home)
+        except FileNotFoundError:
+            return False
+        if stat.S_ISLNK(result.st_mode) or not stat.S_ISDIR(result.st_mode):
+            return False
+        if (result.st_dev, result.st_ino) != identity:
+            return False
+    return True
+
+
+def verify_locked_home_path(path: Path) -> None:
+    """Fail closed when a locked target home was replaced or redirected."""
+
+    if not _locked_home_path_matches(path):
+        raise ValueError("locked target home identity changed")
+
+
+def verify_locked_home_descriptor(path: Path, descriptor: int) -> None:
+    """Bind a pinned directory descriptor to the context's locked home inode."""
+
+    normalized = normalized_absolute(path)
+    for home, identity in (_LOCK_HOME_IDENTITIES.get() or {}).items():
+        try:
+            normalized.relative_to(home)
+        except ValueError:
+            continue
+        if normalized == home:
+            result = os.fstat(descriptor)
+            if (result.st_dev, result.st_ino) != identity:
+                raise ValueError("locked target home identity changed")
 
 
 def _validate_target_sequence(homes: Mapping[Target, Path], targets: Sequence[Target]):
@@ -56,19 +121,138 @@ def _validate_target_sequence(homes: Mapping[Target, Path], targets: Sequence[Ta
     return normalized
 
 
-def _ensure_home(home: Path) -> None:
-    """Create an absent target home as the private lock substrate."""
+def _directory_identity_snapshot(path: Path) -> dict[Path, tuple[int, int]]:
+    """Capture identities of existing lexical directory components."""
 
-    assert_safe_home(home)
+    absolute = normalized_absolute(path)
+    identities: dict[Path, tuple[int, int]] = {}
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        current /= component
+        try:
+            result = os.lstat(current)
+        except FileNotFoundError:
+            break
+        if stat.S_ISLNK(result.st_mode) or not stat.S_ISDIR(result.st_mode):
+            raise ValueError("target home contains a symlink or non-directory")
+        identities[current] = (result.st_dev, result.st_ino)
+    return identities
+
+
+def _open_directory_path(
+    path: Path, expected: Mapping[Path, tuple[int, int]] | None = None
+) -> int:
+    """Open an existing directory path with descriptor-relative no-following."""
+
+    absolute = normalized_absolute(path)
+    descriptor = os.open("/", _DIRECTORY_FLAGS)
+    current = Path(absolute.anchor)
     try:
-        home.mkdir(mode=0o700, parents=True)
-    except FileExistsError:
-        pass
-    result = home.lstat()
-    if not stat.S_ISDIR(result.st_mode):
-        raise ValueError("target home must be a private directory")
-    if result.st_uid != os.getuid():
-        raise ValueError("target home ownership is invalid")
+        for component in absolute.parts[1:]:
+            try:
+                next_descriptor = os.open(
+                    component, _DIRECTORY_FLAGS, dir_fd=descriptor
+                )
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise ValueError("target home contains a symlink") from exc
+                raise
+            os.close(descriptor)
+            descriptor = next_descriptor
+            current /= component
+            if expected is not None and current in expected:
+                result = os.fstat(descriptor)
+                if (result.st_dev, result.st_ino) != expected[current]:
+                    raise ValueError("target home ancestor identity changed")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _prepare_home(home: Path) -> tuple[int, tuple[int, int]]:
+    """Open/create only the final home component beneath an existing parent."""
+
+    normalized = normalized_absolute(home)
+    assert_safe_home(normalized)
+    expected_ancestors = _directory_identity_snapshot(normalized.parent)
+    try:
+        expected_home = os.lstat(normalized)
+    except FileNotFoundError:
+        expected_home_identity = None
+    else:
+        expected_home_identity = (expected_home.st_dev, expected_home.st_ino)
+    _after_home_validation(normalized)
+    try:
+        parent_descriptor = _open_directory_path(normalized.parent, expected_ancestors)
+    except FileNotFoundError as exc:
+        raise ValueError("target home parent must already exist") from exc
+    home_descriptor = None
+    try:
+        try:
+            existing = os.stat(
+                normalized.name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+            if stat.S_ISLNK(existing.st_mode) or not stat.S_ISDIR(existing.st_mode):
+                raise ValueError("target home must be a private directory")
+            if (
+                expected_home_identity is None
+                or (
+                    existing.st_dev,
+                    existing.st_ino,
+                )
+                != expected_home_identity
+            ):
+                raise ValueError("target home identity changed")
+        except FileNotFoundError:
+            try:
+                os.mkdir(normalized.name, 0o700, dir_fd=parent_descriptor)
+            except FileExistsError:
+                existing = os.stat(
+                    normalized.name, dir_fd=parent_descriptor, follow_symlinks=False
+                )
+                if stat.S_ISLNK(existing.st_mode) or not stat.S_ISDIR(existing.st_mode):
+                    raise ValueError(
+                        "target home must be a private directory"
+                    ) from None
+                if (
+                    expected_home_identity is not None
+                    or (
+                        existing.st_dev,
+                        existing.st_ino,
+                    )
+                    != expected_home_identity
+                ):
+                    raise ValueError("target home identity changed") from None
+        home_descriptor = os.open(
+            normalized.name, _DIRECTORY_FLAGS, dir_fd=parent_descriptor
+        )
+        result = os.fstat(home_descriptor)
+        if not stat.S_ISDIR(result.st_mode) or result.st_uid != os.getuid():
+            raise ValueError("target home ownership is invalid")
+        if (
+            expected_home_identity is not None
+            and (
+                result.st_dev,
+                result.st_ino,
+            )
+            != expected_home_identity
+        ):
+            raise ValueError("target home identity changed")
+        return home_descriptor, (result.st_dev, result.st_ino)
+    except BaseException:
+        if home_descriptor is not None:
+            os.close(home_descriptor)
+        raise
+    finally:
+        os.close(parent_descriptor)
+
+
+def _ensure_home(home: Path) -> None:
+    """Create an absent final target-home component without ancestor creation."""
+
+    descriptor, _identity = _prepare_home(home)
+    os.close(descriptor)
 
 
 @contextmanager
@@ -76,17 +260,20 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
     """Hold persistent exclusive locks in canonical descriptor order."""
 
     normalized = _validate_target_sequence(homes, targets)
-    # Validate/create all directory substrates before opening any lock.
-    for home in normalized.values():
-        _ensure_home(home)
     descriptors: list[int] = []
+    home_descriptors: list[int] = []
+    home_identities: dict[Path, tuple[int, int]] = {}
     try:
         for target in targets:
             home = normalized[target]
-            anchor = home / ".subagents_configs.lock"
+            home_descriptor, identity = _prepare_home(home)
+            home_descriptors.append(home_descriptor)
+            home_identities[home] = identity
             flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
             try:
-                descriptor = os.open(anchor, flags, 0o600)
+                descriptor = os.open(
+                    ".subagents_configs.lock", flags, 0o600, dir_fd=home_descriptor
+                )
             except OSError as exc:
                 raise ValueError("cannot open target lock anchor") from exc
             try:
@@ -107,9 +294,13 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
         homes_token = _LOCK_HOMES.set(
             _LOCK_HOMES.get() | frozenset(normalized.values())
         )
+        identities_token = _LOCK_HOME_IDENTITIES.set(
+            {**(_LOCK_HOME_IDENTITIES.get() or {}), **home_identities}
+        )
         try:
             yield
         finally:
+            _LOCK_HOME_IDENTITIES.reset(identities_token)
             _LOCK_HOMES.reset(homes_token)
             _LOCK_DEPTH.reset(token)
     finally:
@@ -118,6 +309,8 @@ def locked_target_homes(homes: Mapping[Target, Path], targets: Sequence[Target])
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
             finally:
                 os.close(descriptor)
+        for descriptor in reversed(home_descriptors):
+            os.close(descriptor)
 
 
 def capture_evidence(path: Path, label: str) -> IdentityEvidence | None:

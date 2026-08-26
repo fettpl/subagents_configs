@@ -14,7 +14,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import TransactionError
-from .locks import IdentityEvidence
+from .locks import (
+    IdentityEvidence,
+    verify_locked_home_descriptor,
+    verify_locked_home_path,
+)
 from .models import DesiredFile
 from .paths import normalized_absolute
 
@@ -43,6 +47,14 @@ def expected_atomic_identity(before: IdentityEvidence | None):
 def _after_parent_pin(operation: str, parent: Path) -> None:
     """Narrow operation seam used to exercise parent-swap races in tests."""
 
+    verify_locked_home_path(parent)
+
+
+def _verify_locked_parent(parent: Path) -> None:
+    """Re-check lexical home identity after an injectable race seam."""
+
+    verify_locked_home_path(parent)
+
 
 def _open_directory_component(component: str, parent_fd: int, label: str) -> int:
     try:
@@ -59,11 +71,15 @@ def _pinned_directory(path: Path, label: str):
 
     absolute = normalized_absolute(path)
     descriptor = os.open("/", _DIRECTORY_FLAGS)
+    current = Path(absolute.anchor)
     try:
         for component in absolute.parts[1:]:
             next_descriptor = _open_directory_component(component, descriptor, label)
             os.close(descriptor)
             descriptor = next_descriptor
+            current /= component
+            verify_locked_home_descriptor(current, descriptor)
+        verify_locked_home_path(absolute)
         yield descriptor
     finally:
         os.close(descriptor)
@@ -94,6 +110,7 @@ def _open_regular_read(path: Path, label: str, operation: str = "read") -> int:
     absolute = normalized_absolute(path)
     with _pinned_directory(absolute.parent, label) as parent_fd:
         _after_parent_pin(operation, absolute.parent)
+        _verify_locked_parent(absolute.parent)
         result = _stat_at(parent_fd, absolute.name, label)
         if result is None:
             raise FileNotFoundError(absolute)
@@ -341,6 +358,7 @@ def capture_evidence(path: Path, label: str) -> IdentityEvidence | None:
     target = normalized_absolute(path)
     with _pinned_directory(target.parent, f"{label} parent") as parent_fd:
         _after_parent_pin("evidence", target.parent)
+        _verify_locked_parent(target.parent)
         result = _stat_at(parent_fd, target.name, label)
         if result is None:
             return None
@@ -401,6 +419,7 @@ def compare_and_swap(
     target = normalized_absolute(path)
     with _pinned_directory(target.parent, f"{action} parent") as parent_fd:
         _after_parent_pin(f"cas-{action}", target.parent)
+        _verify_locked_parent(target.parent)
         current = None
         existing = _stat_at(parent_fd, target.name, f"{action} target")
         if existing is not None:
@@ -685,6 +704,7 @@ def ensure_directory(
                 created = False
             except FileNotFoundError:
                 _after_parent_pin("mkdir", current.parent)
+                _verify_locked_parent(current.parent)
                 os.mkdir(component, 0o700, dir_fd=descriptor)
                 next_descriptor = _open_directory_component(
                     component, descriptor, "private directory"
@@ -727,6 +747,7 @@ def remove_owned_directory(
     target = normalized_absolute(path)
     with _pinned_directory(target.parent, "owned-directory cleanup") as parent_fd:
         _after_parent_pin("owned-directory-cleanup", target.parent)
+        _verify_locked_parent(target.parent)
         descriptor = _open_directory_component(
             target.name, parent_fd, "owned-directory cleanup"
         )
@@ -929,6 +950,7 @@ def atomic_write(path: Path, content: bytes, mode: int = 0o600) -> IdentityEvide
     parent = target.parent
     with _pinned_directory(parent, "atomic-write parent") as parent_fd:
         _after_parent_pin("atomic-write", parent)
+        _verify_locked_parent(parent)
         existing = _stat_at(parent_fd, target.name, "atomic-write target")
         if existing is not None and not stat.S_ISREG(existing.st_mode):
             raise ValueError(f"atomic-write target is not a regular file: {target}")
@@ -1017,6 +1039,7 @@ def exclusive_backup(source: Path, destination: Path) -> str:
             destination.parent, "backup destination parent"
         ) as parent_fd:
             _after_parent_pin("backup-destination", destination.parent)
+            _verify_locked_parent(destination.parent)
             try:
                 existing = os.stat(
                     destination.name,
@@ -1079,6 +1102,7 @@ def exclusive_write(path: Path, content: bytes, mode: int = 0o600) -> IdentityEv
     target = normalized_absolute(path)
     with _pinned_directory(target.parent, "exclusive-write parent") as parent_fd:
         _after_parent_pin("exclusive-write", target.parent)
+        _verify_locked_parent(target.parent)
         descriptor: int | None = None
         try:
             descriptor = os.open(
@@ -1112,6 +1136,7 @@ def unlink_regular(path: Path) -> None:
     target = normalized_absolute(path)
     with _pinned_directory(target.parent, "unlink parent") as parent_fd:
         _after_parent_pin("unlink", target.parent)
+        _verify_locked_parent(target.parent)
         result = _stat_at(parent_fd, target.name, "unlink target")
         if result is None:
             return
