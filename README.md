@@ -192,8 +192,10 @@ script runs. The selected interpreter is still invoked with `-I`, and target
 compatibility wrappers inherit the same selection.
 
 Install options are `--target TARGET`, `--all`, `--home TARGET=PATH`,
-`--enable-global-routing`, `--enable-codex-multi-agent`,
-`--include-commit-pusher`, `--client-version TARGET=VERSION`, `--dry-run`,
+`--profile PATH`, `--enable-global-routing`/`--no-global-routing`,
+`--enable-codex-multi-agent`/`--no-codex-multi-agent`,
+`--include-commit-pusher`/`--no-commit-pusher`,
+`--client-version TARGET=VERSION`, `--dry-run`/`--no-dry-run`,
 `--format text|json`, and sole-argument
 `--help`. `--format json` is accepted only with `--dry-run`.
 Uninstall accepts `--target`, `--all`, `--home`, `--client-version TARGET=VERSION`,
@@ -202,6 +204,34 @@ three install-only opt-ins are rejected during CLI parsing. Repeated targets,
 mixed `--all` and `--target`, unknown options, duplicate homes, homes for
 unselected targets, and `--enable-codex-multi-agent` without Codex are errors
 before any write.
+
+Profiles are local, exact-schema JSON or TOML files. They contain only
+`schema_version = 1`, an `install` or `uninstall` operation, canonical target
+and absolute home mappings, and the five closed option fields. Duplicate keys,
+unknown fields, control or credential-like strings, traversal paths, symlinked
+homes, and unsupported targets are rejected. For example:
+
+```json
+{
+  "schema_version": 1,
+  "operation": "install",
+  "targets": ["codex"],
+  "homes": {"codex": "/tmp/codex-profile"},
+  "options": {
+    "enable_global_routing": false,
+    "enable_codex_multi_agent": false,
+    "include_commit_pusher": false,
+    "dry_run": true,
+    "dry_run_format": "json"
+  }
+}
+```
+
+Use `./install.sh --profile profile.json` to retain profile values. Explicit
+CLI targets/`--all`, `--home`, paired positive/negative booleans,
+`--dry-run`/`--no-dry-run`, and `--format` values override the profile in both
+directions; absent values retain it. Profiles never add client versions,
+roles, permissions, consent, package, or network authority.
 
 The `--home TARGET=PATH` option takes precedence exactly as follows:
 `--home TARGET=PATH` > the target environment

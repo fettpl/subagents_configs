@@ -1221,10 +1221,17 @@ def _target_uninstall(
     )
 
 
-def _validate_request(request: Request, operation: str) -> None:
+def validate_request_shape(request: Request, operation: str | None = None) -> None:
+    """Validate a request's pure shape before compatibility or filesystem reads."""
+
     if not isinstance(request, Request):
         raise ValueError("request must be a Request")
-    if request.operation != operation:
+    if type(request.operation) is not str or request.operation not in (
+        "install",
+        "uninstall",
+    ):
+        raise ValueError("request operation is invalid")
+    if operation is not None and request.operation != operation:
         raise ValueError(f"request operation must be {operation}")
     for option in (
         "enable_global_routing",
@@ -1234,8 +1241,20 @@ def _validate_request(request: Request, operation: str) -> None:
     ):
         if type(getattr(request, option)) is not bool:
             raise ValueError(f"{option} must be a bool")
-    if request.dry_run_format not in ("text", "json"):
+    if type(request.dry_run_format) is not str or request.dry_run_format not in (
+        "text",
+        "json",
+    ):
         raise ValueError("dry_run_format must be text or json")
+    if not request.targets:
+        raise ValueError("at least one target is required")
+    if any(type(target) is not Target for target in request.targets):
+        raise ValueError("targets must use supported Target values")
+    if len(set(request.targets)) != len(request.targets):
+        raise ValueError("duplicate targets are not supported")
+    canonical_targets = targets_for_request(request.targets, False)
+    if tuple(request.targets) != canonical_targets:
+        raise ValueError("targets must be in canonical descriptor order")
     if not isinstance(request.client_versions, Mapping):
         raise ValueError("client_versions must be a mapping")
     selected_names = {target.value for target in request.targets}
@@ -1248,19 +1267,14 @@ def _validate_request(request: Request, operation: str) -> None:
             validate_client_version(version)
         except (TypeError, ValueError) as exc:
             raise ValueError("client version is invalid") from exc
-    if not request.targets:
-        raise ValueError("at least one target is required")
-    if any(type(target) is not Target for target in request.targets):
-        raise ValueError("targets must use supported Target values")
-    if len(set(request.targets)) != len(request.targets):
-        raise ValueError("duplicate targets are not supported")
-    targets_for_request(request.targets, False)
     if not isinstance(request.homes, Mapping):
         raise ValueError("homes must map every selected target")
     if set(request.homes) != set(request.targets) or any(
         type(target) is not Target for target in request.homes
     ):
         raise ValueError("homes keys must exactly match selected targets")
+    if any(not isinstance(home, Path) for home in request.homes.values()):
+        raise ValueError("homes must contain Path values")
     normalized_homes = [
         normalized_absolute(request.homes[target]) for target in request.targets
     ]
@@ -1279,6 +1293,12 @@ def _validate_request(request: Request, operation: str) -> None:
         raise ValueError("uninstall does not accept install-only options")
     if request.enable_codex_multi_agent and Target.CODEX not in request.targets:
         raise ValueError("Codex multi-agent configuration requires Codex")
+
+
+def _validate_request(request: Request, operation: str) -> None:
+    """Compatibility wrapper for existing planner callers."""
+
+    validate_request_shape(request, operation)
 
 
 def validate_lifecycle(request: Request, descriptor) -> None:
