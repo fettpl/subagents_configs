@@ -417,6 +417,27 @@ class LockAndEvidenceTests(unittest.TestCase):
             self.assertFalse((anchor / "home").exists())
             self.assertFalse((root / "detached-anchor" / "home").exists())
 
+    def test_existing_home_disappearance_after_validation_fails_without_replacement(
+        self,
+    ):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            home.mkdir(mode=0o700)
+            detached = root / "detached-home"
+
+            def disappear(_home):
+                home.rename(detached)
+
+            with patch("subagents_configs.locks._after_home_validation", disappear):
+                with self.assertRaisesRegex(ValueError, "target home identity changed"):
+                    with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                        pass
+            self.assertFalse(home.exists())
+            self.assertTrue(detached.is_dir())
+            self.assertFalse((home / ".subagents_configs.lock").exists())
+            self.assertFalse((detached / ".subagents_configs.lock").exists())
+
     def test_replacing_locked_home_with_real_directory_fails_before_write(self):
         with private_tempdir() as temporary:
             root = Path(temporary)

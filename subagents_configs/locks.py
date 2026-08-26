@@ -574,6 +574,8 @@ def _prepare_home(home: Path) -> tuple[int, tuple[int, int]]:
             ):
                 raise ValueError("target home identity changed")
         except FileNotFoundError:
+            if expected_home_identity is not None:
+                raise ValueError("target home identity changed") from None
             try:
                 return _create_and_publish_home(parent_descriptor, normalized)
             except FileExistsError:
