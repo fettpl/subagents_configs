@@ -75,3 +75,20 @@ Review-round focused verification:
 - Full unittest discovery — 525 passed, 1 skipped.
 - Ruff check/format, catalog validation, compileall, shell syntax/ShellCheck,
   and `git diff --check` rerun after fixes — passed.
+
+## Review round 2 fixes
+
+- RED exposed uninstall profiles with each install-only option reaching
+  compatibility/lock/planning seams; dry and non-dry cases were covered.
+- GREEN now passes `profile.operation` to the merge validator and `operation`
+  to the orchestrator validator immediately after parsing, before any
+  compatibility, lock, journal, state, repository, or home seam.
+- Added two-way regressions for explicit `--format text` over profile JSON and
+  `--no-dry-run` resetting the effective format to text.
+
+Review-round 2 verification:
+
+- Focused profile/CLI/integration/planning suite — 83 passed.
+- Full unittest discovery — 527 passed, 1 skipped.
+- Ruff, catalog validation, compileall, shell syntax/ShellCheck, and
+  `git diff --check` — passed.

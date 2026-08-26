@@ -817,7 +817,7 @@ def run(
         return EXIT_CLI_ERROR
 
     try:
-        validate_request_shape(request)
+        validate_request_shape(request, operation)
     except (TypeError, ValueError):
         _emit(
             stderr,

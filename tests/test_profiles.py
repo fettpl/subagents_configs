@@ -239,6 +239,7 @@ class ProfileTests(unittest.TestCase):
         self.assertFalse(turned_off.enable_codex_multi_agent)
         self.assertFalse(turned_off.include_commit_pusher)
         self.assertFalse(turned_off.dry_run)
+        self.assertEqual(turned_off.dry_run_format, "text")
         turned_on = merge_profile_with_cli(
             ProfileRequest(
                 1,
@@ -306,6 +307,25 @@ class ProfileTests(unittest.TestCase):
             Path("/var/tmp/override-opencode"),  # noqa: S108
         )
         self.assertEqual(explicit_target.dry_run_format, "json")
+        json_profile = load_profile(
+            self.write_json(
+                _profile(
+                    options={
+                        "enable_global_routing": False,
+                        "enable_codex_multi_agent": False,
+                        "include_commit_pusher": False,
+                        "dry_run": True,
+                        "dry_run_format": "json",
+                    }
+                )
+            )
+        )
+        self.assertEqual(
+            merge_profile_with_cli(
+                json_profile, ["--format", "text"], self.environ
+            ).dry_run_format,
+            "text",
+        )
         all_targets = merge_profile_with_cli(profile, ["--all"], self.environ)
         self.assertEqual(
             all_targets.targets,
@@ -319,6 +339,83 @@ class ProfileTests(unittest.TestCase):
             all_targets.homes[Target.OPENCODE],
             self.root / ".config" / "opencode",
         )
+
+    def test_uninstall_profile_install_only_flags_are_rejected_during_merge(self):
+        option_names = (
+            "enable_global_routing",
+            "enable_codex_multi_agent",
+            "include_commit_pusher",
+        )
+        for option_name in option_names:
+            options = {
+                "enable_global_routing": False,
+                "enable_codex_multi_agent": False,
+                "include_commit_pusher": False,
+                "dry_run": True,
+                "dry_run_format": "text",
+            }
+            options[option_name] = True
+            profile_path = self.write_json(
+                _profile(operation="uninstall", options=options)
+            )
+            profile = load_profile(profile_path)
+            with self.subTest(option_name=option_name):
+                with self.assertRaises(ValueError):
+                    merge_profile_with_cli(profile, [], self.environ)
+                with self.assertRaises(ValueError):
+                    parse_request(
+                        "uninstall", ["--profile", str(profile_path)], self.environ
+                    )
+
+    def test_uninstall_profile_install_only_flags_fail_before_compatibility_or_seams(
+        self,
+    ):
+        for dry_run in (True, False):
+            profile_path = self.write_json(
+                _profile(
+                    operation="uninstall",
+                    homes={"codex": str(self.root / "codex")},
+                    options={
+                        "enable_global_routing": True,
+                        "enable_codex_multi_agent": False,
+                        "include_commit_pusher": False,
+                        "dry_run": dry_run,
+                        "dry_run_format": "text",
+                    },
+                )
+            )
+            out, err = io.StringIO(), io.StringIO()
+            with (
+                patch(
+                    "subagents_configs.orchestrator.validate_request_compatibility"
+                ) as compatibility,
+                patch("subagents_configs.orchestrator.locked_target_homes") as locks,
+                patch("subagents_configs.orchestrator._journal_groups") as journals,
+                patch("subagents_configs.orchestrator._state_fingerprint") as state,
+                patch(
+                    "subagents_configs.orchestrator._collect_stable_dry_run_evidence"
+                ) as evidence,
+                patch(
+                    "subagents_configs.orchestrator.preflight_uninstall"
+                ) as preflight,
+            ):
+                status = run(
+                    "uninstall",
+                    ["--profile", str(profile_path)],
+                    repo_root=self.root / "missing-repository",
+                    environ=self.environ,
+                    stdout=out,
+                    stderr=err,
+                )
+            with self.subTest(dry_run=dry_run):
+                self.assertEqual(status, EXIT_PREFLIGHT_ERROR)
+                compatibility.assert_not_called()
+                locks.assert_not_called()
+                journals.assert_not_called()
+                state.assert_not_called()
+                evidence.assert_not_called()
+                preflight.assert_not_called()
+                self.assertEqual(out.getvalue(), "")
 
     def test_profile_and_cli_operations_must_match(self):
         self.write_json(_profile(operation="install"))

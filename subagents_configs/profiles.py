@@ -301,5 +301,5 @@ def merge_profile_with_cli(
     )
     from .planning import validate_request_shape
 
-    validate_request_shape(request)
+    validate_request_shape(request, profile.operation)
     return request
