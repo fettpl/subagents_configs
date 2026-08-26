@@ -9,6 +9,7 @@ import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import subagents_configs.locks as locks
@@ -257,6 +258,98 @@ class LockAndEvidenceTests(unittest.TestCase):
             ]
             self.assertEqual(len(temporary_entries), 1)
             self.assertTrue(temporary_entries[0].is_dir())
+
+    def test_absent_home_temp_same_inode_with_new_ctime_fails_closed(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            parent = root / "parent"
+            parent.mkdir(mode=0o700)
+            home = parent / "home"
+            real_open = locks.os.open
+            real_fstat = locks.os.fstat
+            original_binding = None
+            swapped = False
+            forced = False
+
+            def swap_before_open(path, *args, **kwargs):
+                nonlocal swapped
+                if isinstance(path, str) and path.startswith(".home.tmp-"):
+                    temporary_entry = next(
+                        entry for entry in parent.iterdir() if ".tmp-" in entry.name
+                    )
+                    temporary_entry.rmdir()
+                    temporary_entry.mkdir(mode=0o700)
+                    swapped = True
+                return real_open(path, *args, **kwargs)
+
+            def same_inode_new_ctime(descriptor):
+                nonlocal forced, original_binding
+                result = real_fstat(descriptor)
+                if not swapped or forced:
+                    return result
+                forced = True
+                return SimpleNamespace(
+                    st_dev=original_binding[0],
+                    st_ino=original_binding[1],
+                    st_ctime_ns=original_binding[2] + 1,
+                    st_mode=result.st_mode,
+                    st_uid=result.st_uid,
+                )
+
+            real_binding = locks._directory_binding
+
+            def capture_original(result):
+                nonlocal original_binding
+                binding = real_binding(result)
+                if original_binding is None:
+                    original_binding = binding
+                return binding
+
+            with (
+                patch.object(locks.os, "open", side_effect=swap_before_open),
+                patch.object(locks.os, "fstat", side_effect=same_inode_new_ctime),
+                patch.object(locks, "_directory_binding", side_effect=capture_original),
+            ):
+                with self.assertRaises(ValueError):
+                    with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                        pass
+            self.assertTrue(swapped)
+            self.assertTrue(forced)
+            self.assertFalse(home.exists())
+            temporary_entries = [
+                entry for entry in parent.iterdir() if ".tmp-" in entry.name
+            ]
+            self.assertEqual(len(temporary_entries), 1)
+            self.assertTrue(temporary_entries[0].is_dir())
+
+    def test_absent_home_post_publish_stat_failure_cleans_published_home(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            parent = root / "parent"
+            parent.mkdir(mode=0o700)
+            home = parent / "home"
+            real_stat = locks.os.stat
+            home_stat_calls = 0
+
+            def fail_first_post_publish_stat(path, *args, **kwargs):
+                nonlocal home_stat_calls
+                if path == "home":
+                    home_stat_calls += 1
+                    if home_stat_calls == 2:
+                        raise OSError(errno.EIO, "injected post-publish stat failure")
+                return real_stat(path, *args, **kwargs)
+
+            with patch.object(
+                locks.os, "stat", side_effect=fail_first_post_publish_stat
+            ):
+                with self.assertRaisesRegex(OSError, "post-publish stat failure"):
+                    with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                        pass
+            self.assertEqual(home_stat_calls, 3)
+            self.assertFalse(home.exists())
+            self.assertEqual(
+                [entry for entry in parent.iterdir() if ".tmp-" in entry.name], []
+            )
 
     def test_home_and_ancestor_symlinks_are_rejected_without_redirected_lock(self):
         with private_tempdir() as temporary:

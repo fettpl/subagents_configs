@@ -296,16 +296,30 @@ def _rename_noreplace(parent_fd: int, source: str, destination: str) -> None:
 
 
 def _cleanup_owned_directory(
-    parent_fd: int, name: str, identity: tuple[int, int]
+    parent_fd: int, name: str, binding: tuple[int, int, int]
 ) -> None:
-    """Remove only an empty directory whose identity we captured ourselves."""
+    """Remove only an empty directory whose binding we captured ourselves."""
 
     try:
         result = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
         return
-    if stat.S_ISDIR(result.st_mode) and (result.st_dev, result.st_ino) == identity:
+    if (
+        stat.S_ISDIR(result.st_mode)
+        and (
+            result.st_dev,
+            result.st_ino,
+            result.st_ctime_ns,
+        )
+        == binding
+    ):
         os.rmdir(name, dir_fd=parent_fd)
+
+
+def _directory_binding(result: os.stat_result) -> tuple[int, int, int]:
+    """Return portable identity evidence that detects directory recreation."""
+
+    return result.st_dev, result.st_ino, result.st_ctime_ns
 
 
 def _create_and_publish_home(
@@ -326,40 +340,54 @@ def _create_and_publish_home(
         raise ValueError("cannot allocate private home publication")
 
     descriptor = None
-    temporary_identity = None
+    temporary_binding = None
     identity = None
+    published_binding = None
     published = False
     try:
         created = os.stat(temporary_name, dir_fd=parent_fd, follow_symlinks=False)
         if not stat.S_ISDIR(created.st_mode) or created.st_uid != os.getuid():
             raise ValueError("target home ownership is invalid")
-        temporary_identity = (created.st_dev, created.st_ino)
+        temporary_binding = _directory_binding(created)
         descriptor = os.open(temporary_name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
         result = os.fstat(descriptor)
-        opened_identity = (result.st_dev, result.st_ino)
-        if opened_identity != temporary_identity:
+        opened_binding = _directory_binding(result)
+        if opened_binding != temporary_binding:
             raise ValueError("temporary home identity changed")
         if not stat.S_ISDIR(result.st_mode) or result.st_uid != os.getuid():
             raise ValueError("target home ownership is invalid")
-        identity = opened_identity
+        identity = (result.st_dev, result.st_ino)
         _after_home_mkdir(normalized)
         try:
             _rename_noreplace(parent_fd, temporary_name, normalized.name)
         except FileExistsError as exc:
             raise ValueError("target home appeared during publication") from exc
         published = True
+        published_result = os.stat(
+            normalized.name, dir_fd=parent_fd, follow_symlinks=False
+        )
+        if stat.S_ISLNK(published_result.st_mode) or not stat.S_ISDIR(
+            published_result.st_mode
+        ):
+            raise ValueError("target home must be a private directory")
+        published_binding = _directory_binding(published_result)
         _after_home_publish(normalized)
         final = os.stat(normalized.name, dir_fd=parent_fd, follow_symlinks=False)
         if stat.S_ISLNK(final.st_mode) or not stat.S_ISDIR(final.st_mode):
             raise ValueError("target home must be a private directory")
-        if (final.st_dev, final.st_ino) != identity:
+        if _directory_binding(final) != published_binding:
             raise ValueError("target home identity changed")
         return descriptor, identity
     except BaseException:
-        cleanup_identity = identity or temporary_identity
-        if cleanup_identity is not None:
+        cleanup_binding = published_binding if published else temporary_binding
+        if published and cleanup_binding is None and descriptor is not None:
+            try:
+                cleanup_binding = _directory_binding(os.fstat(descriptor))
+            except OSError:
+                cleanup_binding = None
+        if cleanup_binding is not None:
             cleanup_name = normalized.name if published else temporary_name
-            _cleanup_owned_directory(parent_fd, cleanup_name, cleanup_identity)
+            _cleanup_owned_directory(parent_fd, cleanup_name, cleanup_binding)
         if descriptor is not None:
             os.close(descriptor)
         raise
