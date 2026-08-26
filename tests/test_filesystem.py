@@ -15,6 +15,7 @@ from subagents_configs.filesystem import (
     compare_and_swap,
     ensure_private_directory,
     exclusive_backup,
+    exclusive_write,
     sha256_bytes,
     sha256_file,
     unlink_regular,
@@ -24,6 +25,47 @@ TEMP_DIR = "/private/tmp" if Path("/private/tmp").is_dir() else None
 
 
 class FilesystemTests(unittest.TestCase):
+    def test_exclusive_write_parent_sync_failure_cleans_created_artifact(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            path = Path(temporary) / "journal"
+            with patch.object(
+                filesystem,
+                "_sync_parent_directory_fd",
+                side_effect=[
+                    OSError("parent sync failed"),
+                    OSError("cleanup sync failed"),
+                ],
+            ) as sync:
+                with self.assertRaisesRegex(OSError, "parent sync failed"):
+                    exclusive_write(path, b"journal bytes")
+            self.assertFalse(path.exists())
+            self.assertEqual(sync.call_count, 2)
+
+    def test_exclusive_write_cleanup_preserves_replacement(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            path = Path(temporary) / "journal"
+            real_sync = filesystem._sync_parent_directory_fd
+            calls = 0
+
+            def replace_then_fail(parent_fd):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    path.unlink()
+                    path.write_bytes(b"attacker replacement")
+                    path.chmod(0o600)
+                    raise OSError("parent sync failed")
+                return real_sync(parent_fd)
+
+            with patch.object(
+                filesystem,
+                "_sync_parent_directory_fd",
+                side_effect=replace_then_fail,
+            ):
+                with self.assertRaisesRegex(OSError, "parent sync failed"):
+                    exclusive_write(path, b"journal bytes")
+            self.assertEqual(path.read_bytes(), b"attacker replacement")
+
     def test_quarantine_evidence_failure_removes_only_created_link(self):
         with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
             root = Path(temporary)

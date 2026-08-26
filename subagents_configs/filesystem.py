@@ -1414,6 +1414,9 @@ def exclusive_write(path: Path, content: bytes, mode: int = 0o600) -> IdentityEv
         _after_parent_pin("exclusive-write", target.parent)
         _verify_locked_parent(target.parent)
         descriptor: int | None = None
+        created_full_evidence: _FullDescriptorEvidence | None = None
+        created = False
+        completed = False
         try:
             descriptor = os.open(
                 target.name,
@@ -1421,23 +1424,52 @@ def exclusive_write(path: Path, content: bytes, mode: int = 0o600) -> IdentityEv
                 mode,
                 dir_fd=parent_fd,
             )
+            created = True
             _write_all(descriptor, content)
             os.fchmod(descriptor, mode)
             os.fsync(descriptor)
-            evidence = _evidence_from_descriptor(
+            created_full_evidence = _full_descriptor_evidence(
                 descriptor, "exclusive-write target", known_content=content
             )
+            evidence = created_full_evidence.identity
             os.close(descriptor)
             descriptor = None
             _sync_parent_directory_fd(parent_fd)
+            completed = True
             return evidence
-        except BaseException:
+        finally:
+            if created and not completed and created_full_evidence is None:
+                if descriptor is not None:
+                    try:
+                        created_full_evidence = _full_descriptor_evidence(
+                            descriptor, "exclusive-write cleanup"
+                        )
+                    except BaseException as cleanup_error:
+                        del cleanup_error
             if descriptor is not None:
                 try:
                     os.close(descriptor)
                 except OSError:
                     pass
-            raise
+            if created and not completed and created_full_evidence is not None:
+                try:
+                    _remove_owned_entry(
+                        parent_fd,
+                        target.name,
+                        created_full_evidence,
+                        allowed_nlinks=(
+                            created_full_evidence.identity.nlink,
+                            created_full_evidence.identity.nlink + 1,
+                        ),
+                        parent=target.parent,
+                        label="exclusive-write cleanup",
+                    )
+                except BaseException as cleanup_error:
+                    del cleanup_error
+                try:
+                    _sync_parent_directory_fd(parent_fd)
+                except BaseException as cleanup_error:
+                    del cleanup_error
 
 
 def unlink_regular(path: Path) -> None:

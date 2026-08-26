@@ -123,6 +123,44 @@ class TransactionPreparationTests(unittest.TestCase):
         self.assertTrue((backups / "user-backup").exists())
         self.assertTrue(unrelated.exists())
 
+    def test_failed_exclusive_backup_is_cleaned_before_ownership_recording(self):
+        home = self.root / "codex-home"
+        destination = home / "agents/code-explorer.toml"
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(b"user bytes\n")
+        destination.chmod(0o640)
+        plan = preflight_install(
+            self.repository,
+            planning_request("install", {Target.CODEX: home}),
+        )
+        real_exclusive_write = transaction.filesystem.exclusive_write
+        injected = False
+
+        def fail_first_exclusive_write(path, content, mode=0o600):
+            nonlocal injected
+            if not injected:
+                injected = True
+                with patch.object(
+                    transaction.filesystem,
+                    "_sync_parent_directory_fd",
+                    side_effect=[OSError("backup parent sync failed"), None],
+                ):
+                    return real_exclusive_write(path, content, mode)
+            return real_exclusive_write(path, content, mode)
+
+        with transaction.locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+            evidence = transaction._collect_readonly_evidence(plan)
+            with patch.object(
+                transaction.filesystem,
+                "exclusive_write",
+                side_effect=fail_first_exclusive_write,
+            ):
+                with self.assertRaises(transaction.TransactionPreparationError):
+                    transaction._prepare(plan, evidence)
+        self.assertTrue(injected)
+        backups = home / ".subagents_configs/backups"
+        self.assertEqual(list(backups.glob("*")), [])
+
     def test_replace_quarantine_cleanup_failure_restores_preexisting_target(self):
         home = self.root / "codex-home"
         destination = home / "agents/code-explorer.toml"
