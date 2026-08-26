@@ -77,12 +77,10 @@ _SHELL_META = frozenset(
         "]",
         "!",
         "#",
-        "'",
-        '"',
-        "\\",
     }
 )
 _GLOB_META = frozenset({"*", "?", "~"})
+_HELPER_GLOB_META = frozenset({"*", "?", "[", "]"})
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _BLOCKED_EXECUTABLES = frozenset(
     {
@@ -275,7 +273,12 @@ def _safe_relative_argument(value: str) -> bool:
 
 
 def _safe_helper(value: str) -> bool:
-    if type(value) is not str or not value or "\x00" in value:
+    if (
+        type(value) is not str
+        or not value
+        or "\x00" in value
+        or any(character in _HELPER_GLOB_META for character in value)
+    ):
         return False
     path = PurePosixPath(value)
     return path.is_absolute() and ".." not in path.parts and "\\" not in value

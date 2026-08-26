@@ -24,7 +24,7 @@ from .targets import (
 )
 
 _COMMAND_GATE_SHA256 = (
-    "834025bb3af05ef4f6fc3977be9ff81c2c136ea6c9fc213f37aefe83de7ba270"
+    "76100fdb730e9e350b861834e7b741401ea5ba1956047a520d600ec6baa8660b"
 )
 
 # One normalized role contract is the sole semantic source for native overlays.

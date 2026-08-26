@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import shlex
 import sys
 import tempfile
 import unittest
@@ -158,6 +159,79 @@ class ClaudeCommandGateTests(unittest.TestCase):
                     self.hook.validate_validator_command(command, "/abs/helper")[0:3],
                     ("python3", "/abs/helper", "--"),
                 )
+
+    def test_rendered_installed_helper_with_spaces_accepts_one_quoted_argv_path(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            repository = planning_repository(root)
+            home = root / "claude home with spaces"
+            home.mkdir(mode=0o700)
+            plan = preflight_install(
+                repository,
+                planning_request("install", {Target.CLAUDE_CODE: home}),
+            )
+            validator = next(
+                operation
+                for operation in plan.targets[0].operations
+                if operation.identifier == "code-validator"
+            )
+            helper = str(
+                home / ".subagents_configs/validation/run-validation-isolated.py"
+            )
+            rendered = (validator.content or b"").decode()
+            self.assertIn(helper, rendered)
+            command = (
+                f"python3 {shlex.quote(helper)} -- "
+                "unittest tests/test_claude_command_gate.py"
+            )
+            self.assertEqual(
+                self.hook.validate_validator_command(command, helper),
+                (
+                    "python3",
+                    helper,
+                    "--",
+                    "unittest",
+                    "tests/test_claude_command_gate.py",
+                ),
+            )
+
+    def test_validator_command_accepts_quoted_or_escaped_helper_but_rejects_syntax(
+        self,
+    ):
+        helper = "/private/tmp/claude home/run-validation-isolated.py"
+        accepted = (
+            f"python3 {shlex.quote(helper)} -- unittest tests/test_x.py",
+            f'python3 "{helper}" -- unittest tests/test_x.py',
+            "python3 /private/tmp/claude\\ home/run-validation-isolated.py -- "
+            "unittest tests/test_x.py",
+        )
+        for command in accepted:
+            with self.subTest(accepted=command):
+                self.assertEqual(
+                    self.hook.validate_validator_command(command, helper)[1],
+                    helper,
+                )
+        rejected = (
+            "python3 /private/tmp/claude home/run-validation-isolated.py -- "
+            "unittest tests/test_x.py",
+            f"python3 {shlex.quote(helper)} extra -- unittest tests/test_x.py",
+            f"python3 {shlex.quote(helper)} -- unittest tests/test_x.py; touch x",
+            f"python3 {shlex.quote(helper)} -- unittest $(touch x)",
+            f"python3 {shlex.quote(helper)} -- unittest tests/test_x.py\\",
+            f"python3 {shlex.quote(helper)} -- unittest 'tests/test_x.py",
+        )
+        for command in rejected:
+            with self.subTest(rejected=command):
+                with self.assertRaises(ValueError):
+                    self.hook.validate_validator_command(command, helper)
+
+    def test_validator_command_rejects_glob_syntax_in_helper_path(self):
+        for glob in ("*", "?", "[ab]"):
+            helper = f"/private/tmp/claude home/run-validation-isolated.py{glob}"
+            command = f"python3 {shlex.quote(helper)} -- unittest tests/test_x.py"
+            with self.subTest(glob=glob):
+                with self.assertRaises(ValueError):
+                    self.hook.validate_validator_command(command, helper)
 
     def test_validator_command_rejects_shell_authority_and_unsafe_paths(self):
         commands = (
