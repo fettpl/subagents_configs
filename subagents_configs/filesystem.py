@@ -941,29 +941,29 @@ def _reserve_quarantine(
                 continue
             descriptor = None
             created_stat = None
+            opened_stat = None
             try:
+                created_stat = _stat_at_no_follow(parent_fd, candidate)
+                if created_stat is None:
+                    raise TransactionError("created quarantine link disappeared")
+                _before_quarantine_open(parent, target, parent / candidate)
                 descriptor = os.open(
                     candidate,
                     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
                     dir_fd=parent_fd,
                 )
-                created_stat = os.fstat(descriptor)
+                opened_stat = os.fstat(descriptor)
                 evidence = _evidence_from_descriptor(descriptor, "CAS quarantine link")
                 if not _linked_evidence_matches(evidence, expected):
                     raise TransactionError("target identity changed during quarantine")
             except BaseException:
-                if created:
-                    opened_stat = created_stat is not None
-                    if created_stat is None:
-                        created_stat = _stat_at_no_follow(parent_fd, candidate)
-                    if created_stat is not None:
-                        _remove_created_quarantine_link(
-                            parent_fd,
-                            candidate,
-                            created_stat.st_dev,
-                            created_stat.st_ino,
-                            observed=None if opened_stat else created_stat,
-                        )
+                if created and created_stat is not None:
+                    _remove_created_quarantine_link(
+                        parent_fd,
+                        candidate,
+                        created_stat,
+                        observed=opened_stat,
+                    )
                 raise
             finally:
                 if descriptor is not None:
@@ -977,25 +977,33 @@ def _reserve_quarantine(
 def _remove_created_quarantine_link(
     parent_fd: int,
     candidate: str,
-    device: int,
-    inode: int,
+    expected,
     *,
     observed=None,
 ) -> None:
-    """Remove a quarantine link only while its pathname still names our inode."""
+    """Remove only a link retaining the complete stat identity we created."""
 
     descriptor = None
     try:
         if observed is None:
-            descriptor = os.open(
-                candidate,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=parent_fd,
-            )
-            actual = os.fstat(descriptor)
+            try:
+                descriptor = os.open(
+                    candidate,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+                actual = os.fstat(descriptor)
+            except OSError:
+                actual = _stat_at_no_follow(parent_fd, candidate)
         else:
             actual = observed
-        if (actual.st_dev, actual.st_ino) != (device, inode):
+        if actual is None or not _same_quarantine_stat(expected, actual):
+            return
+        _before_created_quarantine_unlink(parent_fd, candidate)
+        # There is no portable inode-bound unlinkat primitive; this final
+        # no-follow stat is the mutation-boundary ownership check available.
+        revalidated = _stat_at_no_follow(parent_fd, candidate)
+        if revalidated is None or not _same_quarantine_stat(expected, revalidated):
             return
         os.unlink(candidate, dir_fd=parent_fd)
     except (FileNotFoundError, OSError):
@@ -1003,6 +1011,26 @@ def _remove_created_quarantine_link(
     finally:
         if descriptor is not None:
             os.close(descriptor)
+
+
+def _same_quarantine_stat(expected, actual) -> bool:
+    return (
+        expected.st_dev,
+        expected.st_ino,
+        expected.st_size,
+        expected.st_nlink,
+        stat.S_IMODE(expected.st_mode),
+        expected.st_mtime_ns,
+        expected.st_ctime_ns,
+    ) == (
+        actual.st_dev,
+        actual.st_ino,
+        actual.st_size,
+        actual.st_nlink,
+        stat.S_IMODE(actual.st_mode),
+        actual.st_mtime_ns,
+        actual.st_ctime_ns,
+    )
 
 
 def _installed_replacement_proven(
@@ -1093,6 +1121,14 @@ def _before_quarantine_mutation(
     _parent: Path, _target: Path, _quarantine: Path
 ) -> None:
     """Stable seam immediately before a no-overwrite quarantine link."""
+
+
+def _before_quarantine_open(_parent: Path, _target: Path, _quarantine: Path) -> None:
+    """Stable seam after creation evidence and before opening the link."""
+
+
+def _before_created_quarantine_unlink(_parent_fd: int, _candidate: str) -> None:
+    """Stable seam immediately before final created-link revalidation."""
 
 
 def _before_quarantine_unlink(_parent: Path, _target: Path) -> None:
