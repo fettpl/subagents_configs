@@ -65,6 +65,38 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertNotIn("security@", lower)
         self.assertIn("not perfect", lower)
 
+    def test_snapshot_and_environment_credential_boundaries_are_explicit(self):
+        text = " ".join(
+            (ROOT / "README.md").read_text(encoding="utf-8").lower().split()
+        )
+
+        self.assertIn(
+            "proxy and credential-bearing environment variables are filtered from the child environment",
+            text,
+        )
+        self.assertIn(
+            "snapshot exclusions are limited to the explicit credential paths listed above",
+            text,
+        )
+        self.assertIn(
+            "`token`, `secret`, `password`, `credential`, or `key` substrings are not generically detected",
+            text,
+        )
+
+    def test_security_guidance_discloses_final_name_primitive_race(self):
+        lower = " ".join(
+            (ROOT / "SECURITY.md").read_text(encoding="utf-8").lower().split()
+        )
+
+        for phrase in (
+            "descriptor-relative pinning and before/after evidence detect swaps",
+            "persistent locks serialize cooperative installer clients",
+            "python/posix offers no portable inode-conditional `unlink`/`rmdir`",
+            "an adversary swapping the final pathname in the tiny window inside a trusted `unlink`/`rmdir`",
+            "an unowned entry to be removed or overwritten",
+        ):
+            self.assertIn(phrase, lower)
+
     def test_release_guidance_keeps_governance_manual(self):
         text = (ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
         lower = text.lower()
