@@ -63,17 +63,16 @@ class RunnerTests(unittest.TestCase):
                     },
                 )()
                 with patch("scripts.validation_isolation.runner.probe_backend"):
-                    with self.assertRaisesRegex(
-                        ValueError, "validation cleanup failed"
-                    ) as raised:
-                        run_isolated(
-                            ("python3", "-c", "print('a b')", "--"),
-                            repository,
-                            "darwin",
-                            process_runner,
-                        )
+                    result = run_isolated(
+                        ("python3", "-c", "print('a b')", "--"),
+                        repository,
+                        "darwin",
+                        process_runner,
+                    )
 
-            self.assertEqual(raised.exception.cleanup.code, "cleanup_failed")
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "ok\n")
+            self.assertEqual(result.cleanup.code, "cleaned")
             self.assertEqual(len(calls), 1)
             self.assertIn("print('a b')", calls[0][0])
             self.assertEqual(calls[0][1].name, "snapshot")
@@ -171,15 +170,17 @@ class RunnerTests(unittest.TestCase):
                     )(),
                 ) as select,
             ):
-                with self.assertRaisesRegex(ValueError, "validation cleanup failed"):
-                    runner.run_isolated(
-                        ("false",),
-                        repository,
-                        sys.platform,
-                        lambda argv, cwd, env, timeout: subprocess.CompletedProcess(
-                            argv, 0, "", ""
-                        ),
+                result = runner.run_isolated(
+                    ("false",),
+                    repository,
+                    sys.platform,
+                    lambda argv, cwd, env, timeout: subprocess.CompletedProcess(
+                        argv, 0, "", ""
                     )
+                )
+            self.assertEqual(result.returncode, 0)
+            self.assertIsNotNone(result.cleanup)
+            self.assertEqual(result.cleanup.code, "cleaned")
             self.assertEqual(select.call_args.args[3], fixed)
             self.assertNotEqual(select.call_args.args[3], hosted)
 

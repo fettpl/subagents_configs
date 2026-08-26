@@ -114,15 +114,21 @@ class ValidationCleanupContractTests(unittest.TestCase):
             self.assertNotIn("secret", repr(result).lower())
             self.assertNotIn("credentials", repr(result).lower())
 
-    def test_cleanup_without_atomic_final_removal_reports_stable_code(self):
+    def test_cleanup_success_reports_stable_code_and_no_quarantine(self):
         from scripts.validation_isolation.runner import cleanup_validation_root
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "root"
             root.mkdir(mode=0o700)
             result = cleanup_validation_root(root, primary=None)
-            self.assertEqual(result.code, "cleanup_failed")
+            self.assertEqual(result.code, "cleaned")
             self.assertFalse(result.primary_present)
+            self.assertFalse(
+                any(
+                    path.name.startswith("subagents-validation-cleanup-")
+                    for path in root.parent.iterdir()
+                )
+            )
 
     def test_cleanup_rejects_validation_root_substitution(self):
         from scripts.validation_isolation.runner import (

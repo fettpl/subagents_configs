@@ -103,7 +103,7 @@ def _cleanup_directory_fd(descriptor: int) -> None:
 
 
 def _before_final_cleanup(parent_descriptor: int, name: str) -> None:
-    """Test seam immediately before the unsupported final directory removal."""
+    """Test seam immediately before final identity revalidation."""
 
 
 def _identity_matches_descriptor(
@@ -121,6 +121,24 @@ def _entry_exists(parent_descriptor: int, name: str) -> bool:
     except FileNotFoundError:
         return False
     return True
+
+
+def _entry_matches_descriptor(
+    parent_descriptor: int, name: str, descriptor: int
+) -> bool:
+    """Check that a no-follow parent entry is still the opened directory."""
+
+    try:
+        entry = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        opened = os.fstat(descriptor)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(entry.st_mode)
+        and stat.S_ISDIR(opened.st_mode)
+        and os.path.samestat(entry, opened)
+        and stat.S_IMODE(entry.st_mode) == stat.S_IMODE(opened.st_mode)
+    )
 
 
 def _failure_for(exc: BaseException) -> ValidationFailure:
@@ -197,10 +215,25 @@ def cleanup_validation_root(
     try:
         _cleanup_directory_fd(quarantine_descriptor)
         _before_final_cleanup(parent_descriptor, quarantine.name)
-        # Python's macOS/Linux APIs cannot remove a directory entry by its
-        # already-open fd.  A pathname rmdir here could delete a replacement
-        # swapped after the fd was opened, so retain the empty quarantine and
-        # report cleanup failure instead of deleting unowned data.
+        # Python has no portable unlinkat-by-open-directory-fd primitive.
+        # Revalidate the no-follow parent entry against the opened directory
+        # immediately before the dir-fd-relative rmdir, then verify that the
+        # opened object remained the one removed and its name is gone.
+        before_removal = os.fstat(quarantine_descriptor)
+        if not _entry_matches_descriptor(
+            parent_descriptor, quarantine.name, quarantine_descriptor
+        ):
+            return CleanupResult("cleanup_failed", primary is not None)
+        os.rmdir(quarantine.name, dir_fd=parent_descriptor)
+        after_removal = os.fstat(quarantine_descriptor)
+        if not os.path.samestat(before_removal, after_removal):
+            return CleanupResult("cleanup_failed", primary is not None)
+        try:
+            os.stat(quarantine.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return CleanupResult("cleaned", primary is not None)
+        except OSError:
+            return CleanupResult("cleanup_failed", primary is not None)
         return CleanupResult("cleanup_failed", primary is not None)
     except BaseException:
         return CleanupResult("cleanup_failed", primary is not None)
