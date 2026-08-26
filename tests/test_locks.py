@@ -103,6 +103,27 @@ class LockAndEvidenceTests(unittest.TestCase):
                     pass
             self.assertFalse((root / "missing").exists())
 
+    def test_absent_home_swap_after_mkdir_fails_before_lock_creation(self):
+        with private_tempdir() as temporary:
+            root = Path(temporary)
+            parent = root / "parent"
+            parent.mkdir(mode=0o700)
+            home = parent / "home"
+
+            def swap(_home):
+                detached = parent / "detached-home"
+                home.rename(detached)
+                home.mkdir(mode=0o700)
+
+            with patch("subagents_configs.locks._after_home_mkdir", swap):
+                with self.assertRaises(ValueError):
+                    with locked_target_homes({Target.CODEX: home}, (Target.CODEX,)):
+                        pass
+            self.assertFalse((home / ".subagents_configs.lock").exists())
+            self.assertFalse(
+                (parent / "detached-home" / ".subagents_configs.lock").exists()
+            )
+
     def test_home_and_ancestor_symlinks_are_rejected_without_redirected_lock(self):
         with private_tempdir() as temporary:
             root = Path(temporary)

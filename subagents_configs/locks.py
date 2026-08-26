@@ -60,6 +60,10 @@ def _after_home_validation(home: Path) -> None:
     """Race-test seam between lexical validation and descriptor traversal."""
 
 
+def _after_home_mkdir(home: Path) -> None:
+    """Race-test seam between creating and opening an absent final home."""
+
+
 def lock_held() -> bool:
     """Return whether this execution context already owns target locks."""
 
@@ -236,6 +240,13 @@ def _prepare_home(home: Path) -> tuple[int, tuple[int, int]]:
         except FileNotFoundError:
             try:
                 os.mkdir(normalized.name, 0o700, dir_fd=parent_descriptor)
+                created = os.stat(
+                    normalized.name, dir_fd=parent_descriptor, follow_symlinks=False
+                )
+                if stat.S_ISLNK(created.st_mode) or not stat.S_ISDIR(created.st_mode):
+                    raise ValueError("target home must be a private directory")
+                expected_home_identity = (created.st_dev, created.st_ino)
+                _after_home_mkdir(normalized)
             except FileExistsError:
                 existing = os.stat(
                     normalized.name, dir_fd=parent_descriptor, follow_symlinks=False
