@@ -24,6 +24,60 @@ TEMP_DIR = "/private/tmp" if Path("/private/tmp").is_dir() else None
 
 
 class FilesystemTests(unittest.TestCase):
+    def test_quarantine_boundary_swap_never_overwrites_unowned_entry(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+            path.write_bytes(b"original")
+            path.chmod(0o600)
+            before = capture_evidence(path, "target")
+
+            def swap_reserved(_parent, _target, quarantine):
+                if quarantine.exists():
+                    quarantine.unlink()
+                quarantine.write_bytes(b"unowned replacement")
+                quarantine.chmod(0o600)
+
+            with patch.object(
+                filesystem,
+                "_before_quarantine_mutation",
+                swap_reserved,
+                create=True,
+            ):
+                with (
+                    patch.object(
+                        filesystem,
+                        "_quarantine_path",
+                        return_value=root / ".managed.cas-race",
+                    ),
+                    self.assertRaises(TransactionError),
+                ):
+                    compare_and_swap(path, before, b"installer bytes", 0o600, "replace")
+            self.assertEqual(path.read_bytes(), b"original")
+            self.assertEqual(
+                next(iter(root.glob(".managed.cas-*"))).read_bytes(),
+                b"unowned replacement",
+            )
+
+    def test_create_rejects_same_inode_hardlink_count_race_in_final_evidence(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
+            root = Path(temporary)
+            path = root / "managed"
+
+            def add_hardlink(_parent, target):
+                os.link(target, target.with_name("same-inode-link"))
+
+            with patch.object(
+                filesystem,
+                "_before_final_target_evidence",
+                add_hardlink,
+                create=True,
+            ):
+                with self.assertRaises(TransactionError):
+                    compare_and_swap(path, None, b"installer bytes", 0o600, "create")
+            self.assertEqual(path.read_bytes(), b"installer bytes")
+            self.assertTrue((root / "same-inode-link").exists())
+
     def test_quarantine_collision_preserves_unowned_entry(self):
         with tempfile.TemporaryDirectory(dir=TEMP_DIR) as temporary:
             root = Path(temporary)
