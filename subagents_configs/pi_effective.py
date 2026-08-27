@@ -227,6 +227,18 @@ def _under(path: Path, root: Path) -> bool:
     return True
 
 
+def _physical_overlap(first: Path, second: Path) -> bool:
+    """Check equal/ancestor overlap after roots passed no-follow validation."""
+    try:
+        if os.path.samefile(first, second):
+            return True
+        first_real = Path(os.path.realpath(first))
+        second_real = Path(os.path.realpath(second))
+    except OSError as exc:
+        raise ValueError("Pi root overlap cannot be verified") from exc
+    return _under(first_real, second_real) or _under(second_real, first_real)
+
+
 def _walk(root: Path, skip: Path):
     """Yield regular files beneath root; reject links and special files."""
     stack = [root]
@@ -447,7 +459,7 @@ def inspect_effective_catalog(
     """Inspect all effective Pi inputs without executing Pi or package code."""
     agent = _directory(agent_dir, "Pi agent directory")
     project = _directory(project_root, "Pi project root")
-    if _under(agent, project) or _under(project, agent):
+    if _physical_overlap(agent, project):
         raise ValueError("Pi agent and project roots must not overlap")
     if not isinstance(rendered, Mapping) or not isinstance(package, PiPackageEvidence):
         raise TypeError("Pi effective catalog inputs have invalid types")

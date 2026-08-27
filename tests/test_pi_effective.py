@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from subagents_configs.pi_catalog import PI_DEFAULT_ROLES, validate_pi_agent
 from subagents_configs.pi_package import PiPackageEvidence
@@ -171,6 +173,32 @@ class EffectiveCatalogTests(unittest.TestCase):
                             package,
                             project_root=project_root,
                         )
+
+    def test_project_root_physical_alias_overlap_rejects_before_discovery(self):
+        from subagents_configs.pi_effective import inspect_effective_catalog
+
+        if not os.path.samefile("/var", "/private/var"):
+            self.skipTest("runtime has no /var to /private/var alias")
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            if "var" not in base.parts:
+                self.skipTest("temporary root is not beneath /var")
+            agent_dir = base / "agent"
+            agent_dir.mkdir(mode=0o700)
+            private_base = Path("/private/var") / base.relative_to("/var")
+            project_root = private_base / "agent"
+            rendered = _rendered(agent_dir)
+            with patch(
+                "subagents_configs.pi_effective._named_directory_present",
+                side_effect=AssertionError("project discovery was reached"),
+            ):
+                with self.assertRaises(ValueError):
+                    inspect_effective_catalog(
+                        agent_dir,
+                        rendered,
+                        _package(agent_dir),
+                        project_root=project_root,
+                    )
 
     def test_exact_repository_managed_files_are_not_collisions(self):
         from subagents_configs.pi_catalog import render_pi_source
