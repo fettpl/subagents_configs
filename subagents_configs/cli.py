@@ -221,14 +221,6 @@ def parse_request(
         and pi_executable is None
     ):
         raise CliError("Pi package removal requires --pi-executable")
-    if (
-        operation == "install"
-        and Target.PI in targets
-        and not dry_run
-        and not (args.consent_third_party_code and args.consent_network)
-    ):
-        raise CliError("Pi install requires third-party-code and network consent")
-
     client_versions: dict[str, str] = {}
     for raw_version in args.client_version or []:
         target_name, separator, version = raw_version.partition("=")

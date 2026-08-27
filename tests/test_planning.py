@@ -1167,7 +1167,7 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(actions["code-explorer"], "remove")
         self.assertEqual(actions["code-reviewer"], "restore")
 
-    def test_direct_pi_request_requires_consent_before_planning(self):
+    def test_direct_pi_request_defers_consent_until_package_phase(self):
         home = self.root / "pi-home"
         request = Request(
             "install",
@@ -1180,10 +1180,9 @@ class PlanningTests(unittest.TestCase):
             pi_executable=Path("/opt/pi"),
         )
         with patch("subagents_configs.planning.validate_validation_helper"):
-            with self.assertRaises(ValueError):
-                from subagents_configs.planning import validate_request_shape
+            from subagents_configs.planning import validate_request_shape
 
-                validate_request_shape(request, "install")
+            validate_request_shape(request, "install")
 
     def test_direct_pi_request_rejects_non_absolute_executable(self):
         home = self.root / "pi-home"

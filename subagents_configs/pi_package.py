@@ -97,6 +97,14 @@ _UNSAFE_CONFIG_FRAGMENTS = (
 )
 
 
+def validate_pi_version_evidence(version: str) -> str:
+    """Accept only the exact Pi version covered by the maintained policy."""
+
+    if type(version) is not str or version != _PI_VERSION:
+        raise PiPackageError("PI_RUNTIME_INCOMPATIBLE")
+    return version
+
+
 @dataclass(frozen=True)
 class PiRuntimeEvidence:
     executable: Path
@@ -1501,6 +1509,14 @@ def inspect_pi_package_state(agent_dir: Path) -> PiPackageEvidence:
     """Return the stable public package contract without race-only internals."""
 
     return _inspect_pi_package_state_snapshot(agent_dir).evidence
+
+
+def inspect_pi_package_store_identity(
+    agent_dir: Path,
+) -> tuple[int, int, int, int, int] | None:
+    """Return only the private store identity needed for dry-run race checks."""
+
+    return _inspect_pi_package_state_snapshot(agent_dir).package_store_identity
 
 
 def _receipt_path(agent_dir: Path) -> Path:

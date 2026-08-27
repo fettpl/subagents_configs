@@ -20,7 +20,7 @@ from .blocks import (
     validate_managed_content,
 )
 from .compatibility import validate_client_version, validate_request_compatibility
-from .errors import ValidationBlockedError
+from .errors import PiPackageError, ValidationBlockedError
 from .formats import (
     ValidatedSource,
     validate_rendered_agent,
@@ -311,7 +311,7 @@ def _pi_external_plan(
     """Build Pi's package phase without executing Pi or a package manager."""
 
     if request.pi_executable is None:
-        raise ValueError("Pi install requires pi_executable")
+        raise PiPackageError("PI_EXECUTABLE_INVALID")
     executable = normalized_absolute(request.pi_executable)
     agent_dir = normalized_absolute(request.homes[Target.PI])
     from .pi_package import (
@@ -322,9 +322,11 @@ def _pi_external_plan(
     try:
         before = inspect_pi_package_state(agent_dir)
     except (OSError, ValueError, RuntimeError) as exc:
-        raise ValueError("Pi package state cannot be inspected safely") from exc
+        message = str(exc).casefold()
+        code = "PI_SETTINGS_INVALID" if "settings" in message else "PI_PACKAGE_DRIFT"
+        raise PiPackageError(code) from exc
     if before.status == "conflict":
-        raise ValueError("Pi package state conflicts with policy")
+        raise PiPackageError("PI_PACKAGE_DRIFT")
     if operation == "uninstall":
         if not request.remove_pi_package:
             return PiExternalPlan(
@@ -341,9 +343,9 @@ def _pi_external_plan(
         try:
             receipt = validate_pi_package_receipt(agent_dir, before)
         except (OSError, ValueError, RuntimeError) as exc:
-            raise ValueError("Pi package receipt cannot be validated safely") from exc
+            raise PiPackageError("PI_RECEIPT_INVALID") from exc
         if before.status != "exact" or receipt is None:
-            raise ValueError("Pi package removal requires exact ownership receipt")
+            raise PiPackageError("PI_RECEIPT_INVALID")
         return PiExternalPlan(
             "remove",
             executable,
@@ -358,7 +360,7 @@ def _pi_external_plan(
     try:
         receipt = validate_pi_package_receipt(agent_dir, before)
     except (OSError, ValueError, RuntimeError) as exc:
-        raise ValueError("Pi package receipt cannot be validated safely") from exc
+        raise PiPackageError("PI_RECEIPT_INVALID") from exc
     if before.status == "exact":
         return PiExternalPlan(
             "none",
@@ -1453,13 +1455,6 @@ def validate_request_shape(request: Request, operation: str | None = None) -> No
         ):
             raise ValueError("dry-run must not retain Pi consent")
     if (
-        request.operation == "install"
-        and Target.PI in request.targets
-        and not request.dry_run
-        and not (request.consent_third_party_code and request.consent_network)
-    ):
-        raise ValueError("Pi install requires third-party-code and network consent")
-    if (
         request.operation == "uninstall"
         and request.pi_executable is not None
         and not request.remove_pi_package
@@ -1584,7 +1579,39 @@ def _local_transaction(plan: TransactionPlan | PiInstallPlan) -> TransactionPlan
     return local
 
 
-def render_plan(plan: TransactionPlan | PiInstallPlan) -> str:
+def _pi_external_output(
+    plan: TransactionPlan | PiInstallPlan,
+    *,
+    runtime_version_evidence: str = "maintained-matrix-only",
+) -> dict[str, object] | None:
+    if not isinstance(plan, PiInstallPlan):
+        return None
+    external = plan.external
+    if runtime_version_evidence not in {"maintained-matrix-only", "caller-supplied"}:
+        raise ValueError("Pi runtime version evidence is invalid")
+    return {
+        "target": "pi",
+        "home": str(normalized_absolute(external.agent_dir)),
+        "package_source": external.package_source,
+        "phase": "external-package-phase",
+        "action": external.action,
+        "ownership": "external",
+        "recovery": "preserve-external-state",
+        "runtime_version_evidence": runtime_version_evidence,
+        "required_consents": ["third-party-code", "network"]
+        if external.action == "install"
+        else [],
+    }
+
+
+def render_plan(
+    plan: TransactionPlan | PiInstallPlan,
+    *,
+    runtime_version_evidence: str = "maintained-matrix-only",
+) -> str:
+    external = _pi_external_output(
+        plan, runtime_version_evidence=runtime_version_evidence
+    )
     plan = _local_transaction(plan)
     lines = [f"operation: {plan.operation}"]
     for target in plan.targets:
@@ -1606,6 +1633,17 @@ def render_plan(plan: TransactionPlan | PiInstallPlan) -> str:
             )
         for conflict in target.conflicts:
             lines.append(f"  conflict: {conflict}")
+    if external is not None:
+        lines.append(
+            "external-package-phase: "
+            + " ".join(
+                f"{key}={value}"
+                for key, value in external.items()
+                if key != "required_consents"
+            )
+            + " required_consents="
+            + ",".join(external["required_consents"])
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -1644,10 +1682,16 @@ def _safe_conflict(value: str) -> str:
 
 
 def render_plan_json(
-    plan: TransactionPlan | PiInstallPlan, *, recovery: RecoverySummary | None = None
+    plan: TransactionPlan | PiInstallPlan,
+    *,
+    recovery: RecoverySummary | None = None,
+    runtime_version_evidence: str = "maintained-matrix-only",
 ) -> bytes:
     """Render a deterministic, versioned plan without source or user content."""
 
+    external = _pi_external_output(
+        plan, runtime_version_evidence=runtime_version_evidence
+    )
     plan = _local_transaction(plan)
     if recovery is None:
         recovery = plan.recovery
@@ -1752,6 +1796,8 @@ def render_plan_json(
         },
         "sources": source_records,
     }
+    if external is not None:
+        payload["external"] = external
     return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(
         "utf-8"
     )
