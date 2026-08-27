@@ -520,6 +520,63 @@ class PiPackageContractTests(unittest.TestCase):
                     validate_pi_executable(executable, agent_dir=home, execute=True)
                 self.assertEqual(raised.exception.code, "PI_RUNTIME_INCOMPATIBLE")
 
+    def test_missing_executable_fails_before_preparation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "agent"
+            home.mkdir(mode=0o700)
+            with mock.patch(
+                "subagents_configs.pi_package._bounded_spawn",
+                side_effect=AssertionError("missing executable was spawned"),
+            ), self.assertRaises((PiPackageError, ValueError)) as raised:
+                validate_pi_executable(
+                    root / "missing-pi", agent_dir=home, execute=True
+                )
+            if isinstance(raised.exception, PiPackageError):
+                self.assertEqual(raised.exception.code, "PI_RUNTIME_INCOMPATIBLE")
+
+    def test_wrong_runtime_version_fails_before_package_command(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "agent"
+            home.mkdir(mode=0o700)
+            executable = root / "pi"
+            executable.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1 $2" = "--offline --version" ]; then printf \'0.84.2\\n\'; '
+                'elif [ "$1 $2" = "--offline --help" ]; then '
+                'printf \'install remove offline\\n\'; '
+                "else : > "
+                + str(root / "package-command")
+                + "; fi\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o700)
+            with self.assertRaises(PiPackageError) as raised:
+                validate_pi_executable(executable, agent_dir=home, execute=True)
+            self.assertEqual(raised.exception.code, "PI_RUNTIME_INCOMPATIBLE")
+            self.assertFalse((root / "package-command").exists())
+
+    def test_windows_fails_before_pi_lifecycle(self):
+        from subagents_configs.cli import CliError, parse_request
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaises(CliError):
+                parse_request(
+                    "install",
+                    [
+                        "--target",
+                        "pi",
+                        "--home",
+                        f"pi={root / 'agent'}",
+                        "--pi-executable",
+                        str(root / "pi"),
+                    ],
+                    {"HOME": str(root / "ambient")},
+                    platform_name="win32",
+                )
+
     def test_execute_probe_and_package_commands_require_existing_private_agent_dir(
         self,
     ):

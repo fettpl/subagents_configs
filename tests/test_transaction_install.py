@@ -2,7 +2,9 @@ import hashlib
 import json
 import os
 import stat
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -295,6 +297,33 @@ class TransactionInstallTests(unittest.TestCase):
                 for index, operation in enumerate(operations)
             )
         self.assertEqual(seen, expected)
+
+    def test_distinct_homes_proceed_concurrently_and_multi_target_locks_are_ordered(
+        self,
+    ):
+        from subagents_configs.locks import locked_target_homes
+
+        homes = {
+            Target.CODEX: self._home(Target.CODEX),
+            Target.OPENCODE: self._home(Target.OPENCODE),
+        }
+        for home in homes.values():
+            home.mkdir(mode=0o700)
+        barrier = threading.Barrier(2)
+
+        def hold(target):
+            with locked_target_homes({target: homes[target]}, (target,)):
+                barrier.wait(timeout=3)
+                return target
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = tuple(pool.map(hold, (Target.CODEX, Target.OPENCODE)))
+        self.assertEqual(set(results), set(homes))
+        with locked_target_homes(homes, (Target.CODEX, Target.OPENCODE)):
+            pass
+        with self.assertRaises(ValueError):
+            with locked_target_homes(homes, (Target.OPENCODE, Target.CODEX)):
+                pass
 
     def test_status_is_persisted_before_and_after_operation(self):
         from subagents_configs import transaction
