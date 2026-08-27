@@ -23,10 +23,8 @@ from tests.helpers import planning_repository
 
 class PiIntegrationRedTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(
-            prefix="subagents-pi-task4-", dir="/private/tmp"
-        )
-        self.root = Path(self.temporary.name)
+        self.temporary = tempfile.TemporaryDirectory(prefix="subagents-pi-task4-")
+        self.root = Path(self.temporary.name).resolve()
         self.repository = planning_repository(self.root)
         real_repository = Path(__file__).parents[1]
         shutil.copytree(real_repository / "pi", self.repository / "pi")
