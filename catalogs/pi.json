@@ -1,0 +1,228 @@
+{
+  "agent_directory": "pi/agents",
+  "catalog_sha256": "8291b0ae467dbfcf594a8f98c68c9d0bab8432728c8778038a113d58ca03d974",
+  "external_lifecycle": null,
+  "global_instruction": {
+    "block_id": "routing-pi",
+    "filename": "APPEND_SYSTEM.md",
+    "source": "rules/PI_SUBAGENT_ROUTING.md"
+  },
+  "include_in_all": false,
+  "lifecycle_capabilities": [],
+  "optional_blocks": [],
+  "order": 3,
+  "parser": "markdown",
+  "policy_sha256": "687d0dc693cecd451ab008e1e3896a0d35641aeed97febd90ec05247edf9915c",
+  "roles": [
+    {
+      "contract": {
+        "optional": false,
+        "read_only": true
+      },
+      "destination": "agents/code-explorer.md",
+      "identifier": "code-explorer",
+      "optional": false,
+      "overlay": {
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls"
+        ]
+      },
+      "policy_sha256": "6e60148f79072e4d2a8a0c5461531c27133bed332de79ca7f29557385a98942b",
+      "source": "pi/agents/code-explorer.md"
+    },
+    {
+      "contract": {
+        "optional": false,
+        "read_only": true
+      },
+      "destination": "agents/code-reviewer.md",
+      "identifier": "code-reviewer",
+      "optional": false,
+      "overlay": {
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls"
+        ]
+      },
+      "policy_sha256": "6e60148f79072e4d2a8a0c5461531c27133bed332de79ca7f29557385a98942b",
+      "source": "pi/agents/code-reviewer.md"
+    },
+    {
+      "contract": {
+        "optional": false,
+        "read_only": true
+      },
+      "destination": "agents/code-validator.md",
+      "identifier": "code-validator",
+      "optional": false,
+      "overlay": {
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "run_validation"
+        ]
+      },
+      "policy_sha256": "1407c3a5e87e4ea9418454bdce7a075f63ff39e373f2ce089655800463d39e78",
+      "source": "pi/agents/code-validator.md"
+    },
+    {
+      "contract": {
+        "optional": true,
+        "read_only": false
+      },
+      "destination": "agents/commit-pusher.md",
+      "identifier": "commit-pusher",
+      "optional": true,
+      "overlay": {
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash"
+        ]
+      },
+      "policy_sha256": "3dd0b050eee40ff1e5fdde6e35e9c67e69d2829b03b497fd08af897fcf7974b2",
+      "source": "pi/agents/commit-pusher.md"
+    },
+    {
+      "contract": {
+        "optional": false,
+        "read_only": false
+      },
+      "destination": "agents/implementer.md",
+      "identifier": "implementer",
+      "optional": false,
+      "overlay": {
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "write",
+          "edit",
+          "bash"
+        ]
+      },
+      "policy_sha256": "f7c5d872e00ef101657fe23de2b884a21e600c2bcbbac866f906d4eefa4454d1",
+      "source": "pi/agents/implementer.md"
+    },
+    {
+      "contract": {
+        "optional": false,
+        "read_only": false
+      },
+      "destination": "agents/quick-implementer.md",
+      "identifier": "quick-implementer",
+      "optional": false,
+      "overlay": {
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "write",
+          "edit",
+          "bash"
+        ]
+      },
+      "policy_sha256": "f7c5d872e00ef101657fe23de2b884a21e600c2bcbbac866f906d4eefa4454d1",
+      "source": "pi/agents/quick-implementer.md"
+    }
+  ],
+  "schema_version": 1,
+  "semantic_validator": "agent",
+  "source_format": "markdown",
+  "source_sha256": "dc3e6d318c1523223d70a2e4c46fabfab29008095c54372dd040c7a485ebdfd9",
+  "sources": [
+    {
+      "destination": "agents/code-explorer.md",
+      "identifier": "code-explorer",
+      "kind": "agent",
+      "optional_role": null,
+      "sha256": "582db50767a238f5341059e0166a527976235e9eafe550ee768255da76c02637",
+      "source": "pi/agents/code-explorer.md",
+      "source_format": "markdown"
+    },
+    {
+      "destination": "agents/code-reviewer.md",
+      "identifier": "code-reviewer",
+      "kind": "agent",
+      "optional_role": null,
+      "sha256": "a6b99fb72afe409ebda1900bde606ff286f6f1570bcf3d88176faa755d571763",
+      "source": "pi/agents/code-reviewer.md",
+      "source_format": "markdown"
+    },
+    {
+      "destination": "agents/code-validator.md",
+      "identifier": "code-validator",
+      "kind": "agent",
+      "optional_role": null,
+      "sha256": "dea6ba88860c599aaa7d32f4c3459acacc739e9718373511e7c44bc19c6ec369",
+      "source": "pi/agents/code-validator.md",
+      "source_format": "markdown"
+    },
+    {
+      "destination": "agents/commit-pusher.md",
+      "identifier": "commit-pusher",
+      "kind": "agent",
+      "optional_role": "commit-pusher",
+      "sha256": "b025781694ef60126aabf8576b9fc757864d7ad9360a4c4046cb44205024ac12",
+      "source": "pi/agents/commit-pusher.md",
+      "source_format": "markdown"
+    },
+    {
+      "destination": "agents/implementer.md",
+      "identifier": "implementer",
+      "kind": "agent",
+      "optional_role": null,
+      "sha256": "4c0d9db90b53899e7c2478f71b34d43a5b70d5a49656091a18de99de453b0d77",
+      "source": "pi/agents/implementer.md",
+      "source_format": "markdown"
+    },
+    {
+      "destination": "agents/quick-implementer.md",
+      "identifier": "quick-implementer",
+      "kind": "agent",
+      "optional_role": null,
+      "sha256": "842afac44c7f4689ba9dd8c7a0abe5b766dba45a1e8eb68b497831bc9655b880",
+      "source": "pi/agents/quick-implementer.md",
+      "source_format": "markdown"
+    },
+    {
+      "destination": null,
+      "identifier": "pi/package-policy",
+      "kind": "package-policy",
+      "optional_role": null,
+      "sha256": "d0f902d54cda2f073215701b4c04a38480c29ef1a8a7f6e3d4981d70657e4722",
+      "source": "pi/package-policy.json",
+      "source_format": "json"
+    },
+    {
+      "destination": null,
+      "identifier": "routing",
+      "kind": "routing-source",
+      "optional_role": null,
+      "sha256": "a194d20df8230391d3e78acd47ce53f94b561df13a568026bbd5cb53ac9e3238",
+      "source": "rules/PI_SUBAGENT_ROUTING.md",
+      "source_format": "markdown"
+    },
+    {
+      "destination": "extensions/subagents-configs-run-validation.ts",
+      "identifier": "pi/run-validation",
+      "kind": "target-extension",
+      "optional_role": null,
+      "sha256": "527bdcd7fcec1ba8e4037e4f4a4d892e93202323a82cc4f0469da1b41fbf867f",
+      "source": "pi/extensions/run-validation.ts",
+      "source_format": "typescript"
+    }
+  ],
+  "target": "pi"
+}

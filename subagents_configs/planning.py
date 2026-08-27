@@ -8,7 +8,7 @@ import os
 import stat
 import tomllib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -122,6 +122,9 @@ class SourceEvidence:
     kind: str
     format: str
     source_hash: str
+    # Private in-memory evidence used to make an idempotent Pi ``none`` phase
+    # complete.  It is excluded from repr/equality and never serialized.
+    content: bytes | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -1516,6 +1519,11 @@ def preflight_install(
             source.spec.kind,
             source.spec.source_format,
             source.sha256,
+            _source_bytes(Target.PI, source, request.homes[Target.PI])
+            if Target.PI in inventories
+            and target is Target.PI
+            and source.spec.kind == "agent"
+            else None,
         )
         for target in targets_for_request(request.targets, False)
         for source in inventories[target]

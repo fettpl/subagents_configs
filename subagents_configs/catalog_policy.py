@@ -16,6 +16,7 @@ import stat
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Literal
@@ -53,6 +54,7 @@ _LIFECYCLE_AUTHORITIES: dict[str, frozenset[AuthorityCapability]] = {
     "manifest": frozenset({AuthorityCapability.FILESYSTEM_WRITE}),
     "runtime": frozenset({AuthorityCapability.FILESYSTEM_WRITE}),
 }
+_PI_ONLY_SOURCE_KINDS = frozenset({"target-extension", "package-policy", "skill"})
 
 
 def _safe_identifier(value: object, field: str) -> str:
@@ -210,6 +212,9 @@ class NormalizedCatalog:
     roles: tuple[RolePolicy, ...]
     destinations: tuple[DestinationPolicy, ...]
     source_hashes: Mapping[str, str]
+    source_authorities: Mapping[str, frozenset[AuthorityCapability]] = dataclass_field(
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.target, Target):
@@ -256,6 +261,28 @@ class NormalizedCatalog:
         object.__setattr__(
             self, "source_hashes", MappingProxyType(dict(sorted(hashes.items())))
         )
+        if not isinstance(self.source_authorities, Mapping):
+            raise TypeError("source_authorities must be a mapping")
+        source_authorities: dict[str, frozenset[AuthorityCapability]] = {}
+        for key, value in self.source_authorities.items():
+            identifier = _safe_source_identifier(key, "source authority identifier")
+            if not isinstance(value, (set, frozenset, tuple, list)):
+                raise TypeError("source authorities must be set-like collections")
+            capabilities: list[AuthorityCapability] = []
+            for capability in value:
+                if not isinstance(capability, AuthorityCapability):
+                    raise TypeError(
+                        "source authorities must contain AuthorityCapability values"
+                    )
+                capabilities.append(capability)
+            if len(set(capabilities)) != len(capabilities):
+                raise ValueError("source authorities contain duplicate members")
+            source_authorities[identifier] = frozenset(capabilities)
+        object.__setattr__(
+            self,
+            "source_authorities",
+            MappingProxyType(dict(sorted(source_authorities.items()))),
+        )
 
 
 @dataclass(frozen=True)
@@ -275,7 +302,7 @@ class PolicyChange:
         if not isinstance(self.target, Target):
             raise TypeError("policy change target must be a Target")
         if self.role is not None:
-            if self.kind == "source_hash":
+            if self.kind in {"source_hash", "authority"}:
                 object.__setattr__(
                     self,
                     "role",
@@ -761,6 +788,7 @@ def _parse_generated_catalog(raw: dict[str, object]) -> NormalizedCatalog:
                 "permissionMode",
                 "tools",
             },
+            Target.PI: {"tools"},
         }[target]
         if set(overlay) - allowed_overlay:
             raise ValueError("generated role overlay has unknown fields")
@@ -808,6 +836,13 @@ def _parse_generated_catalog(raw: dict[str, object]) -> NormalizedCatalog:
             for field in ("sandbox_mode", "network_access"):
                 if field in overlay:
                     native[field] = overlay[field]
+        elif target is Target.PI:
+            if type(overlay.get("tools")) is not list or any(
+                type(item) is not str for item in overlay["tools"]
+            ):
+                raise ValueError("Pi tools must be a list")
+            tools = frozenset(overlay["tools"])
+            native["tools"] = ",".join(overlay["tools"])
         else:  # pragma: no cover - Target is closed
             raise ValueError("unsupported target")
         authorities = authorities_from_native(target, native)
@@ -819,6 +854,7 @@ def _parse_generated_catalog(raw: dict[str, object]) -> NormalizedCatalog:
         raise ValueError("generated roles must use canonical order")
 
     source_hashes: dict[str, str] = {}
+    source_authorities: dict[str, frozenset[AuthorityCapability]] = {}
     source_keys: list[tuple[str, str]] = []
     for item in raw["sources"]:
         if type(item) is not dict or set(item) != {
@@ -835,16 +871,32 @@ def _parse_generated_catalog(raw: dict[str, object]) -> NormalizedCatalog:
         _safe_source_identifier(item["source"], "source path")
         if item["destination"] is not None:
             _safe_path(item["destination"], "source destination")
-        _safe_identifier(item["kind"], "source kind")
+        kind = _safe_identifier(item["kind"], "source kind")
+        if target is not Target.PI and kind in _PI_ONLY_SOURCE_KINDS:
+            raise ValueError("Pi-only source kind is invalid for this target")
         _safe_identifier(item["source_format"], "source format")
         if item["optional_role"] is not None:
             _safe_identifier(item["optional_role"], "optional role")
         source_hashes[identifier] = _hash_value(item["sha256"], "source sha256")
-        source_keys.append((str(item["kind"]), identifier))
+        source_authorities[identifier] = frozenset()
+        if kind == "target-extension":
+            source_authorities[identifier] = frozenset({AuthorityCapability.EXTENSION})
+        elif kind == "package-policy":
+            source_authorities[identifier] = frozenset(
+                {AuthorityCapability.PACKAGE, AuthorityCapability.SKILL}
+            )
+        elif kind == "skill":
+            source_authorities[identifier] = frozenset({AuthorityCapability.SKILL})
+        source_keys.append((kind, identifier))
     if len(source_hashes) != len(raw["sources"]) or source_keys != sorted(source_keys):
         raise ValueError("generated sources must use canonical order")
     return NormalizedCatalog(
-        target, revision, tuple(roles), tuple(destinations), source_hashes
+        target,
+        revision,
+        tuple(roles),
+        tuple(destinations),
+        source_hashes,
+        source_authorities,
     )
 
 
@@ -888,10 +940,11 @@ def load_revision(path: str | os.PathLike[str]) -> tuple[NormalizedCatalog, ...]
             if "sources" in raw or "catalog_sha256" in raw:
                 return (_parse_generated_catalog(raw),)
             return (_parse_catalog(raw),)
-        expected = sorted(
+        non_pi_names = sorted(
             f"{target.value}.json" for target in Target if target is not Target.PI
         )
-        if names != expected:
+        all_target_names = sorted(f"{target.value}.json" for target in Target)
+        if names not in (["pi.json"], non_pi_names, all_target_names):
             raise ValueError("revision directory is ambiguous")
         raw_catalogs: list[dict[str, object]] = []
         for name in names:
@@ -906,16 +959,13 @@ def load_revision(path: str | os.PathLike[str]) -> tuple[NormalizedCatalog, ...]
             else _parse_catalog(raw)
             for raw in raw_catalogs
         )
-        for expected_name, expected_target, catalog in zip(
+        expected_targets = {f"{target.value}.json": target for target in Target}
+        for expected_name, catalog in zip(
             names,
-            sorted(
-                (target for target in Target if target is not Target.PI),
-                key=lambda item: f"{item.value}.json",
-            ),
             catalogs,
             strict=True,
         ):
-            if catalog.target is not expected_target:
+            if catalog.target is not expected_targets[expected_name]:
                 raise ValueError(f"{expected_name} target does not match its filename")
         revisions = {catalog.revision for catalog in catalogs}
         if len(revisions) != 1:
@@ -929,6 +979,7 @@ def load_revision(path: str | os.PathLike[str]) -> tuple[NormalizedCatalog, ...]
                     catalog.roles,
                     catalog.destinations,
                     catalog.source_hashes,
+                    catalog.source_authorities,
                 )
                 for catalog in catalogs
             )
@@ -943,13 +994,9 @@ def validate_generated_catalogs(
     """Validate and normalize every checked-in generated target catalog."""
     catalog_root = Path(root) / "catalogs"
     loaded = tuple(
-        load_catalog(catalog_root / f"{target.value}.json")
-        for target in Target
-        if target is not Target.PI
+        load_catalog(catalog_root / f"{target.value}.json") for target in Target
     )
-    if {catalog.target for catalog in loaded} != {
-        target for target in Target if target is not Target.PI
-    }:
+    if {catalog.target for catalog in loaded} != set(Target):
         raise ValueError("generated catalog target set is incomplete")
     if len({catalog.revision for catalog in loaded}) != len(loaded):
         raise ValueError("generated catalog revisions are not unique")
@@ -1170,6 +1217,53 @@ def authorities_from_native(
                 raise ValueError("unknown Claude native tool")
             result.update(tool_map[part] for part in tools)
             continue
+        if target is Target.PI and field == "tools":
+            if type(value) is list:
+                if any(type(item) is not str for item in value):
+                    raise ValueError("Pi tools must contain strings")
+                value = ",".join(value)
+            if type(value) is not str:
+                raise ValueError("Pi tools must be a string")
+            tool_map = {
+                "read": AuthorityCapability.FILESYSTEM_READ,
+                "grep": AuthorityCapability.FILESYSTEM_READ,
+                "find": AuthorityCapability.FILESYSTEM_READ,
+                "ls": AuthorityCapability.FILESYSTEM_READ,
+                "write": AuthorityCapability.FILESYSTEM_WRITE,
+                "edit": AuthorityCapability.FILESYSTEM_WRITE,
+                "bash": AuthorityCapability.SHELL_EXECUTION,
+                "run_validation": AuthorityCapability.SHELL_EXECUTION,
+            }
+            tools = [part.strip() for part in value.split(",")]
+            if any(not part or part not in tool_map for part in tools) or len(
+                set(tools)
+            ) != len(tools):
+                raise ValueError("unknown Pi native tool")
+            result.update(tool_map[part] for part in tools)
+            continue
+        if target is Target.PI and field in {
+            "extension",
+            "extensions",
+            "package",
+            "packages",
+            "skill",
+            "skills",
+        }:
+            if type(value) is not str and not (
+                type(value) is list and all(type(item) is str for item in value)
+            ):
+                raise ValueError("Pi native authority value is invalid")
+            result.add(
+                {
+                    "extension": AuthorityCapability.EXTENSION,
+                    "extensions": AuthorityCapability.EXTENSION,
+                    "package": AuthorityCapability.PACKAGE,
+                    "packages": AuthorityCapability.PACKAGE,
+                    "skill": AuthorityCapability.SKILL,
+                    "skills": AuthorityCapability.SKILL,
+                }[field]
+            )
+            continue
         result.update(_native_authority(target, field, value))
     return frozenset(result)
 
@@ -1260,6 +1354,35 @@ def compare_catalogs(
                     before.source_hashes.get(key),
                     after.source_hashes.get(key),
                     False,
+                )
+            )
+    for key in sorted(set(before.source_authorities) | set(after.source_authorities)):
+        old_authorities = before.source_authorities.get(key, frozenset())
+        new_authorities = after.source_authorities.get(key, frozenset())
+        for capability in sorted(
+            old_authorities - new_authorities, key=lambda item: item.value
+        ):
+            changes.append(
+                PolicyChange(
+                    "authority",
+                    before.target,
+                    key,
+                    capability.value,
+                    None,
+                    False,
+                )
+            )
+        for capability in sorted(
+            new_authorities - old_authorities, key=lambda item: item.value
+        ):
+            changes.append(
+                PolicyChange(
+                    "authority",
+                    before.target,
+                    key,
+                    None,
+                    capability.value,
+                    True,
                 )
             )
     ordered = tuple(sorted(changes, key=_change_key))

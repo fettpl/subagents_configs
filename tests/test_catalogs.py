@@ -161,6 +161,20 @@ class CatalogTests(unittest.TestCase):
             },
         )
 
+    def test_generated_pi_catalog_contains_target_extension_record(self):
+        import json
+
+        payload = json.loads((ROOT / "catalogs/pi.json").read_text(encoding="utf-8"))
+        records = [
+            item for item in payload["sources"] if item["kind"] == "target-extension"
+        ]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["source"], "pi/extensions/run-validation.ts")
+        self.assertEqual(
+            records[0]["destination"], "extensions/subagents-configs-run-validation.ts"
+        )
+        self.assertEqual(len(records[0]["sha256"]), 64)
+
     def test_opencode_catalog_parses_and_has_exact_inventory(self):
         actual = set()
         for path in sorted((ROOT / "opencode" / "agents").glob("*.md")):

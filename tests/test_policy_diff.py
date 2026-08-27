@@ -792,6 +792,112 @@ class PolicyDiffTests(unittest.TestCase):
                 self.assertTrue(loaded.roles)
                 self.assertEqual(len(loaded.roles), len(loaded.destinations))
 
+    def test_pi_catalog_and_explicit_revision_directory_are_supported(self):
+        from subagents_configs.catalog_policy import load_catalog
+
+        catalog = load_catalog(Path(__file__).resolve().parents[1] / "catalogs/pi.json")
+        self.assertIs(catalog.target, Target.PI)
+        self.assertTrue(catalog.source_authorities)
+        self.assertEqual(
+            catalog.source_authorities["pi/package-policy"],
+            frozenset(
+                {
+                    AuthorityCapability.PACKAGE,
+                    AuthorityCapability.SKILL,
+                }
+            ),
+        )
+        self.assertEqual(
+            catalog.source_authorities["pi/run-validation"],
+            frozenset({AuthorityCapability.EXTENSION}),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            revision = Path(directory)
+            (revision / "pi.json").write_bytes(
+                (Path(__file__).resolve().parents[1] / "catalogs/pi.json").read_bytes()
+            )
+            loaded = load_revision(revision)
+            self.assertEqual(tuple(item.target for item in loaded), (Target.PI,))
+
+    def test_pi_package_policy_declared_skills_have_package_and_skill_authority(self):
+        from subagents_configs.catalog_policy import load_catalog
+        from subagents_configs.pi_package import load_pi_package_policy
+
+        catalog = load_catalog(Path(__file__).resolve().parents[1] / "catalogs/pi.json")
+        policy = load_pi_package_policy()
+        self.assertIn("skills", policy["pi"])
+        self.assertEqual(
+            catalog.source_authorities["pi/package-policy"],
+            frozenset(
+                {
+                    AuthorityCapability.PACKAGE,
+                    AuthorityCapability.SKILL,
+                }
+            ),
+        )
+
+    def test_non_pi_generated_catalog_rejects_pi_only_source_kinds(self):
+        for kind in ("target-extension", "package-policy", "skill"):
+            with self.subTest(kind=kind):
+                payload = self._generated_payload("codex")
+                payload["sources"][0]["kind"] = kind
+                payload["sources"].sort(
+                    key=lambda item: (str(item["kind"]), str(item["identifier"]))
+                )
+                payload["source_sha256"] = hashlib.sha256(
+                    json.dumps(
+                        payload["sources"],
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                    ).encode()
+                ).hexdigest()
+                self._refresh_catalog_hash(payload)
+                with self.assertRaises(ValueError):
+                    self._load_mutated_generated(payload)
+
+    def test_pi_package_authority_addition_is_reported_as_broadening(self):
+        payload = self._generated_payload("pi")
+        before_payload = json.loads(json.dumps(payload))
+        before_payload["sources"] = [
+            item
+            for item in before_payload["sources"]
+            if item["kind"] != "package-policy"
+        ]
+        before_payload["source_sha256"] = hashlib.sha256(
+            json.dumps(
+                before_payload["sources"],
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode()
+        ).hexdigest()
+        self._refresh_catalog_hash(before_payload)
+        before = self._load_mutated_generated(before_payload)
+        after = self._load_mutated_generated(payload)
+        changes = compare_catalogs(before, after).changes
+        authority = [
+            item
+            for item in changes
+            if item.kind == "authority" and item.role == "pi/package-policy"
+        ]
+        self.assertEqual(
+            {item.after for item in authority},
+            {
+                AuthorityCapability.PACKAGE.value,
+                AuthorityCapability.SKILL.value,
+            },
+        )
+        self.assertTrue(all(item.authority_broadening for item in authority))
+        removed = compare_catalogs(after, before).changes
+        self.assertTrue(
+            all(
+                not item.authority_broadening
+                for item in removed
+                if item.kind == "authority" and item.role == "pi/package-policy"
+            )
+        )
+
     def test_policy_diff_rejects_duplicate_or_abbreviated_options_before_reads(self):
         missing = Path("/this/path/must/not/be/read")
         for argv in (
