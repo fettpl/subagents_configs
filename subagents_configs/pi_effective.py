@@ -229,14 +229,20 @@ def _under(path: Path, root: Path) -> bool:
 
 def _physical_overlap(first: Path, second: Path) -> bool:
     """Check equal/ancestor overlap after roots passed no-follow validation."""
-    try:
-        if os.path.samefile(first, second):
-            return True
-        first_real = Path(os.path.realpath(first))
-        second_real = Path(os.path.realpath(second))
-    except OSError as exc:
-        raise ValueError("Pi root overlap cannot be verified") from exc
-    return _under(first_real, second_real) or _under(second_real, first_real)
+
+    def physically_under(candidate: Path, root: Path) -> bool:
+        current = candidate
+        while True:
+            try:
+                if os.path.samefile(current, root):
+                    return True
+            except OSError as exc:
+                raise ValueError("Pi root overlap cannot be verified") from exc
+            if current == Path(current.anchor):
+                return False
+            current = current.parent
+
+    return physically_under(first, second) or physically_under(second, first)
 
 
 def _walk(root: Path, skip: Path):

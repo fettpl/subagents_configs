@@ -53,6 +53,50 @@ def _project(root: Path) -> Path:
     return project
 
 
+def _assert_overlap_rejected_before_project_discovery(
+    testcase: unittest.TestCase,
+    inspect_effective_catalog,
+    agent_dir: Path,
+    project_root: Path,
+    rendered: dict[str, object],
+) -> None:
+    real_lstat = os.lstat
+    real_scandir = os.scandir
+
+    def lstat_canary(path):
+        candidate = Path(path)
+        try:
+            candidate.relative_to(project_root)
+        except ValueError:
+            pass
+        else:
+            if candidate != project_root:
+                raise AssertionError("project discovery was reached")
+        return real_lstat(path)
+
+    def scandir_canary(path):
+        candidate = Path(path)
+        try:
+            candidate.relative_to(project_root)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("project enumeration was reached")
+        return real_scandir(path)
+
+    with (
+        patch("subagents_configs.pi_effective.os.lstat", lstat_canary),
+        patch("subagents_configs.pi_effective.os.scandir", scandir_canary),
+    ):
+        with testcase.assertRaises(ValueError):
+            inspect_effective_catalog(
+                agent_dir,
+                rendered,
+                _package(agent_dir),
+                project_root=project_root,
+            )
+
+
 class EffectiveCatalogTests(unittest.TestCase):
     def test_clean_empty_scope_returns_complete_contract(self):
         from subagents_configs.pi_effective import inspect_effective_catalog
@@ -177,7 +221,11 @@ class EffectiveCatalogTests(unittest.TestCase):
     def test_project_root_physical_alias_overlap_rejects_before_discovery(self):
         from subagents_configs.pi_effective import inspect_effective_catalog
 
-        if not os.path.samefile("/var", "/private/var"):
+        try:
+            var_alias = os.path.samefile("/var", "/private/var")
+        except OSError:
+            self.skipTest("runtime cannot evaluate /var to /private/var alias")
+        if not var_alias:
             self.skipTest("runtime has no /var to /private/var alias")
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -187,18 +235,43 @@ class EffectiveCatalogTests(unittest.TestCase):
             agent_dir.mkdir(mode=0o700)
             private_base = Path("/private/var") / base.relative_to("/var")
             project_root = private_base / "agent"
-            rendered = _rendered(agent_dir)
-            with patch(
-                "subagents_configs.pi_effective._named_directory_present",
-                side_effect=AssertionError("project discovery was reached"),
-            ):
-                with self.assertRaises(ValueError):
-                    inspect_effective_catalog(
-                        agent_dir,
-                        rendered,
-                        _package(agent_dir),
-                        project_root=project_root,
-                    )
+            _assert_overlap_rejected_before_project_discovery(
+                self,
+                inspect_effective_catalog,
+                agent_dir,
+                project_root,
+                _rendered(agent_dir),
+            )
+
+    def test_nested_case_alias_overlap_rejects_before_project_discovery(self):
+        from subagents_configs.pi_effective import inspect_effective_catalog
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            physical_root = root / "CaseRoot"
+            physical_project = physical_root / "Project"
+            agent_dir = physical_project / "Agent"
+            agent_dir.mkdir(mode=0o700, parents=True)
+            project_root = root / "caseroot" / "project"
+            try:
+                case_alias_available = os.path.samefile(
+                    physical_root, root / "caseroot"
+                )
+                case_alias_available = case_alias_available and os.path.samefile(
+                    physical_project, project_root
+                )
+            except OSError:
+                case_alias_available = False
+            if not case_alias_available:
+                self.skipTest("runtime has no nested case-insensitive path alias")
+
+            _assert_overlap_rejected_before_project_discovery(
+                self,
+                inspect_effective_catalog,
+                agent_dir,
+                project_root,
+                _rendered(agent_dir),
+            )
 
     def test_exact_repository_managed_files_are_not_collisions(self):
         from subagents_configs.pi_catalog import render_pi_source
