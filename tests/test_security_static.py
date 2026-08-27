@@ -53,6 +53,7 @@ EXPECTED_ACTIVE_PYTHON = frozenset(
         "subagents_configs/orchestrator.py",
         "subagents_configs/paths.py",
         "subagents_configs/pi_catalog.py",
+        "subagents_configs/pi_effective.py",
         "subagents_configs/pi_package.py",
         "subagents_configs/planning.py",
         "subagents_configs/profiles.py",

@@ -19,6 +19,8 @@ from subagents_configs.formats import (  # noqa: E402
     validate_source_inventory,
 )
 from subagents_configs.models import Target  # noqa: E402
+from subagents_configs.pi_catalog import validate_pi_agent  # noqa: E402
+from subagents_configs.pi_package import PACKAGE_POLICY_PATH  # noqa: E402
 from subagents_configs.targets import (  # noqa: E402
     CAPABILITIES,
     descriptor_for,
@@ -61,7 +63,11 @@ def render_catalog(root: Path, target: Target) -> bytes:
         }
         sources.append(record)
         if spec.kind == "agent":
-            overlay = ROLE_POLICY[target.value][spec.identifier]["overlay"]
+            if target is Target.PI:
+                contract = validate_pi_agent(spec.identifier, item.content)
+                overlay = {"tools": list(contract.tools)}
+            else:
+                overlay = ROLE_POLICY[target.value][spec.identifier]["overlay"]
             roles.append(
                 {
                     "identifier": spec.identifier,
@@ -71,17 +77,34 @@ def render_catalog(root: Path, target: Target) -> bytes:
                     else None,
                     "optional": spec.optional_role is not None,
                     "contract": {
-                        "optional": ROLE_POLICY[target.value][spec.identifier][
-                            "optional"
-                        ],
-                        "read_only": ROLE_POLICY[target.value][spec.identifier][
-                            "read_only"
-                        ],
+                        "optional": spec.optional_role is not None,
+                        "read_only": (
+                            target is Target.PI
+                            and spec.identifier
+                            in {"code-explorer", "code-reviewer", "code-validator"}
+                        )
+                        or (
+                            target is not Target.PI
+                            and ROLE_POLICY[target.value][spec.identifier]["read_only"]
+                        ),
                     },
                     "overlay": overlay,
                     "policy_sha256": _hash(overlay),
                 }
             )
+    if target is Target.PI:
+        policy_bytes = PACKAGE_POLICY_PATH.read_bytes()
+        sources.append(
+            {
+                "identifier": "pi/package-policy",
+                "source": "pi/package-policy.json",
+                "destination": None,
+                "kind": "package-policy",
+                "source_format": "json",
+                "optional_role": None,
+                "sha256": hashlib.sha256(policy_bytes).hexdigest(),
+            }
+        )
     sources.sort(key=lambda item: (str(item["kind"]), str(item["identifier"])))
     roles.sort(key=lambda item: str(item["identifier"]))
     policy_hash = _hash({"roles": roles, "shared": ROLE_POLICY})
@@ -126,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true")
     generated_capabilities = [item for item in CAPABILITIES if item.include_in_all]
     parser.add_argument(
-        "--target", choices=[item.target.value for item in generated_capabilities]
+        "--target", choices=[item.target.value for item in CAPABILITIES]
     )
     args = parser.parse_args(argv)
     if args.write == args.check:

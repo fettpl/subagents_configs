@@ -32,6 +32,8 @@ def main() -> int:
         load_compatibility_matrix(REPO_ROOT / "catalogs" / "client-compatibility.json")
         if _GENERATOR.main(["--check"]) != 0:
             raise ValueError("generated catalogs are not reproducible")
+        if _GENERATOR.main(["--check", "--target", "pi"]) != 0:
+            raise ValueError("Pi catalog is not reproducible")
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"catalog validation failed: {exc}", file=sys.stderr)
         return 1

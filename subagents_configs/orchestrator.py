@@ -438,6 +438,20 @@ def _rendered_pi_contracts(plan: TransactionPlan) -> Mapping[str, object]:
                 operation.content,
                 allow_rendered_extension=True,
             )
+    # A clean reinstall may have no file operations at all.  Planning retains
+    # validated, rendered source bytes as private in-memory evidence so the
+    # effective evaluator still receives the complete contract set.
+    for source in plan.sources:
+        if source.identifier not in roles or source.content is None:
+            continue
+        rendered.setdefault(
+            source.identifier,
+            validate_pi_agent(
+                source.identifier,
+                source.content,
+                allow_rendered_extension=True,
+            ),
+        )
     if not rendered:
         raise ValueError("Pi rendered contract evidence is unavailable")
     return rendered

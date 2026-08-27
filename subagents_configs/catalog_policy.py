@@ -761,6 +761,7 @@ def _parse_generated_catalog(raw: dict[str, object]) -> NormalizedCatalog:
                 "permissionMode",
                 "tools",
             },
+            Target.PI: {"tools"},
         }[target]
         if set(overlay) - allowed_overlay:
             raise ValueError("generated role overlay has unknown fields")
@@ -808,6 +809,13 @@ def _parse_generated_catalog(raw: dict[str, object]) -> NormalizedCatalog:
             for field in ("sandbox_mode", "network_access"):
                 if field in overlay:
                     native[field] = overlay[field]
+        elif target is Target.PI:
+            if type(overlay.get("tools")) is not list or any(
+                type(item) is not str for item in overlay["tools"]
+            ):
+                raise ValueError("Pi tools must be a list")
+            tools = frozenset(overlay["tools"])
+            native["tools"] = ",".join(overlay["tools"])
         else:  # pragma: no cover - Target is closed
             raise ValueError("unsupported target")
         authorities = authorities_from_native(target, native)
@@ -1169,6 +1177,53 @@ def authorities_from_native(
             ) != len(tools):
                 raise ValueError("unknown Claude native tool")
             result.update(tool_map[part] for part in tools)
+            continue
+        if target is Target.PI and field == "tools":
+            if type(value) is list:
+                if any(type(item) is not str for item in value):
+                    raise ValueError("Pi tools must contain strings")
+                value = ",".join(value)
+            if type(value) is not str:
+                raise ValueError("Pi tools must be a string")
+            tool_map = {
+                "read": AuthorityCapability.FILESYSTEM_READ,
+                "grep": AuthorityCapability.FILESYSTEM_READ,
+                "find": AuthorityCapability.FILESYSTEM_READ,
+                "ls": AuthorityCapability.FILESYSTEM_READ,
+                "write": AuthorityCapability.FILESYSTEM_WRITE,
+                "edit": AuthorityCapability.FILESYSTEM_WRITE,
+                "bash": AuthorityCapability.SHELL_EXECUTION,
+                "run_validation": AuthorityCapability.SHELL_EXECUTION,
+            }
+            tools = [part.strip() for part in value.split(",")]
+            if any(not part or part not in tool_map for part in tools) or len(
+                set(tools)
+            ) != len(tools):
+                raise ValueError("unknown Pi native tool")
+            result.update(tool_map[part] for part in tools)
+            continue
+        if target is Target.PI and field in {
+            "extension",
+            "extensions",
+            "package",
+            "packages",
+            "skill",
+            "skills",
+        }:
+            if type(value) is not str and not (
+                type(value) is list and all(type(item) is str for item in value)
+            ):
+                raise ValueError("Pi native authority value is invalid")
+            result.add(
+                {
+                    "extension": AuthorityCapability.EXTENSION,
+                    "extensions": AuthorityCapability.EXTENSION,
+                    "package": AuthorityCapability.PACKAGE,
+                    "packages": AuthorityCapability.PACKAGE,
+                    "skill": AuthorityCapability.SKILL,
+                    "skills": AuthorityCapability.SKILL,
+                }[field]
+            )
             continue
         result.update(_native_authority(target, field, value))
     return frozenset(result)
