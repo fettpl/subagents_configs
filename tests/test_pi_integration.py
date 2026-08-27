@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from subagents_configs.models import Request, Target
+from subagents_configs.transaction import apply_transaction
 from tests.helpers import planning_repository
 
 
@@ -132,7 +133,7 @@ class PiIntegrationRedTests(unittest.TestCase):
             "created_exact_entry": True,
         }
         state = self.home / ".subagents_configs"
-        state.mkdir(mode=0o700)
+        state.mkdir(mode=0o700, exist_ok=True)
         state.chmod(0o700)
         path = state / "pi-package-receipt.json"
         path.write_text(json.dumps(receipt), encoding="utf-8")
@@ -310,6 +311,210 @@ class PiIntegrationRedTests(unittest.TestCase):
         ):
             plan = preflight_uninstall(self.repository, request)
         self.assertIsInstance(plan, TransactionPlan)
+
+    def test_default_uninstall_preserves_pi_package_receipt_and_settings(self) -> None:
+        """Normal uninstall is local-only and leaves external Pi evidence intact."""
+
+        from subagents_configs.models import PiInstallPlan
+        from subagents_configs.pi_package import load_pi_package_receipt
+        from subagents_configs.planning import preflight_uninstall
+
+        self._write_exact_package()
+        self._write_valid_receipt()
+        settings = self.home / "settings.json"
+        receipt = self.home / ".subagents_configs/pi-package-receipt.json"
+        before = (settings.read_bytes(), receipt.read_bytes())
+        request = self._request(
+            operation="uninstall",
+            pi_executable=None,
+            remove_pi_package=False,
+            consent_third_party_code=False,
+            consent_network=False,
+        )
+        with patch(
+            "subagents_configs.planning.validate_request_compatibility",
+            return_value=(),
+        ):
+            plan = preflight_uninstall(self.repository, request)
+        self.assertNotIsInstance(plan, PiInstallPlan)
+        self.assertEqual((settings.read_bytes(), receipt.read_bytes()), before)
+        self.assertIsNotNone(load_pi_package_receipt(self.home))
+
+    def test_package_removal_failure_preserves_receipt_after_local_success(
+        self,
+    ) -> None:
+        """An optional external failure cannot recreate local files or erase proof."""
+
+        from subagents_configs import orchestrator
+        from subagents_configs.planning import preflight_install, preflight_uninstall
+
+        self._write_exact_package()
+        install_request = self._request(
+            consent_third_party_code=False,
+            consent_network=False,
+        )
+        with patch(
+            "subagents_configs.planning.validate_request_compatibility",
+            return_value=(),
+        ):
+            install_plan = preflight_install(
+                self.repository, install_request, project_root=self.project_root
+            )
+        apply_transaction(install_plan.local)
+        self._write_valid_receipt()
+        role = self.home / "agents/code-explorer.md"
+        self.assertTrue(role.exists())
+        uninstall_request = self._request(
+            operation="uninstall",
+            remove_pi_package=True,
+            consent_third_party_code=False,
+            consent_network=False,
+        )
+        with patch(
+            "subagents_configs.planning.validate_request_compatibility",
+            return_value=(),
+        ):
+            uninstall_plan = preflight_uninstall(self.repository, uninstall_request)
+        stderr = StringIO()
+        with (
+            patch.object(
+                orchestrator, "validate_request_compatibility", return_value=()
+            ),
+            patch.object(orchestrator, "_plan", return_value=uninstall_plan),
+            patch.object(
+                orchestrator,
+                "remove_pi_package",
+                side_effect=RuntimeError("simulated Pi removal failure"),
+            ),
+        ):
+            status = orchestrator._run_mutating_locked(
+                uninstall_request,
+                repo_root=self.repository,
+                stdout=StringIO(),
+                stderr=stderr,
+                failure_injector=None,
+            )
+        self.assertEqual(status, orchestrator.EXIT_APPLY_ERROR)
+        self.assertFalse(role.exists())
+        self.assertTrue(
+            (self.home / ".subagents_configs/pi-package-receipt.json").exists()
+        )
+        self.assertIn("PI_PACKAGE_PHASE_FAILED", stderr.getvalue())
+        self.assertIsNotNone(uninstall_plan.external.removal_receipt)
+
+    def test_pi_opt_in_routing_block_is_removed_when_unchanged(self) -> None:
+        from subagents_configs.planning import preflight_uninstall
+
+        install_plan = self._preflight(enable_global_routing=True)
+        apply_transaction(install_plan.local)
+        instructions = self.home / "APPEND_SYSTEM.md"
+        self.assertTrue(instructions.exists())
+        request = self._request(
+            operation="uninstall",
+            pi_executable=None,
+            remove_pi_package=False,
+            consent_third_party_code=False,
+            consent_network=False,
+        )
+        with patch(
+            "subagents_configs.planning.validate_request_compatibility",
+            return_value=(),
+        ):
+            plan = preflight_uninstall(self.repository, request)
+        routing = next(
+            item
+            for item in plan.targets[0].operations
+            if item.identifier == "routing-pi"
+        )
+        self.assertEqual(routing.action, "remove-block")
+        apply_transaction(plan)
+        self.assertFalse(instructions.exists())
+
+    def test_changed_pi_routing_block_is_retained_unresolved(self) -> None:
+        from subagents_configs.planning import preflight_uninstall
+
+        install_plan = self._preflight(enable_global_routing=True)
+        apply_transaction(install_plan.local)
+        instructions = self.home / "APPEND_SYSTEM.md"
+        original = instructions.read_bytes()
+        instructions.write_bytes(
+            original.replace(
+                b"Pi Subagent Routing Policy", b"Changed Pi Subagent Routing Policy", 1
+            )
+        )
+        request = self._request(
+            operation="uninstall",
+            pi_executable=None,
+            remove_pi_package=False,
+            consent_third_party_code=False,
+            consent_network=False,
+        )
+        with patch(
+            "subagents_configs.planning.validate_request_compatibility",
+            return_value=(),
+        ):
+            plan = preflight_uninstall(self.repository, request)
+        self.assertIsNotNone(plan.targets[0].resulting_manifest)
+        retained = next(
+            item
+            for item in plan.targets[0].resulting_manifest.entries
+            if item.identifier == "routing-pi"
+        )
+        self.assertIsNotNone(retained.unresolved_reason)
+        self.assertFalse(
+            any(item.identifier == "routing-pi" for item in plan.targets[0].operations)
+        )
+
+    def test_pi_recovery_routes_through_public_recovery_seam(self) -> None:
+        from subagents_configs import orchestrator
+
+        homes = {Target.PI: self.home}
+        with patch.object(orchestrator, "recover_transaction") as recover:
+            orchestrator._recover_groups(((homes, ()),))
+        recover.assert_called_once_with(homes, (Target.PI,))
+
+    def test_pi_uninstall_preserves_missing_symlink_and_preexisting_roles(self) -> None:
+        from subagents_configs.planning import preflight_uninstall
+
+        for scenario in ("missing", "symlink", "preexisting"):
+            with self.subTest(scenario=scenario):
+                home = self.root / f"pi-home-{scenario}"
+                home.mkdir(mode=0o700)
+                role = home / "agents/code-explorer.md"
+                if scenario == "preexisting":
+                    role.parent.mkdir(mode=0o700)
+                    role.write_bytes(
+                        (self.repository / "pi/agents/code-explorer.md").read_bytes()
+                    )
+                    role.chmod(0o600)
+                install_plan = self._preflight(homes={Target.PI: home})
+                apply_transaction(install_plan.local)
+                if scenario == "missing":
+                    role.unlink()
+                elif scenario == "symlink":
+                    outside = self.root / "pi-outside.md"
+                    outside.write_bytes(b"outside\n")
+                    role.unlink()
+                    role.symlink_to(outside)
+                request = self._request(
+                    operation="uninstall",
+                    homes={Target.PI: home},
+                    pi_executable=None,
+                    remove_pi_package=False,
+                    consent_third_party_code=False,
+                    consent_network=False,
+                )
+                with patch(
+                    "subagents_configs.planning.validate_request_compatibility",
+                    return_value=(),
+                ):
+                    plan = preflight_uninstall(self.repository, request)
+                retained = next(
+                    item
+                    for item in plan.targets[0].resulting_manifest.entries
+                    if item.identifier == "code-explorer"
+                )
+                self.assertIsNotNone(retained.unresolved_reason)
 
     def test_dry_run_fingerprint_accepts_composite_without_raw_package_data(
         self,

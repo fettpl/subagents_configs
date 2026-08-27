@@ -10,6 +10,7 @@ _SUPPORTED = {
     "routing-codex",
     "routing-opencode",
     "routing-claude-code",
+    "routing-pi",
     "codex-multi-agent-v2",
 }
 _PREFIXES = (b"# BEGIN SUBAGENTS_CONFIGS ", b"# END SUBAGENTS_CONFIGS ")

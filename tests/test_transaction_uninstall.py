@@ -435,6 +435,29 @@ class UninstallTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._uninstall_plan(home)
 
+    def test_hard_linked_created_file_is_retained_as_unresolved(self):
+        """Uninstall must not unlink an inode still owned by another name."""
+
+        home = self._install()
+        destination = home / "agents/code-explorer.toml"
+        linked = self.root / "user-preserved-agent.toml"
+        os.link(destination, linked)
+
+        plan = self._uninstall_plan(home).targets[0]
+        self.assertIsNotNone(plan.resulting_manifest)
+        retained = next(
+            item
+            for item in plan.resulting_manifest.entries
+            if item.identifier == "code-explorer"
+        )
+        self.assertIsNotNone(retained.unresolved_reason)
+        self.assertFalse(
+            any(item.identifier == "code-explorer" for item in plan.operations)
+        )
+        apply_transaction(self._uninstall_plan(home))
+        self.assertTrue(destination.exists())
+        self.assertEqual(destination.read_bytes(), linked.read_bytes())
+
     def test_uninstall_preflight_is_read_only_and_keeps_runtime_and_backups(self):
         home = self._home()
         apply_transaction(

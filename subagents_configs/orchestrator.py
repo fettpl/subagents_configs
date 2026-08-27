@@ -1237,7 +1237,7 @@ def _run_mutating_locked(
                             request,
                             stderr,
                             phase="package",
-                            code="PI_UNINSTALL_PRESERVED",
+                            code="PI_PACKAGE_PHASE_FAILED",
                         )
                     )
                 try:
@@ -1254,7 +1254,7 @@ def _run_mutating_locked(
                             request,
                             stderr,
                             phase="package",
-                            code="PI_UNINSTALL_PRESERVED",
+                            code="PI_PACKAGE_PHASE_FAILED",
                         )
                     )
             return _finish(EXIT_SUCCESS)

@@ -1172,10 +1172,18 @@ def _target_uninstall(
             continue
         try:
             destination = _safe_destination(home, prior.relative_path, prior.identifier)
-            current_result = _read_regular(destination, prior.identifier, cache)
-            if current_result is None:
-                raise FileNotFoundError(destination)
-            current, current_mode = current_result
+            snapshot = cache.read_regular(destination, prior.identifier)
+            # A created/replaced path is only safe to unlink when its inode is
+            # still uniquely owned by this directory entry.  The manifest
+            # intentionally stores portable hash/mode ownership evidence, so
+            # consult the fresh descriptor evidence at uninstall time rather
+            # than inferring ownership from content alone.
+            if snapshot.evidence.nlink != 1:
+                raise ValueError(
+                    "uninstall preserved hard-linked managed path "
+                    f"{prior.relative_path}"
+                )
+            current, current_mode = snapshot.content, snapshot.evidence.mode
         except FileNotFoundError:
             reason = (
                 f"uninstall preserved missing managed block {prior.identifier}"
