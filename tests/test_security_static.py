@@ -469,6 +469,23 @@ class StaticSecurityTests(unittest.TestCase):
                 else:
                     self.assertTrue(issues)
 
+    def test_pi_smoke_harness_is_bounded_offline_and_fixed_argv(self):
+        source = (REPOSITORY / "tests/pi_smoke_support.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(_pi_static_issues_from_source(source), [])
+        self.assertIn("EXPECTED_CLI_ARGS", source)
+        self.assertIn('"PI_OFFLINE": "1"', source)
+        self.assertIn('"PI_SKIP_VERSION_CHECK": "1"', source)
+        self.assertIn('"PI_TELEMETRY": "0"', source)
+        self.assertIn("shell=False", source)
+        self.assertIn("close_fds=True", source)
+        self.assertIn("_MAX_STREAM = 8192", source)
+        self.assertIn("_TIMEOUT = 30.0", source)
+        self.assertNotIn("subprocess.run", source)
+        self.assertNotIn("subprocess.call", source)
+        self.assertNotRegex(source, r"(?<![A-Za-z])(?:npm|npx|node|git)\s")
+
     def test_negative_fixture_and_policy_prose_are_outside_executable_scan_scope(self):
         with private_tempdir() as directory:
             fixture = Path(directory) / "negative-fixture.py"
