@@ -153,6 +153,11 @@ class CatalogTests(unittest.TestCase):
                 "commit-pusher",
                 extension.identifier,
                 "routing",
+                *(
+                    source.identifier
+                    for source in sources
+                    if source.kind == "validation-runtime"
+                ),
             },
         )
 

@@ -6,7 +6,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
+
+if TYPE_CHECKING:
+    from .pi_package import PiPackageEvidence, PiPackageReceipt
+    from .planning import TransactionPlan
 
 from .paths import validate_profile_home_path
 
@@ -585,6 +589,34 @@ class Request:
     consent_third_party_code: bool = False
     consent_network: bool = False
     remove_pi_package: bool = False
+
+
+@dataclass(frozen=True)
+class PiExternalPlan:
+    """Plan for the separately-owned Pi package lifecycle.
+
+    This deliberately is not a :class:`PlannedOperation` or a journal item:
+    Pi's npm package is controlled by Pi's own package protocol and must not
+    enter the repository-file transaction.
+    """
+
+    action: Literal["install", "remove", "none"]
+    executable: Path
+    agent_dir: Path
+    project_root: Path
+    package_source: str
+    before: "PiPackageEvidence"
+    consent_third_party_code: bool
+    consent_network: bool
+    removal_receipt: "PiPackageReceipt | None"
+
+
+@dataclass(frozen=True)
+class PiInstallPlan:
+    """Composite Pi install plan with local and external ownership phases."""
+
+    local: "TransactionPlan"
+    external: PiExternalPlan
 
 
 @dataclass(frozen=True)

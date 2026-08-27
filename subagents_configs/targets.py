@@ -85,6 +85,7 @@ def _capability_sources(capability: TargetCapability) -> tuple[SourceSpec, ...]:
                     kind="target-extension",
                     source_format="typescript",
                 ),
+                *_runtime_sources(),
                 SourceSpec(
                     identifier="routing",
                     source=capability.global_instruction.source,

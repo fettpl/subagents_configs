@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
-from .paths import normalized_absolute
+from .paths import assert_contained, normalized_absolute
 
 PI_DEFAULT_ROLES = (
     "code-explorer",
@@ -399,6 +399,7 @@ def render_pi_source(source: bytes, *, agent_dir: Path) -> bytes:
                 "Pi validator must contain exactly one extension placeholder"
             )
         rendered_path = safe_dir / PI_VALIDATION_EXTENSION_PATH
+        assert_contained(safe_dir, rendered_path)
         rendered = source.replace(placeholder, os.fsencode(rendered_path))
     else:
         if count:
@@ -406,6 +407,14 @@ def render_pi_source(source: bytes, *, agent_dir: Path) -> bytes:
         rendered = source
     if b"{{" in rendered or b"}}" in rendered:
         raise ValueError("Pi source contains an unresolved placeholder")
+    # The provider path is part of the validator's authority contract.  Parse
+    # the final bytes again, after substitution, before they become a planned
+    # repository-owned write.
+    validate_pi_agent(
+        _role_from_source(rendered),
+        rendered,
+        allow_rendered_extension=True,
+    )
     return rendered
 
 
