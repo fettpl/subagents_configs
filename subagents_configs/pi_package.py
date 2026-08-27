@@ -1760,12 +1760,19 @@ def _run_command(
             raise PiPackageError("Pi agent directory identity changed")
 
 
-def install_pi_package(
+def install_pi_package_external(
     executable: PiRuntimeEvidence,
     agent_dir: Path,
     consent_third_party_code: bool,
     consent_network: bool,
 ) -> PiPackageReceipt:
+    """Install and verify the reviewed package without writing a receipt.
+
+    The explicit no-receipt primitive lets the orchestrator establish the
+    external package boundary before recording ownership and applying local
+    repository files.  The returned receipt contains only verified hashes and
+    can be persisted by the caller after the phase succeeds.
+    """
     if (
         type(executable) is not PiRuntimeEvidence
         or type(consent_third_party_code) is not bool
@@ -1845,7 +1852,29 @@ def install_pi_package(
         policy_hash,
         True,
     )
-    store_pi_package_receipt(normalized, receipt)
+    return receipt
+
+
+def install_pi_package(
+    executable: PiRuntimeEvidence,
+    agent_dir: Path,
+    consent_third_party_code: bool,
+    consent_network: bool,
+) -> PiPackageReceipt:
+    """Install the reviewed package and persist its ownership receipt.
+
+    This keeps the original package-unit API intact.  Explicit phase-aware
+    callers should use :func:`install_pi_package_external` instead.
+    """
+
+    receipt = install_pi_package_external(
+        executable,
+        agent_dir,
+        consent_third_party_code,
+        consent_network,
+    )
+    if receipt.operation == "install":
+        store_pi_package_receipt(agent_dir, receipt)
     return receipt
 
 

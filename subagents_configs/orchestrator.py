@@ -17,6 +17,14 @@ from .errors import CliError, ValidationBlockedError
 from .locks import locked_target_homes
 from .models import Journal, Request, Target
 from .paths import normalized_absolute
+from .pi_package import (
+    PiPackageReceipt,
+    PiRuntimeEvidence,
+    install_pi_package_external,
+    store_pi_package_receipt,
+    validate_pi_executable,
+)
+from .pi_package import remove_pi_package as _remove_pi_package
 from .planning import (
     RecoverySummary,
     TargetPlan,
@@ -319,8 +327,107 @@ def _recover_groups(
 
 def _plan(request: Request, repo_root: Path) -> TransactionPlan:
     if request.operation == "install":
-        return preflight_install(repo_root, request)
+        # The command's explicit repository root is also its project-resource
+        # discovery root.  Passing it through keeps Pi planning independent of
+        # ambient cwd while preserving the existing embedding seam, where
+        # callers can invoke ``preflight_install(..., project_root=...)``
+        # directly with a different validated project root.
+        return preflight_install(repo_root, request, project_root=repo_root)
     return preflight_uninstall(repo_root, request)
+
+
+def install_pi_package(
+    executable: Path | PiRuntimeEvidence,
+    agent_dir: Path,
+    consent_third_party_code: bool,
+    consent_network: bool,
+) -> PiPackageReceipt:
+    """Run the external Pi install phase without recording ownership.
+
+    ``PiExternalPlan`` intentionally carries the executable path as a public
+    plan value.  Convert it to trusted runtime evidence at the execution
+    boundary, then use the no-receipt package primitive.  Keeping this small
+    seam in the orchestrator also gives tests a precise phase-injection point.
+    """
+
+    runtime = executable
+    if type(runtime) is not PiRuntimeEvidence:
+        if not isinstance(runtime, Path):
+            raise TypeError("Pi executable plan value is invalid")
+        runtime = validate_pi_executable(runtime, agent_dir=agent_dir, execute=True)
+    return install_pi_package_external(
+        runtime,
+        agent_dir,
+        consent_third_party_code,
+        consent_network,
+    )
+
+
+def remove_pi_package(
+    executable: Path | PiRuntimeEvidence,
+    agent_dir: Path,
+    receipt: PiPackageReceipt,
+) -> PiPackageReceipt:
+    """Run explicit Pi package removal after the local phase succeeds."""
+
+    runtime = executable
+    if type(runtime) is not PiRuntimeEvidence:
+        if not isinstance(runtime, Path):
+            raise TypeError("Pi executable plan value is invalid")
+        runtime = validate_pi_executable(runtime, agent_dir=agent_dir, execute=True)
+    return _remove_pi_package(runtime, agent_dir, receipt)
+
+
+def _external_plan(plan: object) -> object | None:
+    """Return a Pi external phase only for the typed composite install plan."""
+
+    external = getattr(plan, "external", None)
+    if external is None:
+        return None
+    # Do not treat arbitrary user-provided objects as package plans.  The
+    # dataclass is defined in models.py; this structural gate avoids importing
+    # it here and keeps the generic transaction path unchanged on older plans.
+    required = (
+        "action",
+        "executable",
+        "agent_dir",
+        "package_source",
+        "before",
+        "consent_third_party_code",
+        "consent_network",
+        "removal_receipt",
+    )
+    return external if all(hasattr(external, name) for name in required) else None
+
+
+def _local_plan(plan: object) -> TransactionPlan:
+    """Unwrap the repository transaction from a composite Pi plan."""
+
+    local = getattr(plan, "local", plan)
+    if not isinstance(local, TransactionPlan):
+        raise TypeError("local transaction plan is invalid")
+    return local
+
+
+def _pi_phase_failure(
+    request: Request,
+    stderr: TextIO,
+    *,
+    phase: str,
+) -> int:
+    """Emit a stable generic phase error without exception or child output."""
+
+    # Task 6 adds dedicated Pi phase codes.  Until then, use the established
+    # apply failure code and a valid diagnostic phase; the exception itself is
+    # deliberately never rendered.
+    _emit_request(
+        stderr,
+        request,
+        DiagnosticCode.APPLY_ROLLED_BACK,
+        phase="apply" if phase == "package" else phase,
+        status="rolled-back",
+    )
+    return EXIT_APPLY_ERROR
 
 
 class ConcurrentDryRunChangeError(RuntimeError):
@@ -681,10 +788,13 @@ def _run_mutating_locked(
                 )
                 return _finish(EXIT_PREFLIGHT_ERROR)
             try:
-                rendered = render_plan(plan)
+                local_plan = _local_plan(plan)
+                rendered = render_plan(local_plan)
                 if not _write_output(stdout, rendered):
                     raise OSError("preflight output unavailable")
-                has_conflicts = any(target.conflicts for target in plan.targets)
+                has_conflicts = any(
+                    target.conflicts for target in local_plan.targets
+                )
             except Exception:
                 _emit_request(
                     stderr,
@@ -703,8 +813,29 @@ def _run_mutating_locked(
                     status="conflict",
                 )
                 return _finish(EXIT_MANAGED_CONFLICT)
+
+            external = _external_plan(plan)
+            if request.operation == "install" and external is not None:
+                if getattr(external, "action", None) == "install":
+                    try:
+                        receipt = install_pi_package(
+                            external.executable,
+                            external.agent_dir,
+                            external.consent_third_party_code,
+                            external.consent_network,
+                        )
+                        # The no-receipt primitive is intentional: ownership
+                        # becomes durable only after all external postconditions
+                        # have succeeded, and remains outside the local journal.
+                        store_pi_package_receipt(
+                            external.agent_dir, receipt
+                        )
+                    except Exception:
+                        return _finish(
+                            _pi_phase_failure(request, stderr, phase="package")
+                        )
             try:
-                apply_transaction(plan, failure_injector=failure_injector)
+                apply_transaction(local_plan, failure_injector=failure_injector)
             except IncompleteRollbackError:
                 _emit_request(
                     stderr,
@@ -733,9 +864,11 @@ def _run_mutating_locked(
                 )
                 return _finish(EXIT_APPLY_ERROR)
             try:
-                has_conflicts = any(target.conflicts for target in plan.targets)
+                has_conflicts = any(
+                    target.conflicts for target in local_plan.targets
+                )
                 if request.operation == "uninstall" and has_conflicts:
-                    for target in plan.targets:
+                    for target in local_plan.targets:
                         for conflict in target.conflicts:
                             del conflict
                             if not emit_diagnostic(
@@ -758,6 +891,29 @@ def _run_mutating_locked(
                     status="failed",
                 )
                 return _finish(EXIT_PREFLIGHT_ERROR)
+
+            if (
+                request.operation == "uninstall"
+                and external is not None
+                and getattr(external, "action", None) == "remove"
+            ):
+                receipt = getattr(external, "removal_receipt", None)
+                if type(receipt) is not PiPackageReceipt:
+                    return _finish(
+                        _pi_phase_failure(request, stderr, phase="package")
+                    )
+                try:
+                    remove_pi_package(
+                        external.executable,
+                        external.agent_dir,
+                        receipt,
+                    )
+                except Exception:
+                    # Local files have already been committed.  Preserve the
+                    # package and receipt when optional removal fails.
+                    return _finish(
+                        _pi_phase_failure(request, stderr, phase="package")
+                    )
             return _finish(EXIT_SUCCESS)
     except (ValueError, OSError):
         if primary_status is not None:
