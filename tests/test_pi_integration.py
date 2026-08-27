@@ -838,10 +838,11 @@ class PiIntegrationRedTests(unittest.TestCase):
     ) -> None:
         """An optional external failure cannot recreate local files or erase proof."""
 
-        from subagents_configs import orchestrator
+        from subagents_configs import orchestrator, pi_package
         from subagents_configs.planning import preflight_install, preflight_uninstall
 
         self._write_exact_package()
+        self._write_fake_pi()
         install_request = self._request(
             consent_third_party_code=False,
             consent_network=False,
@@ -857,6 +858,15 @@ class PiIntegrationRedTests(unittest.TestCase):
         self._write_valid_receipt()
         role = self.home / "agents/code-explorer.md"
         self.assertTrue(role.exists())
+        package_paths = (
+            self.home / "npm/node_modules/pi-subagents/package.json",
+            self.home / "npm/package-lock.json",
+            self.home / "settings.json",
+        )
+        receipt_path = self.home / ".subagents_configs/pi-package-receipt.json"
+        preserved_package_state = tuple(path.read_bytes() for path in package_paths)
+        preserved_receipt = receipt_path.read_bytes()
+        managed_roles = tuple(sorted(self.home.glob("agents/*.md")))
         uninstall_request = self._request(
             operation="uninstall",
             remove_pi_package=True,
@@ -869,15 +879,23 @@ class PiIntegrationRedTests(unittest.TestCase):
         ):
             uninstall_plan = preflight_uninstall(self.repository, uninstall_request)
         stderr = StringIO()
+        injector = _PiFailureInjector("package-remove")
+        real_run_command = pi_package._run_command
+
+        def fail_remove_command(
+            argv: tuple[str, ...], *args: object, **kwargs: object
+        ) -> None:
+            if argv[1:] == ("remove", "npm:pi-subagents"):
+                injector.before_external("package-remove")
+            real_run_command(argv, *args, **kwargs)
+
         with (
             patch.object(
                 orchestrator, "validate_request_compatibility", return_value=()
             ),
             patch.object(orchestrator, "_plan", return_value=uninstall_plan),
             patch.object(
-                orchestrator,
-                "remove_pi_package",
-                side_effect=RuntimeError("simulated Pi removal failure"),
+                pi_package, "_run_command", side_effect=fail_remove_command
             ),
         ):
             status = orchestrator._run_mutating_locked(
@@ -889,9 +907,14 @@ class PiIntegrationRedTests(unittest.TestCase):
             )
         self.assertEqual(status, orchestrator.EXIT_APPLY_ERROR)
         self.assertFalse(role.exists())
-        self.assertTrue(
-            (self.home / ".subagents_configs/pi-package-receipt.json").exists()
+        self.assertEqual(
+            tuple(path.read_bytes() for path in package_paths),
+            preserved_package_state,
         )
+        self.assertEqual(receipt_path.read_bytes(), preserved_receipt)
+        self.assertTrue(receipt_path.exists())
+        self.assertTrue(all(not path.exists() for path in managed_roles))
+        self.assertEqual(injector.external_phases, ["package-remove"])
         self.assertIn("PI_PACKAGE_PHASE_FAILED", stderr.getvalue())
         self.assertIsNotNone(uninstall_plan.external.removal_receipt)
 
