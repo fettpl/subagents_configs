@@ -52,6 +52,7 @@ EXPECTED_ACTIVE_PYTHON = frozenset(
         "subagents_configs/models.py",
         "subagents_configs/orchestrator.py",
         "subagents_configs/paths.py",
+        "subagents_configs/pi_package.py",
         "subagents_configs/planning.py",
         "subagents_configs/profiles.py",
         "subagents_configs/recovery.py",
@@ -102,9 +103,13 @@ def _import_aliases(tree: ast.AST) -> dict[str, str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for imported in node.names:
-                if imported.name in {"os", "subprocess"}:
+                if imported.name in {"os", "subprocess", "shutil"}:
                     aliases[imported.asname or imported.name] = imported.name
-        elif isinstance(node, ast.ImportFrom) and node.module in {"os", "subprocess"}:
+        elif isinstance(node, ast.ImportFrom) and node.module in {
+            "os",
+            "subprocess",
+            "shutil",
+        }:
             for imported in node.names:
                 if imported.name != "*":
                     aliases[imported.asname or imported.name] = (
@@ -204,6 +209,61 @@ def _security_issues_from_source(source: str) -> list[str]:
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             if re.search(r"--failure[-_]inject|FAILURE[-_]INJECTOR", node.value):
                 issues.append("public failure-injection name")
+    return issues
+
+
+def _pi_static_issues_from_source(source: str) -> list[str]:
+    """Find forbidden process/removal APIs and executable argv spellings."""
+
+    tree = ast.parse(source)
+    aliases = _import_aliases(tree)
+    issues: list[str] = []
+    forbidden_apis = {
+        "subprocess.Popen",
+        "subprocess.run",
+        "subprocess.call",
+        "subprocess.check_call",
+        "subprocess.check_output",
+        "subprocess.getoutput",
+        "subprocess.getstatusoutput",
+        "os.system",
+        "os.popen",
+        "shutil.rmtree",
+    }
+    forbidden_names = {"npm", "npx", "node", "git", "install.mjs"}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _canonical_name(node.func, aliases)
+        if name in forbidden_apis:
+            if name != "subprocess.Popen":
+                issues.append(f"forbidden API: {name}")
+            if name in {
+                "os.system",
+                "os.popen",
+                "shutil.rmtree",
+                "subprocess.getoutput",
+                "subprocess.getstatusoutput",
+            }:
+                issues.append(f"forbidden API: {name}")
+            for value in ast.walk(node):
+                if not isinstance(value, ast.Constant) or not isinstance(
+                    value.value, str
+                ):
+                    continue
+                spelling = value.value.casefold()
+                if spelling.startswith("npm:"):
+                    continue
+                if Path(value.value).name.casefold() in forbidden_names:
+                    issues.append(f"forbidden executable: {Path(value.value).name}")
+            for keyword in node.keywords:
+                if keyword.arg == "shell" and not (
+                    isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is False
+                ):
+                    issues.append("subprocess shell mode")
+            if _shell_argv(node):
+                issues.append("shell -c argv")
     return issues
 
 
@@ -344,6 +404,68 @@ class StaticSecurityTests(unittest.TestCase):
             with self.subTest(path=path.relative_to(REPOSITORY)):
                 source = path.read_text(encoding="utf-8")
                 self.assertEqual(_security_issues_from_source(source), [])
+
+    def test_pi_package_has_only_fixed_pi_lifecycle_commands(self):
+        source = (REPOSITORY / "subagents_configs/pi_package.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(_pi_static_issues_from_source(source), [])
+        self.assertTrue(
+            _pi_static_issues_from_source(
+                source + "\nimport subprocess\nsubprocess.call(['/usr/bin/npm'])\n"
+            )
+        )
+        self.assertNotIn("subprocess.run", source)
+        self.assertNotIn("os.system", source)
+        self.assertNotIn("shutil.rmtree", source)
+        tree = ast.parse(source)
+        for call in ast.walk(tree):
+            if not isinstance(call, ast.Call) or _call_name(call) != "subprocess.Popen":
+                continue
+            for constant in ast.walk(call):
+                if not isinstance(constant, ast.Constant) or not isinstance(
+                    constant.value, str
+                ):
+                    continue
+                program = Path(constant.value).name.casefold()
+                self.assertNotIn(program, {"npm", "npx", "node", "git", "install.mjs"})
+
+    def test_pi_static_mutations_cover_process_aliases_and_inert_npm_identity(self):
+        fixtures = {
+            "popen": "import subprocess as sp\nsp.Popen(['/usr/bin/npm', 'x'])",
+            "run": (
+                "from subprocess import run as execute\n"
+                "execute(['/usr/bin/npx', 'x'], shell=False)"
+            ),
+            "call": "import subprocess\nsubprocess.call(['node', 'x'])",
+            "check": "from subprocess import check_call\ncheck_call(['/bin/git', 'x'])",
+            "check-output": (
+                "from subprocess import check_output as execute\n"
+                "execute(['/usr/bin/npm', 'x'])"
+            ),
+            "output": (
+                "from subprocess import getoutput as execute\nexecute('npm --version')"
+            ),
+            "install": "import subprocess\nsubprocess.Popen(['/tmp/install.mjs'])",
+            "os-system": "from os import system as execute\nexecute('npm')",
+            "os-popen": "from os import popen as execute\nexecute('npm')",
+            "rmtree": "import shutil as fs\nfs.rmtree('/tmp/x')",
+            "shell": "import subprocess\nsubprocess.run(['sh', '-c', 'x'])",
+            "run-arbitrary": (
+                "import subprocess\nsubprocess.run(['/opt/pi', 'x'], shell=False)"
+            ),
+            "inert": (
+                "import subprocess\n"
+                "subprocess.Popen(['/opt/pi', 'install', 'npm:pi-subagents@0.56.0'])"
+            ),
+        }
+        for name, source in fixtures.items():
+            with self.subTest(fixture=name):
+                issues = _pi_static_issues_from_source(source)
+                if name == "inert":
+                    self.assertEqual(issues, [])
+                else:
+                    self.assertTrue(issues)
 
     def test_negative_fixture_and_policy_prose_are_outside_executable_scan_scope(self):
         with private_tempdir() as directory:

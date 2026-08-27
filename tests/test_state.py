@@ -44,6 +44,63 @@ class StateTests(unittest.TestCase):
             "entries": [self._entry(**entry_overrides)],
         }
 
+    def test_pi_receipt_is_allowed_only_for_pi_and_must_be_private_regular_state(self):
+        from subagents_configs.state import load_state
+
+        receipt = {
+            "schema_version": 1,
+            "operation": "install",
+            "source": "npm:pi-subagents@0.56.0",
+            "remove_source": "npm:pi-subagents",
+            "settings_before_hash": None,
+            "settings_after_hash": "a" * 64,
+            "package_manifest_hash": "b" * 64,
+            "package_policy_hash": "c" * 64,
+            "created_exact_entry": True,
+        }
+        with tempfile.TemporaryDirectory(dir=self._TEMP_DIR) as temporary:
+            root = Path(temporary)
+            state = root / ".subagents_configs"
+            state.mkdir(mode=0o700)
+            path = state / "pi-package-receipt.json"
+            path.write_text(json.dumps(receipt), encoding="utf-8")
+            path.chmod(0o600)
+            self.assertEqual(load_state(root, descriptor_for(Target.PI)), (None, None))
+            with self.assertRaises(ValueError):
+                load_state(root, descriptor_for(Target.CODEX))
+            path.chmod(0o644)
+            with self.assertRaises(ValueError):
+                load_state(root, descriptor_for(Target.PI))
+
+    def test_pi_receipt_rejects_symlink_directory_and_hardlink_state(self):
+        from subagents_configs.state import load_state
+
+        with tempfile.TemporaryDirectory(dir=self._TEMP_DIR) as temporary:
+            root = Path(temporary)
+            state = root / ".subagents_configs"
+            state.mkdir(mode=0o700)
+            path = state / "pi-package-receipt.json"
+            for kind in ("directory", "symlink", "hardlink"):
+                with self.subTest(kind=kind):
+                    if path.is_symlink() or path.exists():
+                        if path.is_dir() and not path.is_symlink():
+                            path.rmdir()
+                        else:
+                            path.unlink()
+                    source = root / "receipt-source"
+                    source.unlink(missing_ok=True)
+                    if kind == "directory":
+                        path.mkdir(mode=0o700)
+                    elif kind == "symlink":
+                        source.write_text("{}", encoding="utf-8")
+                        path.symlink_to(source)
+                    else:
+                        source.write_text("{}", encoding="utf-8")
+                        source.chmod(0o600)
+                        path.hardlink_to(source)
+                    with self.assertRaises(ValueError):
+                        load_state(root, descriptor_for(Target.PI))
+
     def test_manifest_round_trip_is_deterministic_and_metadata_only(self):
         from subagents_configs.state import decode_manifest, encode_manifest
 
