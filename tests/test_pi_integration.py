@@ -282,11 +282,21 @@ class PiIntegrationRedTests(unittest.TestCase):
         self._write_fake_pi(fail_install=True)
         plan = self._preflight()
         local_calls: list[object] = []
+        injector = _PiFailureInjector("package-install")
+        real_install = orchestrator.install_pi_package
+
+        def fail_install(*args: object, **kwargs: object):
+            injector.before_external("package-install")
+            return real_install(*args, **kwargs)
+
         with (
             patch.object(
                 orchestrator, "validate_request_compatibility", return_value=()
             ),
             patch.object(orchestrator, "_plan", return_value=plan),
+            patch.object(
+                orchestrator, "install_pi_package", side_effect=fail_install
+            ),
             patch.object(
                 orchestrator,
                 "apply_transaction",
@@ -307,6 +317,7 @@ class PiIntegrationRedTests(unittest.TestCase):
         self.assertFalse(
             (self.home / ".subagents_configs/pi-package-receipt.json").exists()
         )
+        self.assertEqual(injector.external_phases, ["package-install"])
 
     def test_offline_dry_run_never_spawns_pi(self) -> None:
         from subagents_configs import orchestrator, planning
@@ -478,7 +489,7 @@ class PiIntegrationRedTests(unittest.TestCase):
         self._write_fake_pi()
         plan = self._preflight()
         local_calls: list[object] = []
-        injector = _PiFailureInjector()
+        injector = _PiFailureInjector("catalog-apply")
         real_install = orchestrator.install_pi_package
 
         def record_install(*args: object, **kwargs: object):
@@ -555,6 +566,11 @@ class PiIntegrationRedTests(unittest.TestCase):
             ),
             patch.object(
                 orchestrator,
+                "verify_pi_install_postcondition",
+                side_effect=RuntimeError("receipt ownership verification failed"),
+            ),
+            patch.object(
+                orchestrator,
                 "store_pi_package_receipt",
                 side_effect=RuntimeError("receipt write failed"),
             ),
@@ -572,7 +588,7 @@ class PiIntegrationRedTests(unittest.TestCase):
                 failure_injector=None,
             )
         self.assertEqual(status, orchestrator.EXIT_APPLY_ERROR)
-        self.assertEqual(effective_calls, [True])
+        self.assertEqual(effective_calls, [])
         self.assertEqual(
             orchestrator.inspect_pi_package_state(self.home).status,
             "exact",
@@ -580,12 +596,10 @@ class PiIntegrationRedTests(unittest.TestCase):
         self.assertFalse(
             (self.home / ".subagents_configs/pi-package-receipt.json").exists()
         )
-        self.assertEqual(
-            injector.external_phases, ["package-install", "catalog-apply"]
-        )
+        self.assertEqual(injector.external_phases, ["package-install"])
 
     def test_concurrent_same_home_install_has_one_effective_package_entry(self) -> None:
-        from subagents_configs import locks, orchestrator
+        from subagents_configs import locks, orchestrator, planning
 
         self._write_fake_pi()
         lock_anchor = self.home / ".subagents_configs.lock"
@@ -593,9 +607,7 @@ class PiIntegrationRedTests(unittest.TestCase):
         lock_anchor.chmod(0o600)
         acquired: list[tuple[Target, ...]] = []
         real_lock = locks.locked_target_homes
-        runtime = orchestrator.validate_pi_executable(
-            self.fake_pi, agent_dir=self.home, execute=True
-        )
+        request = self._request()
 
         @contextmanager
         def recording_lock(homes, targets):
@@ -604,14 +616,23 @@ class PiIntegrationRedTests(unittest.TestCase):
                 yield
 
         def run_one() -> int:
-            with recording_lock({Target.PI: self.home}, (Target.PI,)):
-                receipt = orchestrator.install_pi_package(
-                    runtime, self.home, True, True
-                )
-            return 0 if receipt.operation in {"install", "none"} else 1
+            stderr = StringIO()
+            status = orchestrator._run_mutating_locked(
+                request,
+                repo_root=self.repository,
+                stdout=StringIO(),
+                stderr=stderr,
+                failure_injector=None,
+            )
+            return status
 
         with (
             patch.object(orchestrator, "locked_target_homes", recording_lock),
+            patch.object(
+                orchestrator, "validate_request_compatibility", return_value=()
+            ),
+            patch.object(planning, "validate_request_compatibility", return_value=()),
+            patch.object(orchestrator, "verify_pi_effective_postcondition"),
             patch.dict(
                 os.environ,
                 {
@@ -624,7 +645,7 @@ class PiIntegrationRedTests(unittest.TestCase):
             ThreadPoolExecutor(max_workers=2) as pool,
         ):
             statuses = tuple(pool.map(lambda _index: run_one(), range(2)))
-        self.assertEqual(statuses, (0, 0))
+        self.assertEqual(statuses, (orchestrator.EXIT_SUCCESS,) * 2)
         self.assertEqual(acquired, [(Target.PI,), (Target.PI,)])
         settings = json.loads((self.home / "settings.json").read_text(encoding="utf-8"))
         self.assertEqual(settings["packages"], ["npm:pi-subagents@0.56.0"])
