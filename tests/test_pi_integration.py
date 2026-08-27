@@ -36,8 +36,7 @@ class PiIntegrationRedTests(unittest.TestCase):
         self.home.mkdir(mode=0o700)
         self.fake_pi = self.root / "pi"
         self.fake_pi.write_text(
-            "#!/bin/sh\n"
-            "exit 0\n",
+            "#!/bin/sh\nexit 0\n",
             encoding="utf-8",
         )
         self.fake_pi.chmod(0o700)
@@ -107,9 +106,7 @@ class PiIntegrationRedTests(unittest.TestCase):
         npm = self.home / "npm"
         npm.mkdir(mode=0o700, exist_ok=True)
         npm.chmod(0o700)
-        (npm / "package-lock.json").write_text(
-            json.dumps(lock), encoding="utf-8"
-        )
+        (npm / "package-lock.json").write_text(json.dumps(lock), encoding="utf-8")
         (npm / "package-lock.json").chmod(0o600)
         settings = self.home / "settings.json"
         settings.write_text(
@@ -192,10 +189,13 @@ class PiIntegrationRedTests(unittest.TestCase):
         invalid_roots[1].write_text("not a directory", encoding="utf-8")
         for invalid in invalid_roots:
             with self.subTest(root=invalid):
-                with patch(
-                    "subagents_configs.planning.validate_request_compatibility",
-                    return_value=(),
-                ), self.assertRaises((TypeError, ValueError, OSError)):
+                with (
+                    patch(
+                        "subagents_configs.planning.validate_request_compatibility",
+                        return_value=(),
+                    ),
+                    self.assertRaises((TypeError, ValueError, OSError)),
+                ):
                     preflight_install(
                         self.repository,
                         self._request(),
@@ -204,10 +204,13 @@ class PiIntegrationRedTests(unittest.TestCase):
 
         symlink = self.root / "project-link"
         symlink.symlink_to(self.project_root, target_is_directory=True)
-        with patch(
-            "subagents_configs.planning.validate_request_compatibility",
-            return_value=(),
-        ), self.assertRaises((TypeError, ValueError, OSError)):
+        with (
+            patch(
+                "subagents_configs.planning.validate_request_compatibility",
+                return_value=(),
+            ),
+            self.assertRaises((TypeError, ValueError, OSError)),
+        ):
             preflight_install(
                 self.repository,
                 self._request(),
@@ -315,31 +318,34 @@ class PiIntegrationRedTests(unittest.TestCase):
         def local_phase(*_args: object, **_kwargs: object) -> None:
             events.append("local")
 
-        with patch.object(
-            orchestrator, "validate_request_compatibility", return_value=()
-        ), patch.object(orchestrator, "_plan", return_value=plan), patch.object(
-            orchestrator, "install_pi_package", side_effect=package_phase
-        ), patch.object(
-            orchestrator, "verify_pi_install_postcondition"
-        ), patch.object(
-            orchestrator, "verify_pi_effective_postcondition"
-        ), patch.object(
-            orchestrator,
-            "verify_pi_package_postcondition",
-        ), patch.object(
-            orchestrator,
-            "inspect_pi_package_state",
-            return_value=plan.external.before,
-        ), patch.object(
-            orchestrator,
-            "validate_pi_package_receipt",
-            return_value=None,
-        ), patch.object(
-            orchestrator,
-            "store_pi_package_receipt",
-            side_effect=lambda *_a, **_k: events.append("receipt"),
-        ), patch.object(
-            orchestrator, "apply_transaction", side_effect=local_phase
+        with (
+            patch.object(
+                orchestrator, "validate_request_compatibility", return_value=()
+            ),
+            patch.object(orchestrator, "_plan", return_value=plan),
+            patch.object(orchestrator, "install_pi_package", side_effect=package_phase),
+            patch.object(orchestrator, "verify_pi_install_postcondition"),
+            patch.object(orchestrator, "verify_pi_effective_postcondition"),
+            patch.object(
+                orchestrator,
+                "verify_pi_package_postcondition",
+            ),
+            patch.object(
+                orchestrator,
+                "inspect_pi_package_state",
+                return_value=plan.external.before,
+            ),
+            patch.object(
+                orchestrator,
+                "validate_pi_package_receipt",
+                return_value=None,
+            ),
+            patch.object(
+                orchestrator,
+                "store_pi_package_receipt",
+                side_effect=lambda *_a, **_k: events.append("receipt"),
+            ),
+            patch.object(orchestrator, "apply_transaction", side_effect=local_phase),
         ):
             status = orchestrator._run_mutating_locked(
                 self._request(),
@@ -407,23 +413,30 @@ class PiIntegrationRedTests(unittest.TestCase):
         plan = self._preflight()
         local_calls: list[object] = []
         receipt_calls: list[object] = []
-        with patch.object(
-            orchestrator, "validate_request_compatibility", return_value=()
-        ), patch.object(orchestrator, "_plan", return_value=plan), patch.object(
-            orchestrator,
-            "install_pi_package",
-            return_value=object(),
-        ), patch.object(
-            orchestrator,
-            "verify_pi_install_postcondition",
-        ), patch.object(
-            orchestrator,
-            "store_pi_package_receipt",
-            side_effect=lambda *_a, **_k: receipt_calls.append(True),
-        ), patch.object(
-            orchestrator,
-            "apply_transaction",
-            side_effect=lambda *_a, **_k: local_calls.append(True),
+        with (
+            patch.object(
+                orchestrator, "validate_request_compatibility", return_value=()
+            ),
+            patch.object(orchestrator, "_plan", return_value=plan),
+            patch.object(
+                orchestrator,
+                "install_pi_package",
+                return_value=object(),
+            ),
+            patch.object(
+                orchestrator,
+                "verify_pi_install_postcondition",
+            ),
+            patch.object(
+                orchestrator,
+                "store_pi_package_receipt",
+                side_effect=lambda *_a, **_k: receipt_calls.append(True),
+            ),
+            patch.object(
+                orchestrator,
+                "apply_transaction",
+                side_effect=lambda *_a, **_k: local_calls.append(True),
+            ),
         ):
             status = orchestrator._run_mutating_locked(
                 self._request(),
@@ -445,18 +458,22 @@ class PiIntegrationRedTests(unittest.TestCase):
         plan = self._preflight()
         self.assertEqual(plan.external.action, "none")
         local_calls: list[object] = []
-        with patch.object(
-            orchestrator, "validate_request_compatibility", return_value=()
-        ), patch.object(orchestrator, "_plan", return_value=plan), patch.object(
-            orchestrator, "verify_pi_package_postcondition"
-        ), patch.object(
-            orchestrator,
-            "verify_pi_effective_postcondition",
-            side_effect=ValueError("effective evaluator is unavailable"),
-        ), patch.object(
-            orchestrator,
-            "apply_transaction",
-            side_effect=lambda *_a, **_k: local_calls.append(True),
+        with (
+            patch.object(
+                orchestrator, "validate_request_compatibility", return_value=()
+            ),
+            patch.object(orchestrator, "_plan", return_value=plan),
+            patch.object(orchestrator, "verify_pi_package_postcondition"),
+            patch.object(
+                orchestrator,
+                "verify_pi_effective_postcondition",
+                side_effect=ValueError("effective evaluator is unavailable"),
+            ),
+            patch.object(
+                orchestrator,
+                "apply_transaction",
+                side_effect=lambda *_a, **_k: local_calls.append(True),
+            ),
         ):
             status = orchestrator._run_mutating_locked(
                 self._request(),
@@ -511,14 +528,16 @@ class PiIntegrationRedTests(unittest.TestCase):
         invalid_external = replace(plan.external, action="unexpected")
         invalid_plan = replace(plan, external=invalid_external)
         local_calls: list[object] = []
-        with patch.object(
-            orchestrator, "validate_request_compatibility", return_value=()
-        ), patch.object(
-            orchestrator, "_plan", return_value=invalid_plan
-        ), patch.object(
-            orchestrator,
-            "apply_transaction",
-            side_effect=lambda *_a, **_k: local_calls.append(True),
+        with (
+            patch.object(
+                orchestrator, "validate_request_compatibility", return_value=()
+            ),
+            patch.object(orchestrator, "_plan", return_value=invalid_plan),
+            patch.object(
+                orchestrator,
+                "apply_transaction",
+                side_effect=lambda *_a, **_k: local_calls.append(True),
+            ),
         ):
             status = orchestrator._run_mutating_locked(
                 self._request(),
@@ -555,10 +574,13 @@ class PiIntegrationRedTests(unittest.TestCase):
             pi_package_policy_hash(),
             True,
         )
-        with patch(
-            "subagents_configs.pi_package.inspect_pi_package_state",
-            side_effect=[evidence, drift],
-        ), self.assertRaises(PiPackageError):
+        with (
+            patch(
+                "subagents_configs.pi_package.inspect_pi_package_state",
+                side_effect=[evidence, drift],
+            ),
+            self.assertRaises(PiPackageError),
+        ):
             store_pi_package_receipt(
                 self.home,
                 receipt,
@@ -573,22 +595,24 @@ class PiIntegrationRedTests(unittest.TestCase):
 
         plan = self._preflight()
         local_calls: list[object] = []
-        with patch.object(
-            orchestrator, "validate_request_compatibility", return_value=()
-        ), patch.object(orchestrator, "_plan", return_value=plan), patch.object(
-            orchestrator,
-            "install_pi_package",
-            side_effect=RuntimeError("third-party output must be sanitized"),
-        ), patch.object(
-            orchestrator, "verify_pi_install_postcondition"
-        ), patch.object(
-            orchestrator, "verify_pi_effective_postcondition"
-        ), patch.object(
-            orchestrator, "store_pi_package_receipt"
-        ) as store_receipt, patch.object(
-            orchestrator,
-            "apply_transaction",
-            side_effect=lambda *_a, **_k: local_calls.append(True),
+        with (
+            patch.object(
+                orchestrator, "validate_request_compatibility", return_value=()
+            ),
+            patch.object(orchestrator, "_plan", return_value=plan),
+            patch.object(
+                orchestrator,
+                "install_pi_package",
+                side_effect=RuntimeError("third-party output must be sanitized"),
+            ),
+            patch.object(orchestrator, "verify_pi_install_postcondition"),
+            patch.object(orchestrator, "verify_pi_effective_postcondition"),
+            patch.object(orchestrator, "store_pi_package_receipt") as store_receipt,
+            patch.object(
+                orchestrator,
+                "apply_transaction",
+                side_effect=lambda *_a, **_k: local_calls.append(True),
+            ),
         ):
             status = orchestrator._run_mutating_locked(
                 self._request(),
@@ -608,34 +632,44 @@ class PiIntegrationRedTests(unittest.TestCase):
 
         plan = self._preflight()
         events: list[str] = []
-        with patch.object(
-            orchestrator, "validate_request_compatibility", return_value=()
-        ), patch.object(orchestrator, "_plan", return_value=plan), patch.object(
-            orchestrator,
-            "install_pi_package",
-            side_effect=lambda *_a, **_k: events.append("package"),
-        ), patch.object(
-            orchestrator, "verify_pi_install_postcondition"
-        ), patch.object(
-            orchestrator, "verify_pi_effective_postcondition"
-        ), patch.object(
-            orchestrator,
-            "verify_pi_package_postcondition",
-        ), patch.object(
-            orchestrator,
-            "inspect_pi_package_state",
-            return_value=plan.external.before,
-        ), patch.object(
-            orchestrator,
-            "validate_pi_package_receipt",
-            return_value=None,
-        ), patch.object(
-            orchestrator,
-            "store_pi_package_receipt",
-            side_effect=lambda *_a, **_k: events.append("receipt"),
-        ), patch.object(
-            orchestrator, "apply_transaction", side_effect=RuntimeError("local failure")
-        ), patch.object(orchestrator, "remove_pi_package") as remove_package:
+        with (
+            patch.object(
+                orchestrator, "validate_request_compatibility", return_value=()
+            ),
+            patch.object(orchestrator, "_plan", return_value=plan),
+            patch.object(
+                orchestrator,
+                "install_pi_package",
+                side_effect=lambda *_a, **_k: events.append("package"),
+            ),
+            patch.object(orchestrator, "verify_pi_install_postcondition"),
+            patch.object(orchestrator, "verify_pi_effective_postcondition"),
+            patch.object(
+                orchestrator,
+                "verify_pi_package_postcondition",
+            ),
+            patch.object(
+                orchestrator,
+                "inspect_pi_package_state",
+                return_value=plan.external.before,
+            ),
+            patch.object(
+                orchestrator,
+                "validate_pi_package_receipt",
+                return_value=None,
+            ),
+            patch.object(
+                orchestrator,
+                "store_pi_package_receipt",
+                side_effect=lambda *_a, **_k: events.append("receipt"),
+            ),
+            patch.object(
+                orchestrator,
+                "apply_transaction",
+                side_effect=RuntimeError("local failure"),
+            ),
+            patch.object(orchestrator, "remove_pi_package") as remove_package,
+        ):
             status = orchestrator._run_mutating_locked(
                 self._request(),
                 repo_root=self.repository,

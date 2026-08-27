@@ -1727,9 +1727,7 @@ def store_pi_package_receipt(
     except (OSError, ValueError, TransactionError) as exc:
         if created_receipt_evidence is not None:
             try:
-                filesystem.safe_mutate(
-                    receipt_path, created_receipt_evidence, None
-                )
+                filesystem.safe_mutate(receipt_path, created_receipt_evidence, None)
             except (OSError, ValueError, TransactionError):
                 # Preserve any concurrent replacement; CAS only removes the
                 # exact receipt identity created by this call.

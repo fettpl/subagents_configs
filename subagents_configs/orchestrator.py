@@ -933,9 +933,7 @@ def _run_mutating_locked(
                 rendered = render_plan(local_plan)
                 if not _write_output(stdout, rendered):
                     raise OSError("preflight output unavailable")
-                has_conflicts = any(
-                    target.conflicts for target in local_plan.targets
-                )
+                has_conflicts = any(target.conflicts for target in local_plan.targets)
             except Exception:
                 _emit_request(
                     stderr,
@@ -969,9 +967,7 @@ def _run_mutating_locked(
                         verify_pi_install_postcondition(external, receipt)
                         package = inspect_pi_package_state(external.agent_dir)
                         verify_pi_package_postcondition(external, package)
-                        verify_pi_effective_postcondition(
-                            external, local_plan, package
-                        )
+                        verify_pi_effective_postcondition(external, local_plan, package)
                         # The no-receipt primitive is intentional: ownership
                         # becomes durable only after all external postconditions
                         # have succeeded, and remains outside the local journal.
@@ -994,15 +990,11 @@ def _run_mutating_locked(
                     elif action == "none":
                         package = inspect_pi_package_state(external.agent_dir)
                         verify_pi_package_postcondition(external, package)
-                        verify_pi_effective_postcondition(
-                            external, local_plan, package
-                        )
+                        verify_pi_effective_postcondition(external, local_plan, package)
                     else:
                         raise ValueError("unknown Pi external action")
                 except Exception:
-                    return _finish(
-                        _pi_phase_failure(request, stderr, phase="package")
-                    )
+                    return _finish(_pi_phase_failure(request, stderr, phase="package"))
             try:
                 apply_transaction(local_plan, failure_injector=failure_injector)
             except IncompleteRollbackError:
@@ -1033,9 +1025,7 @@ def _run_mutating_locked(
                 )
                 return _finish(EXIT_APPLY_ERROR)
             try:
-                has_conflicts = any(
-                    target.conflicts for target in local_plan.targets
-                )
+                has_conflicts = any(target.conflicts for target in local_plan.targets)
                 if request.operation == "uninstall" and has_conflicts:
                     for target in local_plan.targets:
                         for conflict in target.conflicts:
@@ -1068,9 +1058,7 @@ def _run_mutating_locked(
             ):
                 receipt = getattr(external, "removal_receipt", None)
                 if type(receipt) is not PiPackageReceipt:
-                    return _finish(
-                        _pi_phase_failure(request, stderr, phase="package")
-                    )
+                    return _finish(_pi_phase_failure(request, stderr, phase="package"))
                 try:
                     remove_pi_package(
                         external.executable,
@@ -1080,9 +1068,7 @@ def _run_mutating_locked(
                 except Exception:
                     # Local files have already been committed.  Preserve the
                     # package and receipt when optional removal fails.
-                    return _finish(
-                        _pi_phase_failure(request, stderr, phase="package")
-                    )
+                    return _finish(_pi_phase_failure(request, stderr, phase="package"))
             return _finish(EXIT_SUCCESS)
     except (ValueError, OSError):
         if primary_status is not None:
