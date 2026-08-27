@@ -9,17 +9,41 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from io import StringIO
 from pathlib import Path
+from typing import Literal
 from unittest.mock import patch
 
 from subagents_configs.models import Request, Target
 from subagents_configs.transaction import apply_transaction
 from tests.helpers import planning_repository
+
+
+class _PiFailureInjector:
+    """Test-only phase injector; production APIs intentionally do not expose it."""
+
+    def __init__(self, failure: str | None = None) -> None:
+        self.failure = failure
+        self.external_phases: list[str] = []
+        self.operation_ids: list[str] = []
+
+    def before_operation(self, operation_id: str) -> None:
+        self.operation_ids.append(operation_id)
+
+    def before_external(
+        self,
+        phase: Literal["package-install", "catalog-apply", "package-remove"],
+    ) -> None:
+        self.external_phases.append(phase)
+        if phase == self.failure:
+            raise RuntimeError(f"injected external failure: {phase}")
 
 
 class PiIntegrationRedTests(unittest.TestCase):
@@ -39,6 +63,7 @@ class PiIntegrationRedTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.fake_pi.chmod(0o700)
+        self.fake_log = self.root / "pi-calls.jsonl"
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -114,6 +139,78 @@ class PiIntegrationRedTests(unittest.TestCase):
         )
         settings.chmod(0o600)
 
+    def _write_fake_pi(
+        self,
+        *,
+        version: str = "0.84.1",
+        fail_install: bool = False,
+        fail_remove: bool = False,
+    ) -> Path:
+        """Create an offline-only Pi double that records argv and env."""
+
+        package = (
+            Path(__file__).parent / "fixtures/pi-subagents-0.56.0-package.json"
+        ).read_text(encoding="utf-8")
+        lock = json.dumps(
+            {
+                "name": "pi-subagents",
+                "version": "0.56.0",
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"dependencies": {"pi-subagents": "0.56.0"}},
+                    "node_modules/pi-subagents": {
+                        "version": "0.56.0",
+                        "integrity": (
+                            "sha512-XBmKqvrj4mCVQ6/uXiPqCmzHxGfBB+jjwmfNR3El+IfhnaJwZ+"
+                            "W6evXYRI3lQEXe6Nf56xfzUXQExIzE8cT5BQ=="
+                        ),
+                    },
+                },
+            }
+        )
+        script = (
+            "#!/usr/bin/env python3\n"
+            "import json, os, pathlib, shutil, sys\n"
+            f"log = pathlib.Path({str(self.fake_log)!r})\n"
+            "record = {'argv': sys.argv[1:], 'env': dict(os.environ)}\n"
+            "with log.open('a', encoding='utf-8') as handle:\n"
+            "    handle.write(json.dumps(record) + '\\n')\n"
+            f"if sys.argv[1:] == ['--offline', '--version']:\n    print({version!r})\n"
+            "elif sys.argv[1:] == ['--offline', '--help']:\n"
+            "    print('install remove offline')\n"
+            "elif sys.argv[1:] == ['install', 'npm:pi-subagents@0.56.0']:\n"
+            f"    if {fail_install!r}: raise SystemExit(23)\n"
+            "    root = pathlib.Path(os.environ['PI_CODING_AGENT_DIR'])\n"
+            "    package_dir = root / 'npm/node_modules/pi-subagents'\n"
+            "    package_dir.mkdir(parents=True, mode=0o700)\n"
+            "    (root / 'npm').chmod(0o700)\n"
+            "    (root / 'npm/node_modules').chmod(0o700)\n"
+            "    package_dir.chmod(0o700)\n"
+            "    (package_dir / 'package.json').write_text("
+            + repr(package)
+            + ", encoding='utf-8')\n"
+            "    (package_dir / 'package.json').chmod(0o600)\n"
+            "    (root / 'npm/package-lock.json').write_text("
+            + repr(lock)
+            + ", encoding='utf-8')\n"
+            "    (root / 'npm/package-lock.json').chmod(0o600)\n"
+            "    (root / 'settings.json').write_text("
+            "json.dumps({'packages': ['npm:pi-subagents@0.56.0']}), "
+            "encoding='utf-8')\n"
+            "    (root / 'settings.json').chmod(0o600)\n"
+            "elif sys.argv[1:] == ['remove', 'npm:pi-subagents']:\n"
+            f"    if {fail_remove!r}: raise SystemExit(24)\n"
+            "    root = pathlib.Path(os.environ['PI_CODING_AGENT_DIR'])\n"
+            "    shutil.rmtree(root / 'npm/node_modules/pi-subagents')\n"
+            "    (root / 'npm/package-lock.json').unlink(missing_ok=True)\n"
+            "    (root / 'settings.json').unlink(missing_ok=True)\n"
+            "else:\n"
+            "    raise SystemExit(2)\n"
+        )
+        self.fake_pi.write_text(script, encoding="utf-8")
+        self.fake_pi.chmod(0o700)
+        return self.fake_pi
+
     def _write_valid_receipt(self) -> None:
         from subagents_configs.pi_package import inspect_pi_package_state
 
@@ -176,6 +273,397 @@ class PiIntegrationRedTests(unittest.TestCase):
         }
         self.assertEqual(len(runtime), 9)
         self.assertNotIn("routing", {item.identifier for item in operations})
+
+    def test_package_command_failure_has_zero_local_writes(self) -> None:
+        """A failed external install must not enter the local transaction."""
+
+        from subagents_configs import orchestrator
+
+        self._write_fake_pi(fail_install=True)
+        plan = self._preflight()
+        local_calls: list[object] = []
+        injector = _PiFailureInjector("package-install")
+        real_install = orchestrator.install_pi_package
+
+        def fail_install(*args: object, **kwargs: object):
+            injector.before_external("package-install")
+            return real_install(*args, **kwargs)
+
+        with (
+            patch.object(
+                orchestrator, "validate_request_compatibility", return_value=()
+            ),
+            patch.object(orchestrator, "_plan", return_value=plan),
+            patch.object(orchestrator, "install_pi_package", side_effect=fail_install),
+            patch.object(
+                orchestrator,
+                "apply_transaction",
+                side_effect=lambda *_args, **_kwargs: local_calls.append(True),
+            ),
+        ):
+            status = orchestrator._run_mutating_locked(
+                self._request(),
+                repo_root=self.repository,
+                stdout=StringIO(),
+                stderr=StringIO(),
+                failure_injector=None,
+            )
+        self.assertEqual(status, orchestrator.EXIT_APPLY_ERROR)
+        self.assertEqual(local_calls, [])
+        self.assertFalse((self.home / "settings.json").exists())
+        self.assertFalse((self.home / "npm").exists())
+        self.assertFalse(
+            (self.home / ".subagents_configs/pi-package-receipt.json").exists()
+        )
+        self.assertEqual(injector.external_phases, ["package-install"])
+
+    def test_offline_dry_run_never_spawns_pi(self) -> None:
+        from subagents_configs import orchestrator, planning
+
+        argv = [
+            "--target",
+            "pi",
+            "--home",
+            f"pi={self.home}",
+            "--pi-executable",
+            str(self.fake_pi),
+            "--client-version",
+            "pi=0.84.1",
+            "--dry-run",
+        ]
+        with (
+            patch.object(
+                orchestrator, "validate_request_compatibility", return_value=()
+            ),
+            patch.object(planning, "validate_request_compatibility", return_value=()),
+            patch.object(
+                orchestrator,
+                "validate_pi_executable",
+                side_effect=AssertionError("dry run spawned Pi"),
+            ),
+        ):
+            status = orchestrator.run(
+                "install",
+                argv,
+                repo_root=self.repository,
+                environ={"HOME": str(self.root / "ambient")},
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
+        self.assertEqual(status, orchestrator.EXIT_SUCCESS)
+        self.assertFalse(self.fake_log.exists())
+
+    def test_custom_npm_command_is_rejected(self) -> None:
+        from subagents_configs.errors import PiPackageError
+
+        self._write_exact_package()
+        settings = self.home / "settings.json"
+        settings.write_text(
+            json.dumps(
+                {
+                    "packages": ["npm:pi-subagents@0.56.0"],
+                    "npmCommand": "npm",
+                }
+            ),
+            encoding="utf-8",
+        )
+        settings.chmod(0o600)
+        with self.assertRaises(PiPackageError):
+            self._preflight()
+
+    def test_uninstall_package_removal_requires_exact_receipt(self) -> None:
+        from subagents_configs.errors import PiPackageError
+        from subagents_configs.planning import preflight_uninstall
+
+        self._write_exact_package()
+        self._write_valid_receipt()
+        receipt_path = self.home / ".subagents_configs/pi-package-receipt.json"
+        payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+        payload["created_exact_entry"] = False
+        receipt_path.write_text(json.dumps(payload), encoding="utf-8")
+        receipt_path.chmod(0o600)
+        before = (
+            (self.home / "settings.json").read_bytes(),
+            (self.home / "npm/package-lock.json").read_bytes(),
+        )
+        request = self._request(
+            operation="uninstall",
+            remove_pi_package=True,
+            consent_third_party_code=False,
+            consent_network=False,
+        )
+        with (
+            patch(
+                "subagents_configs.planning.validate_request_compatibility",
+                return_value=(),
+            ),
+            self.assertRaises(PiPackageError),
+        ):
+            preflight_uninstall(self.repository, request)
+        self.assertEqual(
+            (
+                (self.home / "settings.json").read_bytes(),
+                (self.home / "npm/package-lock.json").read_bytes(),
+            ),
+            before,
+        )
+
+    def test_settings_drift_preserves_package(self) -> None:
+        from subagents_configs import pi_package
+
+        self._write_fake_pi()
+        self._write_exact_package()
+        self._write_valid_receipt()
+        receipt = pi_package.load_pi_package_receipt(self.home)
+        assert receipt is not None
+        settings = self.home / "settings.json"
+        settings.write_text(
+            json.dumps(
+                {
+                    "packages": [
+                        "npm:pi-subagents@0.56.0",
+                        "npm:unrelated@1.0.0",
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        settings.chmod(0o600)
+        before_package = (
+            self.home / "npm/node_modules/pi-subagents/package.json"
+        ).read_bytes()
+        before_settings = settings.read_bytes()
+        runtime = pi_package.validate_pi_executable(
+            self.fake_pi, agent_dir=self.home, execute=True
+        )
+        with (
+            patch.object(
+                pi_package,
+                "_run_command",
+                side_effect=AssertionError("drifted package was removed"),
+            ),
+            self.assertRaises(pi_package.PiPackageError),
+        ):
+            pi_package.remove_pi_package(runtime, self.home, receipt)
+        self.assertEqual(
+            (self.home / "npm/node_modules/pi-subagents/package.json").read_bytes(),
+            before_package,
+        )
+        self.assertEqual(settings.read_bytes(), before_settings)
+
+    def test_package_drift_preserves_settings(self) -> None:
+        from subagents_configs import pi_package
+
+        self._write_fake_pi()
+        self._write_exact_package()
+        self._write_valid_receipt()
+        receipt = pi_package.load_pi_package_receipt(self.home)
+        assert receipt is not None
+        settings = self.home / "settings.json"
+        before_settings = settings.read_bytes()
+        manifest = self.home / "npm/node_modules/pi-subagents/package.json"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace("0.56.0", "0.56.1", 1),
+            encoding="utf-8",
+        )
+        manifest.chmod(0o600)
+        runtime = pi_package.validate_pi_executable(
+            self.fake_pi, agent_dir=self.home, execute=True
+        )
+        with (
+            patch.object(
+                pi_package,
+                "_run_command",
+                side_effect=AssertionError("drifted package was removed"),
+            ),
+            self.assertRaises(pi_package.PiPackageError),
+        ):
+            pi_package.remove_pi_package(runtime, self.home, receipt)
+        self.assertEqual(settings.read_bytes(), before_settings)
+
+    def test_catalog_collision_after_package_install_preserves_package(self) -> None:
+        from subagents_configs import orchestrator
+
+        self._write_fake_pi()
+        plan = self._preflight()
+        local_calls: list[object] = []
+        injector = _PiFailureInjector("catalog-apply")
+        real_install = orchestrator.install_pi_package
+
+        def record_install(*args: object, **kwargs: object):
+            injector.before_external("package-install")
+            return real_install(*args, **kwargs)
+
+        def conflict(*_args: object, **_kwargs: object) -> None:
+            injector.before_external("catalog-apply")
+            raise ValueError("catalog conflict")
+
+        with (
+            patch.object(
+                orchestrator, "validate_request_compatibility", return_value=()
+            ),
+            patch.object(orchestrator, "_plan", return_value=plan),
+            patch.object(
+                orchestrator, "install_pi_package", side_effect=record_install
+            ),
+            patch.object(
+                orchestrator,
+                "verify_pi_effective_postcondition",
+                side_effect=conflict,
+            ),
+            patch.object(
+                orchestrator,
+                "apply_transaction",
+                side_effect=lambda *_args, **_kwargs: local_calls.append(True),
+            ),
+        ):
+            status = orchestrator._run_mutating_locked(
+                self._request(),
+                repo_root=self.repository,
+                stdout=StringIO(),
+                stderr=StringIO(),
+                failure_injector=None,
+            )
+        self.assertEqual(status, orchestrator.EXIT_APPLY_ERROR)
+        self.assertEqual(local_calls, [])
+        self.assertEqual(
+            orchestrator.inspect_pi_package_state(self.home).status,
+            "exact",
+        )
+        self.assertFalse(
+            (self.home / ".subagents_configs/pi-package-receipt.json").exists()
+        )
+        self.assertEqual(injector.external_phases, ["package-install", "catalog-apply"])
+
+    def test_receipt_failure_preserves_package_and_skips_catalog(self) -> None:
+        from subagents_configs import orchestrator
+
+        self._write_fake_pi()
+        plan = self._preflight()
+        effective_calls: list[object] = []
+        injector = _PiFailureInjector()
+        real_install = orchestrator.install_pi_package
+
+        def record_install(*args: object, **kwargs: object):
+            injector.before_external("package-install")
+            return real_install(*args, **kwargs)
+
+        def record_catalog(*_args: object, **_kwargs: object) -> None:
+            injector.before_external("catalog-apply")
+            effective_calls.append(True)
+
+        with (
+            patch.object(
+                orchestrator, "validate_request_compatibility", return_value=()
+            ),
+            patch.object(orchestrator, "_plan", return_value=plan),
+            patch.object(
+                orchestrator, "install_pi_package", side_effect=record_install
+            ),
+            patch.object(
+                orchestrator,
+                "verify_pi_install_postcondition",
+                side_effect=RuntimeError("receipt ownership verification failed"),
+            ),
+            patch.object(
+                orchestrator,
+                "store_pi_package_receipt",
+                side_effect=RuntimeError("receipt write failed"),
+            ),
+            patch.object(
+                orchestrator,
+                "verify_pi_effective_postcondition",
+                side_effect=record_catalog,
+            ),
+        ):
+            status = orchestrator._run_mutating_locked(
+                self._request(),
+                repo_root=self.repository,
+                stdout=StringIO(),
+                stderr=StringIO(),
+                failure_injector=None,
+            )
+        self.assertEqual(status, orchestrator.EXIT_APPLY_ERROR)
+        self.assertEqual(effective_calls, [])
+        self.assertEqual(
+            orchestrator.inspect_pi_package_state(self.home).status,
+            "exact",
+        )
+        self.assertFalse(
+            (self.home / ".subagents_configs/pi-package-receipt.json").exists()
+        )
+        self.assertEqual(injector.external_phases, ["package-install"])
+
+    def test_concurrent_same_home_install_has_one_effective_package_entry(self) -> None:
+        from subagents_configs import locks, orchestrator, planning
+
+        self._write_fake_pi()
+        lock_anchor = self.home / ".subagents_configs.lock"
+        lock_anchor.write_bytes(b"")
+        lock_anchor.chmod(0o600)
+        acquired: list[tuple[Target, ...]] = []
+        real_lock = locks.locked_target_homes
+        request = self._request()
+
+        @contextmanager
+        def recording_lock(homes, targets):
+            acquired.append(tuple(targets))
+            with real_lock(homes, targets):
+                yield
+
+        def run_one() -> int:
+            stderr = StringIO()
+            status = orchestrator._run_mutating_locked(
+                request,
+                repo_root=self.repository,
+                stdout=StringIO(),
+                stderr=stderr,
+                failure_injector=None,
+            )
+            return status
+
+        with (
+            patch.object(orchestrator, "locked_target_homes", recording_lock),
+            patch.object(
+                orchestrator, "validate_request_compatibility", return_value=()
+            ),
+            patch.object(planning, "validate_request_compatibility", return_value=()),
+            patch.object(orchestrator, "verify_pi_effective_postcondition"),
+            patch.dict(
+                os.environ,
+                {
+                    "HOME": str(self.root / "caller-home"),
+                    "HTTP_PROXY": "https://secret.invalid",
+                    "HTTPS_PROXY": "https://secret.invalid",
+                    "NPM_TOKEN": "secret-token",
+                },
+            ),
+            ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            statuses = tuple(pool.map(lambda _index: run_one(), range(2)))
+        self.assertEqual(statuses, (orchestrator.EXIT_SUCCESS,) * 2)
+        self.assertEqual(acquired, [(Target.PI,), (Target.PI,)])
+        settings = json.loads((self.home / "settings.json").read_text(encoding="utf-8"))
+        self.assertEqual(settings["packages"], ["npm:pi-subagents@0.56.0"])
+        calls = [
+            json.loads(line)
+            for line in self.fake_log.read_text(encoding="utf-8").splitlines()
+        ]
+        for call in calls:
+            self.assertNotIn("HOME", call["env"])
+            self.assertNotIn("HTTP_PROXY", call["env"])
+            self.assertNotIn("HTTPS_PROXY", call["env"])
+            self.assertNotIn("NPM_TOKEN", call["env"])
+            self.assertNotEqual(
+                Path(call["env"]["NPM_CONFIG_USERCONFIG"]).parent,
+                self.root,
+            )
+        self.assertEqual(
+            sum(
+                item["argv"] == ["install", "npm:pi-subagents@0.56.0"] for item in calls
+            ),
+            1,
+        )
 
     def test_project_root_must_be_explicit_absolute_real_directory(self) -> None:
         from subagents_configs.planning import preflight_install
@@ -345,10 +833,11 @@ class PiIntegrationRedTests(unittest.TestCase):
     ) -> None:
         """An optional external failure cannot recreate local files or erase proof."""
 
-        from subagents_configs import orchestrator
+        from subagents_configs import orchestrator, pi_package
         from subagents_configs.planning import preflight_install, preflight_uninstall
 
         self._write_exact_package()
+        self._write_fake_pi()
         install_request = self._request(
             consent_third_party_code=False,
             consent_network=False,
@@ -364,6 +853,15 @@ class PiIntegrationRedTests(unittest.TestCase):
         self._write_valid_receipt()
         role = self.home / "agents/code-explorer.md"
         self.assertTrue(role.exists())
+        package_paths = (
+            self.home / "npm/node_modules/pi-subagents/package.json",
+            self.home / "npm/package-lock.json",
+            self.home / "settings.json",
+        )
+        receipt_path = self.home / ".subagents_configs/pi-package-receipt.json"
+        preserved_package_state = tuple(path.read_bytes() for path in package_paths)
+        preserved_receipt = receipt_path.read_bytes()
+        managed_roles = tuple(sorted(self.home.glob("agents/*.md")))
         uninstall_request = self._request(
             operation="uninstall",
             remove_pi_package=True,
@@ -376,16 +874,22 @@ class PiIntegrationRedTests(unittest.TestCase):
         ):
             uninstall_plan = preflight_uninstall(self.repository, uninstall_request)
         stderr = StringIO()
+        injector = _PiFailureInjector("package-remove")
+        real_run_command = pi_package._run_command
+
+        def fail_remove_command(
+            argv: tuple[str, ...], *args: object, **kwargs: object
+        ) -> None:
+            if argv[1:] == ("remove", "npm:pi-subagents"):
+                injector.before_external("package-remove")
+            real_run_command(argv, *args, **kwargs)
+
         with (
             patch.object(
                 orchestrator, "validate_request_compatibility", return_value=()
             ),
             patch.object(orchestrator, "_plan", return_value=uninstall_plan),
-            patch.object(
-                orchestrator,
-                "remove_pi_package",
-                side_effect=RuntimeError("simulated Pi removal failure"),
-            ),
+            patch.object(pi_package, "_run_command", side_effect=fail_remove_command),
         ):
             status = orchestrator._run_mutating_locked(
                 uninstall_request,
@@ -396,9 +900,14 @@ class PiIntegrationRedTests(unittest.TestCase):
             )
         self.assertEqual(status, orchestrator.EXIT_APPLY_ERROR)
         self.assertFalse(role.exists())
-        self.assertTrue(
-            (self.home / ".subagents_configs/pi-package-receipt.json").exists()
+        self.assertEqual(
+            tuple(path.read_bytes() for path in package_paths),
+            preserved_package_state,
         )
+        self.assertEqual(receipt_path.read_bytes(), preserved_receipt)
+        self.assertTrue(receipt_path.exists())
+        self.assertTrue(all(not path.exists() for path in managed_roles))
+        self.assertEqual(injector.external_phases, ["package-remove"])
         self.assertIn("PI_PACKAGE_PHASE_FAILED", stderr.getvalue())
         self.assertIsNotNone(uninstall_plan.external.removal_receipt)
 

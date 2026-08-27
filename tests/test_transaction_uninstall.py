@@ -13,6 +13,7 @@ from subagents_configs.state import load_journal, load_manifest
 from subagents_configs.targets import descriptor_for
 from subagents_configs.transaction import (
     IncompleteRollbackError,
+    TransactionError,
     apply_transaction,
 )
 from tests.helpers import planning_repository, planning_request
@@ -85,6 +86,19 @@ class UninstallTests(unittest.TestCase):
         self.assertFalse((home / ".subagents_configs/manifest.json").exists())
         self.assertTrue((home / ".subagents_configs").is_dir())
         self.assertTrue((home / ".subagents_configs/backups").is_dir())
+
+    def test_uninstall_failure_injector_preserves_the_installed_tree(self):
+        home = self._install()
+        before = self._snapshot_tree(home)
+        plan = self._uninstall_plan(home)
+
+        class FailBeforeUninstall:
+            def before_operation(self, _operation_id):
+                raise RuntimeError("injected uninstall failure")
+
+        with self.assertRaises((RuntimeError, TransactionError)):
+            apply_transaction(plan, failure_injector=FailBeforeUninstall())
+        self.assertEqual(self._snapshot_tree(home), before)
 
     def test_replaced_file_is_restored_with_original_bytes_and_mode(self):
         home = self._home()
