@@ -59,6 +59,103 @@ class CatalogTests(unittest.TestCase):
             actual.add(parsed["name"])
         self.assertEqual(actual, ROLES)
 
+    def test_pi_catalog_has_exact_repository_inventory_and_extension_source(self):
+        from subagents_configs import formats
+        from subagents_configs.targets import descriptor_for, selected_sources
+
+        descriptor = descriptor_for(Target.PI)
+        sources = selected_sources(descriptor, include_commit_pusher=True)
+        default_sources = selected_sources(descriptor, include_commit_pusher=False)
+        self.assertEqual(
+            tuple(
+                source.identifier
+                for source in default_sources
+                if source.kind == "agent"
+            ),
+            (
+                "code-explorer",
+                "code-reviewer",
+                "code-validator",
+                "quick-implementer",
+                "implementer",
+            ),
+        )
+        self.assertNotIn(
+            "commit-pusher",
+            [source.identifier for source in default_sources],
+        )
+        agent_sources = tuple(source for source in sources if source.kind == "agent")
+        self.assertEqual(
+            tuple(source.identifier for source in agent_sources),
+            (
+                "code-explorer",
+                "code-reviewer",
+                "code-validator",
+                "quick-implementer",
+                "implementer",
+                "commit-pusher",
+            ),
+        )
+        self.assertEqual(
+            tuple(source.source for source in agent_sources),
+            tuple(
+                PurePosixPath("pi/agents") / f"{role}.md"
+                for role in (
+                    "code-explorer",
+                    "code-reviewer",
+                    "code-validator",
+                    "quick-implementer",
+                    "implementer",
+                    "commit-pusher",
+                )
+            ),
+        )
+        self.assertTrue(
+            all(source.source_format == "markdown" for source in agent_sources)
+        )
+        extension_sources = tuple(
+            source for source in sources if source.kind == "target-extension"
+        )
+        self.assertEqual(len(extension_sources), 1)
+        extension = extension_sources[0]
+        self.assertEqual(
+            extension.source, PurePosixPath("pi/extensions/run-validation.ts")
+        )
+        self.assertEqual(
+            extension.destination,
+            PurePosixPath("extensions/subagents-configs-run-validation.ts"),
+        )
+        self.assertEqual(extension.source_format, "typescript")
+        routing_sources = tuple(
+            source for source in sources if source.kind == "routing-source"
+        )
+        self.assertEqual(len(routing_sources), 1)
+        self.assertEqual(
+            routing_sources[0].source,
+            PurePosixPath("rules/PI_SUBAGENT_ROUTING.md"),
+        )
+        self.assertEqual(routing_sources[0].source_format, "markdown")
+
+        validated = formats.validate_source_inventory(
+            ROOT,
+            Target.PI,
+            sources,
+            require_commit_pusher=True,
+        )
+        self.assertEqual(
+            {item.spec.identifier for item in validated},
+            {
+                "code-explorer",
+                "code-reviewer",
+                "code-validator",
+                "quick-implementer",
+                "implementer",
+                "commit-pusher",
+                extension.identifier,
+                "routing",
+            },
+        )
+
     def test_opencode_catalog_parses_and_has_exact_inventory(self):
         actual = set()
         for path in sorted((ROOT / "opencode" / "agents").glob("*.md")):

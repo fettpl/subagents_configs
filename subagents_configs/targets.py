@@ -32,6 +32,8 @@ _CLAUDE_HOOK_SOURCE = "claude-code/hooks/code-validator-pretooluse.py"
 _CLAUDE_HOOK_DESTINATION = (
     ".subagents_configs/claude-hooks/code-validator-pretooluse.py"
 )
+_PI_EXTENSION_SOURCE = "pi/extensions/run-validation.ts"
+_PI_EXTENSION_DESTINATION = "extensions/subagents-configs-run-validation.ts"
 _COMPATIBILITY_BASE_FEATURES = frozenset(
     {"agents", "managed-blocks", "validation-runtime"}
 )
@@ -73,7 +75,25 @@ def _runtime_sources() -> list[SourceSpec]:
 
 def _capability_sources(capability: TargetCapability) -> tuple[SourceSpec, ...]:
     if capability.target is Target.PI:
-        return ()
+        return tuple(
+            [
+                *_agent_sources("pi/agents", ".md", "markdown"),
+                SourceSpec(
+                    identifier="pi/run-validation",
+                    source=PurePosixPath(_PI_EXTENSION_SOURCE),
+                    destination=PurePosixPath(_PI_EXTENSION_DESTINATION),
+                    kind="target-extension",
+                    source_format="typescript",
+                ),
+                SourceSpec(
+                    identifier="routing",
+                    source=capability.global_instruction.source,
+                    destination=None,
+                    kind="routing-source",
+                    source_format="markdown",
+                ),
+            ]
+        )
     sources = [
         *_agent_sources(
             capability.agent_directory.as_posix(),

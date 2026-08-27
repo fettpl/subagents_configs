@@ -1,6 +1,7 @@
 import unittest
+from pathlib import PurePosixPath
 
-from subagents_configs.models import Target
+from subagents_configs.models import SourceSpec, Target
 from subagents_configs.targets import (
     CAPABILITIES,
     DESCRIPTORS,
@@ -24,10 +25,73 @@ class TargetTests(unittest.TestCase):
         )
         self.assertEqual(targets_for_request((Target.PI,), False), (Target.PI,))
 
-    def test_pi_descriptor_is_registered_without_later_task_sources(self):
+    def test_pi_descriptor_includes_task3_catalog_and_extension_sources(self):
         descriptor = descriptor_for(Target.PI)
         self.assertEqual(descriptor.target, Target.PI)
-        self.assertEqual(descriptor.sources, ())
+        self.assertEqual(
+            descriptor.sources,
+            (
+                SourceSpec(
+                    identifier="code-explorer",
+                    source=PurePosixPath("pi/agents/code-explorer.md"),
+                    destination=PurePosixPath("agents/code-explorer.md"),
+                    kind="agent",
+                    source_format="markdown",
+                ),
+                SourceSpec(
+                    identifier="code-reviewer",
+                    source=PurePosixPath("pi/agents/code-reviewer.md"),
+                    destination=PurePosixPath("agents/code-reviewer.md"),
+                    kind="agent",
+                    source_format="markdown",
+                ),
+                SourceSpec(
+                    identifier="code-validator",
+                    source=PurePosixPath("pi/agents/code-validator.md"),
+                    destination=PurePosixPath("agents/code-validator.md"),
+                    kind="agent",
+                    source_format="markdown",
+                ),
+                SourceSpec(
+                    identifier="quick-implementer",
+                    source=PurePosixPath("pi/agents/quick-implementer.md"),
+                    destination=PurePosixPath("agents/quick-implementer.md"),
+                    kind="agent",
+                    source_format="markdown",
+                ),
+                SourceSpec(
+                    identifier="implementer",
+                    source=PurePosixPath("pi/agents/implementer.md"),
+                    destination=PurePosixPath("agents/implementer.md"),
+                    kind="agent",
+                    source_format="markdown",
+                ),
+                SourceSpec(
+                    identifier="commit-pusher",
+                    source=PurePosixPath("pi/agents/commit-pusher.md"),
+                    destination=PurePosixPath("agents/commit-pusher.md"),
+                    kind="agent",
+                    source_format="markdown",
+                    optional_role="commit-pusher",
+                ),
+                SourceSpec(
+                    identifier="pi/run-validation",
+                    source=PurePosixPath("pi/extensions/run-validation.ts"),
+                    destination=PurePosixPath(
+                        "extensions/subagents-configs-run-validation.ts"
+                    ),
+                    kind="target-extension",
+                    source_format="typescript",
+                ),
+                SourceSpec(
+                    identifier="routing",
+                    source=PurePosixPath("rules/PI_SUBAGENT_ROUTING.md"),
+                    destination=None,
+                    kind="routing-source",
+                    source_format="markdown",
+                ),
+            ),
+        )
         self.assertEqual(descriptor.environment_variable, "PI_CODING_AGENT_DIR")
         self.assertEqual(descriptor.global_filename, "APPEND_SYSTEM.md")
         capability = next(item for item in CAPABILITIES if item.target is Target.PI)
@@ -37,23 +101,17 @@ class TargetTests(unittest.TestCase):
 
     def test_each_inventory_is_nonempty_and_unique(self):
         for descriptor in DESCRIPTORS.values():
-            if descriptor.target is Target.PI:
-                continue
             self.assertTrue(descriptor.sources)
             identifiers = [source.identifier for source in descriptor.sources]
             self.assertEqual(len(identifiers), len(set(identifiers)))
 
     def test_commit_pusher_is_excluded_by_default(self):
         for descriptor in DESCRIPTORS.values():
-            if descriptor.target is Target.PI:
-                continue
             sources = selected_sources(descriptor, include_commit_pusher=False)
             self.assertNotIn("commit-pusher", [s.optional_role for s in sources])
 
     def test_commit_pusher_is_selected_explicitly(self):
         for descriptor in DESCRIPTORS.values():
-            if descriptor.target is Target.PI:
-                continue
             sources = selected_sources(descriptor, include_commit_pusher=True)
             self.assertIn("commit-pusher", [s.optional_role for s in sources])
 
