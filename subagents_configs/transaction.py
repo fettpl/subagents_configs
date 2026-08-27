@@ -873,6 +873,7 @@ def _identifier_relative(descriptor, identifier: str) -> str | None:
         "routing-codex": descriptor.global_filename,
         "routing-opencode": descriptor.global_filename,
         "routing-claude-code": descriptor.global_filename,
+        "routing-pi": descriptor.global_filename,
         "codex-multi-agent-v2": descriptor.config_filename,
     }.get(identifier)
 

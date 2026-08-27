@@ -66,9 +66,13 @@ _ROLLBACK_STATUSES = {
 
 
 def _managed_blocks(descriptor: TargetDescriptor) -> frozenset[str]:
-    return frozenset(
-        item.block_id for item in capability_for(descriptor.target).optional_blocks
-    )
+    capability = capability_for(descriptor.target)
+    identifiers = {item.block_id for item in capability.optional_blocks}
+    # Pi exposes its routing block through ``global_instruction`` rather than
+    # ``optional_blocks``.  It is still a manifest-owned managed block when
+    # explicitly enabled, so the state schema must validate and round-trip it.
+    identifiers.add(capability.global_instruction.block_id)
+    return frozenset(identifiers)
 
 
 _MANIFEST_KEYS = {"schema_version", "target", "entries"}
