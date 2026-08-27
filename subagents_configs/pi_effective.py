@@ -115,19 +115,75 @@ def _conflict(
 
 
 def _json(path: Path, label: str) -> object:
+    data = _regular_bytes(path, label, missing_ok=True)
+    if data is None:
+        return None
+    try:
+        return json.loads(
+            data.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_constant
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"{label} is invalid") from exc
+
+
+def _regular_bytes(
+    path: Path, label: str, *, root: Path | None = None, missing_ok: bool = False
+) -> bytes | None:
+    """Read a regular file after proving every existing parent is safe."""
+    if not isinstance(path, Path) or not path.is_absolute():
+        raise ValueError(f"{label} path is unsafe")
+    if normalized_absolute(path) != path:
+        raise ValueError(f"{label} path is not canonical")
+    if root is not None and not _under(path, root):
+        raise ValueError(f"{label} escapes its root")
+    current = Path(path.anchor)
+    for component in path.parts[1:-1]:
+        current /= component
+        try:
+            parent = os.lstat(current)
+        except FileNotFoundError as exc:
+            if missing_ok:
+                return None
+            raise ValueError(f"{label} parent is missing") from exc
+        except OSError as exc:
+            raise ValueError(f"{label} parent cannot be inspected") from exc
+        if stat.S_ISLNK(parent.st_mode):
+            if current == Path("/var") and os.path.realpath(current) == "/private/var":
+                continue
+            raise ValueError(f"{label} parent contains a symlink")
+        if not stat.S_ISDIR(parent.st_mode):
+            raise ValueError(f"{label} parent is not a directory")
     try:
         item = os.lstat(path)
-    except FileNotFoundError:
-        return None
+    except FileNotFoundError as exc:
+        if missing_ok:
+            return None
+        raise ValueError(f"{label} is missing") from exc
     except OSError as exc:
         raise ValueError(f"{label} cannot be inspected") from exc
     if stat.S_ISLNK(item.st_mode) or not stat.S_ISREG(item.st_mode):
         raise ValueError(f"{label} is not a regular file")
     try:
-        text = path.read_text(encoding="utf-8")
-        return json.loads(text, object_pairs_hook=_pairs, parse_constant=_constant)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise ValueError(f"{label} is invalid") from exc
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_dev != item.st_dev
+                or opened.st_ino != item.st_ino
+            ):
+                raise ValueError(f"{label} identity changed")
+            chunks: list[bytes] = []
+            while chunk := os.read(descriptor, 1024 * 1024):
+                chunks.append(chunk)
+            return b"".join(chunks)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise ValueError(f"{label} cannot be read") from exc
 
 
 def _pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -218,6 +274,28 @@ def _named_files(root: Path, name: str) -> list[Path]:
     except OSError as exc:
         raise ValueError("Pi discovery directory cannot be inspected") from exc
     return result
+
+
+def _named_directory_present(root: Path, name: str) -> bool:
+    """Return whether a conventional discovery directory exists safely."""
+    directory = root / name
+    try:
+        item = os.lstat(directory)
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(item.st_mode) or not stat.S_ISDIR(item.st_mode):
+        raise ValueError("Pi discovery directory is unsafe")
+    return True
+
+
+def _authoritative_bytes(role: str, agent: Path) -> bytes:
+    source = _REPOSITORY_ROOT / "pi/agents" / f"{role}.md"
+    source_bytes = _regular_bytes(source, "Pi source")
+    if source_bytes is None:  # pragma: no cover - an existing repo is required
+        raise ValueError("Pi source is missing")
+    if role == "code-validator":
+        return render_pi_source(source_bytes, agent_dir=agent)
+    return source_bytes
 
 
 def _settings_conflicts(settings: object, conflicts: list[PiConflict]) -> None:
@@ -544,54 +622,89 @@ def inspect_effective_catalog(
         for path in _named_files(agent, "agents"):
             role = managed_paths.get(path.relative_to(agent).as_posix())
             if role is not None:
-                conflicts.append(
-                    _conflict(
-                        "path-collision",
-                        role,
-                        "pi-agent",
-                        "destination",
-                        observed="present",
-                    )
+                item = os.lstat(path)
+                exact = (
+                    item.st_uid == os.getuid()
+                    and item.st_nlink == 1
+                    and stat.S_IMODE(item.st_mode) == 0o600
+                    and _regular_bytes(path, "Pi managed agent", root=agent)
+                    == _authoritative_bytes(role, agent)
                 )
+                if not exact:
+                    conflicts.append(
+                        _conflict(
+                            "path-collision",
+                            role,
+                            "pi-agent",
+                            "destination",
+                            observed="present",
+                        )
+                    )
     except ValueError:
         conflicts.append(
             _conflict("discovery", None, "pi-agent", "inventory", observed="invalid")
         )
 
-    # Project resources are only considered within the explicit root and the
-    # selected Pi home is excluded, preventing accidental ambient-home reads.
+    # Project resources are only considered within the explicit root and its
+    # Pi project scope.  The selected Pi home is excluded, preventing
+    # accidental ambient-home reads.  lstat is used for the optional .pi
+    # directory so a symlink cannot redirect discovery outside project_root.
     try:
-        project_settings = project / "settings.json"
-        if project_settings.exists() and not _under(project_settings, agent):
-            conflicts.append(
-                _conflict(
-                    "ambient-extension",
-                    None,
-                    "pi-project",
-                    "projectSettings",
-                    observed="configured",
+        scopes = [project]
+        pi_scope = project / ".pi"
+        try:
+            pi_info = os.lstat(pi_scope)
+        except FileNotFoundError:
+            pi_info = None
+        if pi_info is not None:
+            if stat.S_ISLNK(pi_info.st_mode) or not stat.S_ISDIR(pi_info.st_mode):
+                raise ValueError("Pi project scope is unsafe")
+            scopes.append(pi_scope)
+        for scope in scopes:
+            project_settings = scope / "settings.json"
+            try:
+                settings_info = os.lstat(project_settings)
+            except FileNotFoundError:
+                settings_info = None
+            if settings_info is not None and (
+                stat.S_ISLNK(settings_info.st_mode)
+                or not stat.S_ISREG(settings_info.st_mode)
+            ):
+                raise ValueError("Pi project settings is unsafe")
+            if settings_info is not None and not _under(project_settings, agent):
+                conflicts.append(
+                    _conflict(
+                        "ambient-extension",
+                        None,
+                        "pi-project",
+                        "projectSettings",
+                        observed="configured",
+                    )
                 )
-            )
-        if _named_files(project, "agents"):
-            conflicts.append(
-                _conflict(
-                    "ambient-extension",
-                    None,
-                    "pi-project",
-                    "projectAgents",
-                    observed="configured",
+            agents_present = _named_directory_present(scope, "agents")
+            _named_files(scope, "agents")
+            if agents_present and not _under(scope / "agents", agent):
+                conflicts.append(
+                    _conflict(
+                        "ambient-extension",
+                        None,
+                        "pi-project",
+                        "projectAgents",
+                        observed="configured",
+                    )
                 )
-            )
-        if _named_files(project, "extensions"):
-            conflicts.append(
-                _conflict(
-                    "ambient-extension",
-                    None,
-                    "pi-project",
-                    "projectExtensions",
-                    observed="configured",
+            extensions_present = _named_directory_present(scope, "extensions")
+            _named_files(scope, "extensions")
+            if extensions_present and not _under(scope / "extensions", agent):
+                conflicts.append(
+                    _conflict(
+                        "ambient-extension",
+                        None,
+                        "pi-project",
+                        "projectExtensions",
+                        observed="configured",
+                    )
                 )
-            )
     except ValueError:
         conflicts.append(
             _conflict("discovery", None, "pi-project", "inventory", observed="invalid")
@@ -649,20 +762,33 @@ def inspect_effective_catalog(
         conflicts.append(
             _conflict("package-drift", None, "pi-package", "policy", observed="invalid")
         )
+    if package.status == "exact" and package.package_manifest_path is None:
+        conflicts.append(
+            _conflict(
+                "package-drift", None, "pi-package", "manifest", observed="missing"
+            )
+        )
     if package.package_manifest_path is not None:
         try:
             if not _under(package.package_manifest_path, agent):
                 raise ValueError("manifest escapes Pi home")
             manifest = _json(package.package_manifest_path, "Pi package manifest")
+            names: object = []
             if isinstance(manifest, Mapping):
                 names = manifest.get("agents", manifest.get("bundledAgents", []))
                 file_names = manifest.get("files", [])
                 if isinstance(file_names, list):
                     names = list(names) if isinstance(names, list) else []
                     names.extend(
-                        item.removeprefix("agents/").removesuffix(".md")
+                        candidate
                         for item in file_names
-                        if isinstance(item, str) and item.startswith("agents/")
+                        if isinstance(item, str)
+                        and item.startswith("agents/")
+                        and (
+                            candidate := item.removeprefix("agents/").removesuffix(
+                                ".md"
+                            )
+                        )
                     )
                 if isinstance(names, list) and any(name in _MANAGED for name in names):
                     conflicts.append(
@@ -674,10 +800,25 @@ def inspect_effective_catalog(
                             observed="managed",
                         )
                     )
-                if package.manifest_hash != (
+                policy_hash = (
                     policy.get("packageJsonSha256")
                     if isinstance(policy, Mapping)
                     else None
+                )
+                manifest_bytes = _regular_bytes(
+                    package.package_manifest_path,
+                    "Pi package manifest",
+                    root=agent,
+                )
+                manifest_hash = (
+                    hashlib.sha256(manifest_bytes).hexdigest()
+                    if manifest_bytes is not None
+                    else None
+                )
+                if (
+                    package.manifest_hash != policy_hash
+                    or manifest_hash != policy_hash
+                    or package.manifest_hash != manifest_hash
                 ):
                     conflicts.append(
                         _conflict(
@@ -698,18 +839,30 @@ def inspect_effective_catalog(
                         observed="missing",
                     )
                 )
-                if isinstance(names, list) and any(
-                    name not in bundled for name in names
-                ):
-                    conflicts.append(
-                        _conflict(
-                            "discovery",
-                            None,
-                            "pi-package",
-                            "agents",
-                            observed="unreviewed",
-                        )
+            else:
+                conflicts.append(
+                    _conflict(
+                        "package-drift",
+                        None,
+                        "pi-package",
+                        "manifest",
+                        observed="invalid",
                     )
+                )
+            if (
+                isinstance(manifest, Mapping)
+                and isinstance(names, list)
+                and any(name not in bundled for name in names)
+            ):
+                conflicts.append(
+                    _conflict(
+                        "discovery",
+                        None,
+                        "pi-package",
+                        "agents",
+                        observed="unreviewed",
+                    )
+                )
         except ValueError:
             conflicts.append(
                 _conflict(

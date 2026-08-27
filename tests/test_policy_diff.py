@@ -792,6 +792,55 @@ class PolicyDiffTests(unittest.TestCase):
                 self.assertTrue(loaded.roles)
                 self.assertEqual(len(loaded.roles), len(loaded.destinations))
 
+    def test_pi_catalog_and_explicit_revision_directory_are_supported(self):
+        from subagents_configs.catalog_policy import load_catalog
+
+        catalog = load_catalog(Path(__file__).resolve().parents[1] / "catalogs/pi.json")
+        self.assertIs(catalog.target, Target.PI)
+        self.assertTrue(catalog.source_authorities)
+        self.assertEqual(
+            catalog.source_authorities["pi/package-policy"],
+            frozenset({AuthorityCapability.PACKAGE}),
+        )
+        self.assertEqual(
+            catalog.source_authorities["pi/run-validation"],
+            frozenset({AuthorityCapability.EXTENSION}),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            revision = Path(directory)
+            (revision / "pi.json").write_bytes(
+                (Path(__file__).resolve().parents[1] / "catalogs/pi.json").read_bytes()
+            )
+            loaded = load_revision(revision)
+            self.assertEqual(tuple(item.target for item in loaded), (Target.PI,))
+
+    def test_pi_package_authority_addition_is_reported_as_broadening(self):
+        payload = self._generated_payload("pi")
+        before = self._load_mutated_generated(payload)
+        mutated = json.loads(json.dumps(payload))
+        route = next(
+            item for item in mutated["sources"] if item["kind"] == "routing-source"
+        )
+        route["kind"] = "package-policy"
+        mutated["source_sha256"] = hashlib.sha256(
+            json.dumps(
+                mutated["sources"],
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode()
+        ).hexdigest()
+        self._refresh_catalog_hash(mutated)
+        after = self._load_mutated_generated(mutated)
+        changes = compare_catalogs(before, after).changes
+        authority = [
+            item
+            for item in changes
+            if item.kind == "authority" and item.role == route["identifier"]
+        ]
+        self.assertTrue(authority)
+        self.assertTrue(all(item.authority_broadening for item in authority))
+
     def test_policy_diff_rejects_duplicate_or_abbreviated_options_before_reads(self):
         missing = Path("/this/path/must/not/be/read")
         for argv in (

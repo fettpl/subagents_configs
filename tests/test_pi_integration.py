@@ -241,6 +241,26 @@ class PiIntegrationRedTests(unittest.TestCase):
         self.assertFalse(plan.external.consent_third_party_code)
         self.assertFalse(plan.external.consent_network)
 
+    def test_exact_package_none_phase_has_complete_rendered_contracts(self) -> None:
+        from subagents_configs import orchestrator
+
+        self._write_exact_package()
+        plan = self._preflight()
+        rendered = orchestrator._rendered_pi_contracts(plan.local)
+        self.assertEqual(
+            set(rendered),
+            {
+                "code-explorer",
+                "code-reviewer",
+                "code-validator",
+                "quick-implementer",
+                "implementer",
+            },
+        )
+        orchestrator.verify_pi_effective_postcondition(
+            plan.external, plan.local, plan.external.before
+        )
+
     def test_exact_package_with_invalid_receipt_fails_closed_in_planning(self) -> None:
         self._write_exact_package()
         state = self.home / ".subagents_configs"

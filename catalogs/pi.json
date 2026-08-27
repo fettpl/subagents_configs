@@ -1,6 +1,6 @@
 {
   "agent_directory": "pi/agents",
-  "catalog_sha256": "f6beb139eeaa77406fdf5997588b500ccb32de6e6a138db8ce1d41a62d79b57c",
+  "catalog_sha256": "8291b0ae467dbfcf594a8f98c68c9d0bab8432728c8778038a113d58ca03d974",
   "external_lifecycle": null,
   "global_instruction": {
     "block_id": "routing-pi",
@@ -140,7 +140,7 @@
   "schema_version": 1,
   "semantic_validator": "agent",
   "source_format": "markdown",
-  "source_sha256": "e12373a0deb6f7cf4f20fe3a6edd4f74806d62a4d90cf373c10b2347d13c8a7b",
+  "source_sha256": "dc3e6d318c1523223d70a2e4c46fabfab29008095c54372dd040c7a485ebdfd9",
   "sources": [
     {
       "destination": "agents/code-explorer.md",
@@ -213,6 +213,15 @@
       "sha256": "a194d20df8230391d3e78acd47ce53f94b561df13a568026bbd5cb53ac9e3238",
       "source": "rules/PI_SUBAGENT_ROUTING.md",
       "source_format": "markdown"
+    },
+    {
+      "destination": "extensions/subagents-configs-run-validation.ts",
+      "identifier": "pi/run-validation",
+      "kind": "target-extension",
+      "optional_role": null,
+      "sha256": "527bdcd7fcec1ba8e4037e4f4a4d892e93202323a82cc4f0469da1b41fbf867f",
+      "source": "pi/extensions/run-validation.ts",
+      "source_format": "typescript"
     }
   ],
   "target": "pi"

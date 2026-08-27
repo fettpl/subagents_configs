@@ -39,7 +39,14 @@ def _native_specs(target: Target):
     return tuple(
         spec
         for spec in selected_sources(descriptor_for(target), include_commit_pusher=True)
-        if spec.kind in {"agent", "routing-source", "project-template", "command-gate"}
+        if spec.kind
+        in {
+            "agent",
+            "routing-source",
+            "project-template",
+            "command-gate",
+            "target-extension",
+        }
     )
 
 

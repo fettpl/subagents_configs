@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from subagents_configs.pi_catalog import PI_DEFAULT_ROLES, validate_pi_agent
@@ -127,6 +128,116 @@ class EffectiveCatalogTests(unittest.TestCase):
                     _package(agent_dir),
                     project_root=root / "missing",
                 )
+
+    def test_exact_repository_managed_files_are_not_collisions(self):
+        from subagents_configs.pi_catalog import render_pi_source
+        from subagents_configs.pi_effective import inspect_effective_catalog
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agent_dir = root / "agent"
+            (agent_dir / "agents").mkdir(mode=0o700, parents=True)
+            for role in PI_DEFAULT_ROLES:
+                source = (ROOT / "pi/agents" / f"{role}.md").read_bytes()
+                if role == "code-validator":
+                    source = render_pi_source(source, agent_dir=agent_dir)
+                destination = agent_dir / "agents" / f"{role}.md"
+                destination.write_bytes(source)
+                destination.chmod(0o600)
+            result = inspect_effective_catalog(
+                agent_dir, _rendered(agent_dir), _package(agent_dir), project_root=root
+            )
+            self.assertFalse(
+                any(item.kind == "path-collision" for item in result.conflicts)
+            )
+
+    def test_pi_project_scope_is_discovered_without_cwd_fallback(self):
+        from subagents_configs.pi_effective import inspect_effective_catalog
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agent_dir = root / "agent"
+            agent_dir.mkdir(mode=0o700)
+            project = root / ".pi"
+            (project / "agents").mkdir(mode=0o700, parents=True)
+            (project / "extensions").mkdir(mode=0o700)
+            (project / "settings.json").write_text("{}", encoding="utf-8")
+            result = inspect_effective_catalog(
+                agent_dir, _rendered(agent_dir), _package(agent_dir), project_root=root
+            )
+            fields = {item.field for item in result.conflicts}
+            self.assertTrue(
+                {"projectSettings", "projectAgents", "projectExtensions"} <= fields
+            )
+
+    def test_manifest_bytes_are_bound_to_supplied_hash_and_parent_is_no_follow(self):
+        from subagents_configs.pi_effective import inspect_effective_catalog
+        from subagents_configs.pi_package import load_pi_package_policy
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agent_dir = root / "agent"
+            (agent_dir / "extensions").mkdir(mode=0o700, parents=True)
+            manifest = agent_dir / "npm/node_modules/pi-subagents/package.json"
+            manifest.parent.mkdir(mode=0o700, parents=True)
+            manifest.write_bytes(
+                (ROOT / "tests/fixtures/pi-subagents-0.56.0-package.json").read_bytes()
+                + b"\n"
+            )
+            manifest.chmod(0o600)
+            package = PiPackageEvidence(
+                agent_dir / "settings.json",
+                None,
+                ("npm:pi-subagents@0.56.0",),
+                "exact",
+                True,
+                None,
+                None,
+                manifest,
+                load_pi_package_policy()["packageJsonSha256"],
+                True,
+            )
+            rendered = _rendered(agent_dir)
+            result = inspect_effective_catalog(
+                agent_dir, rendered, package, project_root=root
+            )
+            self.assertTrue(any(item.field == "manifest" for item in result.conflicts))
+
+            missing_manifest = replace(
+                package,
+                package_manifest_path=agent_dir
+                / "npm/node_modules/pi-subagents/missing.json",
+            )
+            result = inspect_effective_catalog(
+                agent_dir, rendered, missing_manifest, project_root=root
+            )
+            self.assertTrue(any(item.field == "manifest" for item in result.conflicts))
+
+            outside = root / "outside"
+            outside.mkdir(mode=0o700)
+            (outside / "config.json").write_text('{"model":"secret"}', encoding="utf-8")
+            extension_link = agent_dir / "extensions"
+            extension_link.rmdir()
+            extension_link.symlink_to(outside, target_is_directory=True)
+            result = inspect_effective_catalog(
+                agent_dir, rendered, _package(agent_dir), project_root=root
+            )
+            self.assertTrue(any(item.field == "config" for item in result.conflicts))
+            self.assertNotIn("secret", repr(result.conflicts))
+
+            manifest.unlink()
+            manifest.parent.rmdir()
+            outside_manifest = outside / "package"
+            outside_manifest.mkdir(mode=0o700)
+            (outside_manifest / "package.json").write_bytes(
+                (ROOT / "tests/fixtures/pi-subagents-0.56.0-package.json").read_bytes()
+            )
+            manifest.parent.symlink_to(outside_manifest, target_is_directory=True)
+            result = inspect_effective_catalog(
+                agent_dir, rendered, package, project_root=root
+            )
+            self.assertTrue(any(item.field == "manifest" for item in result.conflicts))
+            self.assertNotIn("secret", repr(result.conflicts))
 
 
 if __name__ == "__main__":
