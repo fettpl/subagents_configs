@@ -525,10 +525,13 @@ class PiPackageContractTests(unittest.TestCase):
             root = Path(temporary)
             home = root / "agent"
             home.mkdir(mode=0o700)
-            with mock.patch(
-                "subagents_configs.pi_package._bounded_spawn",
-                side_effect=AssertionError("missing executable was spawned"),
-            ), self.assertRaises((PiPackageError, ValueError)) as raised:
+            with (
+                mock.patch(
+                    "subagents_configs.pi_package._bounded_spawn",
+                    side_effect=AssertionError("missing executable was spawned"),
+                ),
+                self.assertRaises((PiPackageError, ValueError)) as raised,
+            ):
                 validate_pi_executable(
                     root / "missing-pi", agent_dir=home, execute=True
                 )
@@ -545,10 +548,8 @@ class PiPackageContractTests(unittest.TestCase):
                 "#!/bin/sh\n"
                 'if [ "$1 $2" = "--offline --version" ]; then printf \'0.84.2\\n\'; '
                 'elif [ "$1 $2" = "--offline --help" ]; then '
-                'printf \'install remove offline\\n\'; '
-                "else : > "
-                + str(root / "package-command")
-                + "; fi\n",
+                "printf 'install remove offline\\n'; "
+                "else : > " + str(root / "package-command") + "; fi\n",
                 encoding="utf-8",
             )
             executable.chmod(0o700)

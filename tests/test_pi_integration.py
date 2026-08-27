@@ -294,9 +294,7 @@ class PiIntegrationRedTests(unittest.TestCase):
                 orchestrator, "validate_request_compatibility", return_value=()
             ),
             patch.object(orchestrator, "_plan", return_value=plan),
-            patch.object(
-                orchestrator, "install_pi_package", side_effect=fail_install
-            ),
+            patch.object(orchestrator, "install_pi_package", side_effect=fail_install),
             patch.object(
                 orchestrator,
                 "apply_transaction",
@@ -535,9 +533,7 @@ class PiIntegrationRedTests(unittest.TestCase):
         self.assertFalse(
             (self.home / ".subagents_configs/pi-package-receipt.json").exists()
         )
-        self.assertEqual(
-            injector.external_phases, ["package-install", "catalog-apply"]
-        )
+        self.assertEqual(injector.external_phases, ["package-install", "catalog-apply"])
 
     def test_receipt_failure_preserves_package_and_skips_catalog(self) -> None:
         from subagents_configs import orchestrator
@@ -664,8 +660,7 @@ class PiIntegrationRedTests(unittest.TestCase):
             )
         self.assertEqual(
             sum(
-                item["argv"] == ["install", "npm:pi-subagents@0.56.0"]
-                for item in calls
+                item["argv"] == ["install", "npm:pi-subagents@0.56.0"] for item in calls
             ),
             1,
         )
@@ -894,9 +889,7 @@ class PiIntegrationRedTests(unittest.TestCase):
                 orchestrator, "validate_request_compatibility", return_value=()
             ),
             patch.object(orchestrator, "_plan", return_value=uninstall_plan),
-            patch.object(
-                pi_package, "_run_command", side_effect=fail_remove_command
-            ),
+            patch.object(pi_package, "_run_command", side_effect=fail_remove_command),
         ):
             status = orchestrator._run_mutating_locked(
                 uninstall_request,
