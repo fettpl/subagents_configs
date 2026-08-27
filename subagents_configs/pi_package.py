@@ -97,6 +97,14 @@ _UNSAFE_CONFIG_FRAGMENTS = (
 )
 
 
+def validate_pi_version_evidence(version: str) -> str:
+    """Accept only the exact Pi version covered by the maintained policy."""
+
+    if type(version) is not str or version != _PI_VERSION:
+        raise PiPackageError("PI_RUNTIME_INCOMPATIBLE")
+    return version
+
+
 @dataclass(frozen=True)
 class PiRuntimeEvidence:
     executable: Path

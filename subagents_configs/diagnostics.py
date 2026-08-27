@@ -25,11 +25,32 @@ class DiagnosticCode(enum.StrEnum):
     MANAGED_CONFLICT = "MANAGED_CONFLICT"
     UNRESOLVED_UNINSTALL = "UNRESOLVED_UNINSTALL"
     OUTPUT_FAILED = "OUTPUT_FAILED"
+    PI_CONSENT_REQUIRED = "PI_CONSENT_REQUIRED"
+    PI_EXECUTABLE_INVALID = "PI_EXECUTABLE_INVALID"
+    PI_RUNTIME_INCOMPATIBLE = "PI_RUNTIME_INCOMPATIBLE"
+    PI_SETTINGS_INVALID = "PI_SETTINGS_INVALID"
+    PI_PACKAGE_DRIFT = "PI_PACKAGE_DRIFT"
+    PI_RECEIPT_INVALID = "PI_RECEIPT_INVALID"
+    PI_CATALOG_CONFLICT = "PI_CATALOG_CONFLICT"
+    PI_PACKAGE_PHASE_FAILED = "PI_PACKAGE_PHASE_FAILED"
+    PI_CATALOG_PHASE_FAILED = "PI_CATALOG_PHASE_FAILED"
+    PI_UNINSTALL_PRESERVED = "PI_UNINSTALL_PRESERVED"
 
 
-_TARGET_ORDER = {"codex": 0, "opencode": 1, "claude-code": 2}
+_TARGET_ORDER = {"codex": 0, "opencode": 1, "claude-code": 2, "pi": 3}
 _OPERATIONS = frozenset(("install", "uninstall"))
-_PHASES = frozenset(("cli", "recovery", "validation", "preflight", "apply", "output"))
+_PHASES = frozenset(
+    (
+        "cli",
+        "recovery",
+        "validation",
+        "preflight",
+        "package",
+        "catalog",
+        "apply",
+        "output",
+    )
+)
 _STATUSES = frozenset(
     (
         "invalid",

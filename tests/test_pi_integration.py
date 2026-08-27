@@ -699,6 +699,208 @@ class PiIntegrationRedTests(unittest.TestCase):
         self.assertEqual(events, ["package", "receipt"])
         remove_package.assert_not_called()
 
+    def test_dry_run_is_lock_free_and_describes_external_pi_phase(self) -> None:
+        from subagents_configs import orchestrator
+
+        before = self.home / "before"
+        before.write_bytes(b"unchanged")
+        stdout, stderr = StringIO(), StringIO()
+        with (
+            patch.object(
+                orchestrator, "validate_request_compatibility", return_value=()
+            ),
+            patch(
+                "subagents_configs.planning.validate_request_compatibility",
+                return_value=(),
+            ),
+            patch.object(
+                orchestrator,
+                "locked_target_homes",
+                side_effect=AssertionError("dry-run must not lock"),
+            ),
+            patch.object(
+                orchestrator,
+                "validate_pi_executable",
+                side_effect=AssertionError("dry-run must not execute Pi"),
+            ),
+            patch.object(
+                orchestrator,
+                "install_pi_package",
+                side_effect=AssertionError("dry-run must not install package"),
+            ),
+            patch.object(
+                orchestrator,
+                "store_pi_package_receipt",
+                side_effect=AssertionError("dry-run must not write receipt"),
+            ),
+        ):
+            status = orchestrator.run(
+                "install",
+                [
+                    "--target",
+                    "pi",
+                    "--dry-run",
+                    "--pi-executable",
+                    str(self.fake_pi.resolve()),
+                ],
+                repo_root=self.repository,
+                environ={"HOME": str(self.root), "PI_CODING_AGENT_DIR": str(self.home)},
+                stdout=stdout,
+                stderr=stderr,
+            )
+        self.assertEqual(status, orchestrator.EXIT_SUCCESS)
+        self.assertEqual(before.read_bytes(), b"unchanged")
+        self.assertIn("pi", stdout.getvalue())
+        self.assertIn(str(self.home), stdout.getvalue())
+        self.assertIn("npm:pi-subagents@0.56.0", stdout.getvalue())
+        for role in (
+            "code-explorer",
+            "code-reviewer",
+            "code-validator",
+            "quick-implementer",
+            "implementer",
+        ):
+            self.assertIn(role, stdout.getvalue())
+        self.assertIn("external-package-phase", stdout.getvalue())
+        self.assertIn("maintained-matrix-only", stdout.getvalue())
+        self.assertIn("third-party-code", stdout.getvalue())
+        self.assertIn("network", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_missing_pi_consent_is_a_stable_package_diagnostic(self) -> None:
+        from subagents_configs import orchestrator
+
+        stdout, stderr = StringIO(), StringIO()
+        request = self._request(
+            consent_third_party_code=False,
+            consent_network=False,
+        )
+        plan = self._preflight()
+        with (
+            patch.object(
+                orchestrator, "validate_request_compatibility", return_value=()
+            ),
+            patch(
+                "subagents_configs.planning.validate_request_compatibility",
+                return_value=(),
+            ),
+            patch.object(orchestrator, "_plan", return_value=plan),
+            patch.object(orchestrator, "apply_transaction") as apply,
+        ):
+            status = orchestrator._run_mutating_locked(
+                request,
+                repo_root=self.repository,
+                stdout=stdout,
+                stderr=stderr,
+                failure_injector=None,
+            )
+        self.assertEqual(status, orchestrator.EXIT_APPLY_ERROR)
+        self.assertIn("PI_CONSENT_REQUIRED", stderr.getvalue())
+        self.assertIn("phase=package", stderr.getvalue())
+        apply.assert_not_called()
+
+    def test_json_dry_run_labels_caller_owned_runtime_fact(self) -> None:
+        from subagents_configs import orchestrator
+
+        stdout, stderr = StringIO(), StringIO()
+        with (
+            patch.object(
+                orchestrator,
+                "validate_request_compatibility",
+                return_value=(),
+            ),
+            patch(
+                "subagents_configs.planning.validate_request_compatibility",
+                return_value=(),
+            ),
+        ):
+            status = orchestrator.run(
+                "install",
+                [
+                    "--target",
+                    "pi",
+                    "--home",
+                    f"pi={self.home}",
+                    "--dry-run",
+                    "--format",
+                    "json",
+                    "--pi-executable",
+                    str(self.fake_pi.resolve()),
+                    "--client-version",
+                    "pi=0.84.1",
+                ],
+                repo_root=self.repository,
+                environ={"HOME": str(self.root)},
+                stdout=stdout,
+                stderr=stderr,
+            )
+        self.assertEqual(status, orchestrator.EXIT_SUCCESS)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(
+            payload["external"]["runtime_version_evidence"], "caller-supplied"
+        )
+        self.assertEqual(payload["external"]["phase"], "external-package-phase")
+        self.assertEqual(payload["external"]["ownership"], "external")
+        self.assertEqual(payload["external"]["recovery"], "preserve-external-state")
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_dry_run_rejects_unmaintained_pi_version_without_execution(self) -> None:
+        from subagents_configs import orchestrator
+
+        stdout, stderr = StringIO(), StringIO()
+        with (
+            patch.object(
+                orchestrator,
+                "validate_request_compatibility",
+                return_value=(),
+            ),
+            patch.object(
+                orchestrator,
+                "validate_pi_executable",
+                side_effect=AssertionError("version rejection must be preflight-only"),
+            ),
+            patch(
+                "subagents_configs.planning.validate_request_compatibility",
+                return_value=(),
+            ),
+        ):
+            status = orchestrator.run(
+                "install",
+                [
+                    "--target",
+                    "pi",
+                    "--home",
+                    f"pi={self.home}",
+                    "--dry-run",
+                    "--pi-executable",
+                    str(self.fake_pi.resolve()),
+                    "--client-version",
+                    "pi=0.83.0",
+                ],
+                repo_root=self.repository,
+                environ={"HOME": str(self.root)},
+                stdout=stdout,
+                stderr=stderr,
+            )
+        self.assertEqual(status, orchestrator.EXIT_PREFLIGHT_ERROR)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("PI_RUNTIME_INCOMPATIBLE", stderr.getvalue())
+
+    def test_pi_context_sanitizer_drops_untrusted_identifier_and_home(self) -> None:
+        from subagents_configs.errors import sanitize_pi_context
+
+        context = sanitize_pi_context(
+            "PI_PACKAGE_DRIFT",
+            target="pi",
+            phase="package",
+            safe_identifier="API_KEY=private",
+            normalized_home="/private/user/home",
+        )
+        self.assertEqual(context["target"], "pi")
+        self.assertEqual(context["phase"], "package")
+        self.assertEqual(context["identifier"], "unknown")
+        self.assertEqual(context["home"], "home-1")
+
 
 if __name__ == "__main__":
     unittest.main()

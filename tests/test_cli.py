@@ -64,7 +64,6 @@ class CliTests(unittest.TestCase):
 
     def test_pi_install_rejects_missing_consents_or_relative_executable(self):
         for argv in (
-            ("--target", "pi", "--pi-executable", "/opt/pi"),
             ("--target", "pi", "--pi-executable", "~/pi", "--dry-run"),
             (
                 "--target",
@@ -77,6 +76,11 @@ class CliTests(unittest.TestCase):
         ):
             with self.subTest(argv=argv):
                 self.assertInvalid(list(argv))
+        request = parse_request(
+            "install", ["--target", "pi", "--pi-executable", "/opt/pi"], self.environ
+        )
+        self.assertFalse(request.consent_third_party_code)
+        self.assertFalse(request.consent_network)
 
     def test_pi_dry_run_does_not_require_or_record_consent(self):
         request = parse_request(
