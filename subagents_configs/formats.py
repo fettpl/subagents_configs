@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import os
+import re
 import stat
 import tomllib
 import unicodedata
@@ -25,6 +26,9 @@ from .targets import (
 
 _COMMAND_GATE_SHA256 = (
     "76100fdb730e9e350b861834e7b741401ea5ba1956047a520d600ec6baa8660b"
+)
+PI_VALIDATION_EXTENSION_SHA256 = (
+    "527bdcd7fcec1ba8e4037e4f4a4d892e93202323a82cc4f0469da1b41fbf867f"
 )
 
 # One normalized role contract is the sole semantic source for native overlays.
@@ -251,7 +255,7 @@ def _text_value(parsed: Mapping[str, object], key: str) -> str:
 
 
 def _require_body_concepts(path_role: str, body: str, concepts: Sequence[str]) -> None:
-    lowered = body.lower()
+    lowered = " ".join(body.lower().split())
     missing = [concept for concept in concepts if concept.lower() not in lowered]
     if missing:
         raise ValueError(
@@ -421,6 +425,76 @@ def _validate_command_gate_source(content: bytes, source: Path) -> None:
         raise ValueError("command gate source digest is not pinned")
 
 
+def _validate_pi_extension_source(content: bytes, source: Path) -> None:
+    """Require the Pi validator extension's fixed, non-shell execution shape."""
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"malformed TypeScript source: {source}") from exc
+    if any(
+        (unicodedata.category(char) in {"Cc", "Cf"} and char not in {"\n", "\t"})
+        or char in {"\u2028", "\u2029"}
+        for char in text
+    ):
+        raise ValueError(f"Pi extension contains control characters: {source}")
+    if "{{" in text or "}}" in text:
+        raise ValueError(f"Pi extension contains an unresolved placeholder: {source}")
+    if hashlib.sha256(content).hexdigest() != PI_VALIDATION_EXTENSION_SHA256:
+        raise ValueError(f"Pi extension source digest is not pinned: {source}")
+    required = (
+        "registerTool",
+        '"run_validation"',
+        "Type.Object",
+        "Type.Array(Type.String()",
+        'spawn("python3", args,',
+        "shell: false",
+        "PI_CODING_AGENT_DIR",
+        'env: { PATH: "/usr/bin:/bin", PI_CODING_AGENT_DIR: agentDir }',
+        'const args = [helperPath, "--", ...params.argv];',
+    )
+    if any(fragment not in text for fragment in required):
+        raise ValueError(
+            f"Pi extension does not match fixed execution policy: {source}"
+        )
+    if re.search(r"\b(?:npm|npx)\b", text, re.IGNORECASE):
+        raise ValueError("Pi extension must not invoke package managers")
+    if re.search(r"\b(?:eval|exec)\s*\(", text):
+        raise ValueError("Pi extension must not evaluate shell or source strings")
+    if "shell: true" in text or "process.env" in text.replace(
+        "process.env.PI_CODING_AGENT_DIR", ""
+    ):
+        raise ValueError("Pi extension has an unsafe shell or environment policy")
+    if re.search(r"(?:fetch|https?://|net\.connect|network)", text, re.IGNORECASE):
+        raise ValueError("Pi extension must not access network services")
+    if "--" not in text or text.count('spawn("python3"') != 1:
+        raise ValueError("Pi extension must have one fixed Python invocation")
+
+
+def _validate_pi_routing_source(body: str, source: Path) -> None:
+    if (
+        "{{" in body
+        or "}}" in body
+        or any(
+            (unicodedata.category(char) in {"Cc", "Cf"} and char not in {"\n", "\t"})
+            or char in {"\u2028", "\u2029"}
+            for char in body
+        )
+    ):
+        raise ValueError(f"unsafe Pi routing policy: {source}")
+    required = (
+        "bounded work",
+        "least privileged",
+        "read-only",
+        "run_validation",
+        "separate explicit",
+        "credentials",
+        "network",
+    )
+    lowered = " ".join(body.lower().split())
+    if any(fragment not in lowered for fragment in required):
+        raise ValueError(f"incomplete Pi routing policy: {source}")
+
+
 def validate_agent_semantics(
     target: Target,
     role: str,
@@ -431,6 +505,11 @@ def validate_agent_semantics(
     hook_path: str = "{{CLAUDE_HOOK}}",
 ) -> None:
     """Reject unknown roles and authority increases in native definitions."""
+    if target is Target.PI:
+        from .pi_catalog import validate_pi_contract
+
+        validate_pi_contract(role, parsed, body)
+        return
     expected_roles = set(ROLE_POLICY.get(target.value, {}))
     if role not in expected_roles:
         raise ValueError(f"unknown role: {role}")
@@ -616,7 +695,6 @@ def validate_rendered_agent(
     hook_path: str = "{{CLAUDE_HOOK}}",
 ) -> Mapping[str, object]:
     """Parse and semantically validate an agent after helper substitution."""
-    helper = validate_validation_helper(validation_helper)
     try:
         body = content.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -626,8 +704,18 @@ def validate_rendered_agent(
         parsed = validate_toml_agent(path, content)
     elif parser == "yaml-frontmatter":
         parsed = validate_yaml_agent(path, content)
+    elif parser == "markdown" and target is Target.PI:
+        # Keep the Pi parser isolated from this module's legacy client policy;
+        # importing lazily avoids an import cycle if registry code changes.
+        from .pi_catalog import validate_pi_agent
+
+        contract = validate_pi_agent(role, content, allow_rendered_extension=True)
+        if b"{{" in content or b"}}" in content:
+            raise ValueError("Pi rendered agent contains an unresolved placeholder")
+        return contract.frontmatter
     else:
         raise ValueError(f"unsupported rendered agent parser: {parser}")
+    helper = validate_validation_helper(validation_helper)
     _validate_agent_with_registry(
         target,
         role,
@@ -755,19 +843,37 @@ def validate_source_inventory(
             raise ValueError(f"empty source: {spec.source}")
         placeholder = b"{{VALIDATION_HELPER}}"
         hook_placeholder = b"{{CLAUDE_HOOK}}"
-        if (
-            placeholder in content or hook_placeholder in content
-        ) and spec.identifier != "code-validator":
+        pi_placeholder = b"{{PI_VALIDATION_EXTENSION}}"
+        restricted_placeholders = (
+            placeholder,
+            hook_placeholder,
+            pi_placeholder,
+        )
+        if pi_placeholder in content and target is not Target.PI:
+            raise ValueError("Pi extension placeholder is restricted to Target.PI")
+        if any(marker in content for marker in restricted_placeholders) and (
+            spec.kind != "agent" or spec.identifier != "code-validator"
+        ):
             raise ValueError(
                 f"agent placeholder is restricted to code-validator: {spec.source}"
             )
         if spec.kind == "agent" and spec.identifier == "code-validator":
-            if placeholder not in content:
-                raise ValueError(
-                    "code-validator source is missing validation placeholder"
-                )
-            if target is Target.CLAUDE_CODE and hook_placeholder not in content:
-                raise ValueError("Claude validator source is missing hook placeholder")
+            if target is Target.PI:
+                if pi_placeholder not in content:
+                    raise ValueError(
+                        "Pi code-validator source is missing extension placeholder"
+                    )
+                if placeholder in content or hook_placeholder in content:
+                    raise ValueError("Pi validator has a foreign placeholder")
+            else:
+                if placeholder not in content:
+                    raise ValueError(
+                        "code-validator source is missing validation placeholder"
+                    )
+                if target is Target.CLAUDE_CODE and hook_placeholder not in content:
+                    raise ValueError(
+                        "Claude validator source is missing hook placeholder"
+                    )
         parsed: Mapping[str, object] | None = None
         try:
             body = content.decode("utf-8")
@@ -783,6 +889,16 @@ def validate_source_inventory(
                 parsed = validate_toml_agent(Path(spec.source), content)
             elif parser == "yaml-frontmatter":
                 parsed = validate_yaml_agent(Path(spec.source), content)
+            elif parser == "markdown" and target is Target.PI:
+                from .pi_catalog import validate_pi_agent
+
+                contract = validate_pi_agent(spec.identifier, content)
+                parsed = contract.frontmatter
+                # Pi's source-only extension marker lives in frontmatter.  The
+                # contract revalidation below must receive the parsed body,
+                # not the complete source document, or it mistakes that
+                # intentional source marker for an unresolved body placeholder.
+                body = contract.body
             else:
                 raise ValueError(f"unsupported agent parser: {parser}")
             parsed_role = parsed.get("name")
@@ -797,6 +913,12 @@ def validate_source_inventory(
                 raise ValueError(f"invalid policy format: {spec.source}")
             if "@/absolute/path" in body:
                 raise ValueError(f"unsafe absolute import in policy: {spec.source}")
+            if target is Target.PI and spec.kind == "routing-source":
+                _validate_pi_routing_source(body, Path(spec.source))
+        elif spec.kind == "target-extension":
+            if target is not Target.PI or spec.source_format != "typescript":
+                raise ValueError(f"invalid target extension format: {spec.source}")
+            _validate_pi_extension_source(content, Path(spec.source))
         elif spec.kind in {"validation-runtime", "command-gate"}:
             if spec.source_format != "python":
                 raise ValueError(f"invalid Python source format: {spec.source}")
@@ -822,7 +944,12 @@ def validate_source_inventory(
             )
         )
     for spec, parsed, body in pending_agents:
-        _validate_agent_with_registry(target, spec.identifier, parsed, body)
+        if target is Target.PI:
+            from .pi_catalog import validate_pi_contract
+
+            validate_pi_contract(spec.identifier, parsed, body)
+        else:
+            _validate_agent_with_registry(target, spec.identifier, parsed, body)
     if parsed_roles and sum(spec.kind == "agent" for spec in specs) >= 5:
         required_roles = {
             "code-explorer",
@@ -852,10 +979,11 @@ def validate_source_inventory(
         if require_commit_pusher and "commit-pusher" not in supplied_roles:
             raise ValueError("required optional role is missing")
         if required_roles <= supplied_roles:
-            for role, parsed in parsed_by_role.items():
-                required_overlay = set(ROLE_POLICY[target.value][role]["overlay"])
-                if not required_overlay <= set(parsed):
-                    raise ValueError("incomplete role semantics")
+            if target is not Target.PI:
+                for role, parsed in parsed_by_role.items():
+                    required_overlay = set(ROLE_POLICY[target.value][role]["overlay"])
+                    if not required_overlay <= set(parsed):
+                        raise ValueError("incomplete role semantics")
     return tuple(result)
 
 
@@ -873,6 +1001,7 @@ def validate_all_catalogs(repo_root: Path) -> None:
                 "routing-source",
                 "project-template",
                 "command-gate",
+                "target-extension",
             }
         )
         try:
