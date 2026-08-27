@@ -28,9 +28,7 @@ class TargetTests(unittest.TestCase):
     def test_pi_descriptor_includes_task3_catalog_and_extension_sources(self):
         descriptor = descriptor_for(Target.PI)
         self.assertEqual(descriptor.target, Target.PI)
-        self.assertEqual(
-            descriptor.sources,
-            (
+        expected = (
                 SourceSpec(
                     identifier="code-explorer",
                     source=PurePosixPath("pi/agents/code-explorer.md"),
@@ -90,8 +88,17 @@ class TargetTests(unittest.TestCase):
                     kind="routing-source",
                     source_format="markdown",
                 ),
-            ),
         )
+        runtime = tuple(
+            source
+            for source in descriptor.sources
+            if source.kind == "validation-runtime"
+        )
+        self.assertEqual(
+            descriptor.sources,
+            expected[:-1] + runtime + expected[-1:],
+        )
+        self.assertEqual(len(runtime), 9)
         self.assertEqual(descriptor.environment_variable, "PI_CODING_AGENT_DIR")
         self.assertEqual(descriptor.global_filename, "APPEND_SYSTEM.md")
         capability = next(item for item in CAPABILITIES if item.target is Target.PI)

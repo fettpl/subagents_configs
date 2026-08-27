@@ -33,6 +33,8 @@ from .models import (
     Manifest,
     ManifestEntry,
     Ownership,
+    PiExternalPlan,
+    PiInstallPlan,
     Request,
     Target,
 )
@@ -50,6 +52,31 @@ from .targets import (
     selected_sources,
     targets_for_request,
 )
+
+_PI_PACKAGE_SOURCE = "npm:pi-subagents@0.56.0"
+
+
+def validate_project_root(project_root: Path | None) -> Path:
+    """Validate the caller-owned project root without following links."""
+
+    if not isinstance(project_root, Path):
+        raise TypeError("Pi project_root must be a Path")
+    if not project_root.is_absolute():
+        raise ValueError("Pi project_root must be absolute")
+    normalized = normalized_absolute(project_root)
+    if normalized != project_root:
+        raise ValueError("Pi project_root must be canonically spelled")
+    # Check each existing lexical component.  lstat_existing rejects symlinks
+    # and therefore prevents an apparently safe root from resolving elsewhere.
+    current = Path(normalized.anchor)
+    for component in normalized.parts[1:]:
+        current /= component
+        item = lstat_existing(current, "Pi project root")
+        if item is None:
+            raise ValueError("Pi project_root must be an existing directory")
+        if not stat.S_ISDIR(item.st_mode):
+            raise ValueError("Pi project_root must be a directory")
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -272,8 +299,93 @@ def _selected_sources(
     return inventories
 
 
+def _pi_external_plan(
+    request: Request,
+    *,
+    project_root: Path,
+    operation: Literal["install", "uninstall"] = "install",
+) -> PiExternalPlan:
+    """Build Pi's package phase without executing Pi or a package manager."""
+
+    if request.pi_executable is None:
+        raise ValueError("Pi install requires pi_executable")
+    executable = normalized_absolute(request.pi_executable)
+    agent_dir = normalized_absolute(request.homes[Target.PI])
+    from .pi_package import (
+        inspect_pi_package_state,
+        validate_pi_package_receipt,
+    )
+
+    try:
+        before = inspect_pi_package_state(agent_dir)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ValueError("Pi package state cannot be inspected safely") from exc
+    if before.status == "conflict":
+        raise ValueError("Pi package state conflicts with policy")
+    if operation == "uninstall":
+        if not request.remove_pi_package:
+            return PiExternalPlan(
+                "none",
+                executable,
+                agent_dir,
+                project_root,
+                _PI_PACKAGE_SOURCE,
+                before,
+                False,
+                False,
+                None,
+            )
+        try:
+            receipt = validate_pi_package_receipt(agent_dir, before)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise ValueError("Pi package receipt cannot be validated safely") from exc
+        if before.status != "exact" or receipt is None:
+            raise ValueError("Pi package removal requires exact ownership receipt")
+        return PiExternalPlan(
+            "remove",
+            executable,
+            agent_dir,
+            project_root,
+            _PI_PACKAGE_SOURCE,
+            before,
+            False,
+            False,
+            receipt,
+        )
+    try:
+        receipt = validate_pi_package_receipt(agent_dir, before)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ValueError("Pi package receipt cannot be validated safely") from exc
+    if before.status == "exact":
+        return PiExternalPlan(
+            "none",
+            executable,
+            agent_dir,
+            project_root,
+            _PI_PACKAGE_SOURCE,
+            before,
+            False,
+            False,
+            None,
+        )
+    return PiExternalPlan(
+        "install",
+        executable,
+        agent_dir,
+        project_root,
+        _PI_PACKAGE_SOURCE,
+        before,
+        request.consent_third_party_code,
+        request.consent_network,
+        None,
+    )
+
+
 def _reject_legacy_state(home: Path, target: Target) -> None:
-    legacy = home / _LEGACY_STATE_NAMES[target]
+    legacy_name = _LEGACY_STATE_NAMES.get(target)
+    if legacy_name is None:
+        return
+    legacy = home / legacy_name
     if lstat_existing(legacy, "legacy installer state") is not None:
         raise ValueError(
             f"legacy {target.value} installer state detected; manual recovery "
@@ -282,6 +394,13 @@ def _reject_legacy_state(home: Path, target: Target) -> None:
 
 
 def _source_bytes(target: Target, source: ValidatedSource, home: Path) -> bytes:
+    if target is Target.PI and source.spec.kind == "agent":
+        # Pi's validator source carries a source-only extension marker.  The
+        # catalog renderer replaces it with the already-validated absolute
+        # path under the selected Pi home and revalidates the rendered source.
+        from .pi_catalog import render_pi_source
+
+        return render_pi_source(source.content, agent_dir=home)
     if source.spec.kind != "agent":
         return source.content
     if source.spec.identifier != "code-validator":
@@ -881,7 +1000,13 @@ def _target_install(
     conflicts: list[str] = []
     for source in inventory:
         if source.spec.destination is None or (
-            source.spec.kind not in {"agent", "validation-runtime", "command-gate"}
+            source.spec.kind
+            not in {
+                "agent",
+                "validation-runtime",
+                "command-gate",
+                "target-extension",
+            }
         ):
             continue
         operation, entry = _plan_regular_source(
@@ -1367,10 +1492,18 @@ def validate_lifecycle(request: Request, descriptor) -> None:
     _validate_request(request, request.operation)
 
 
-def preflight_install(repo_root: Path, request: Request) -> TransactionPlan:
+def preflight_install(
+    repo_root: Path,
+    request: Request,
+    *,
+    project_root: Path | None = None,
+) -> TransactionPlan | PiInstallPlan:
     _validate_request(request, "install")
     validate_request_compatibility(request)
     root = normalized_absolute(repo_root)
+    pi_project_root = (
+        validate_project_root(project_root) if Target.PI in request.targets else None
+    )
     with filesystem.CommandCache() as cache:
         inventories = _selected_sources(root, request, cache)
         target_plans = tuple(
@@ -1387,10 +1520,20 @@ def preflight_install(repo_root: Path, request: Request) -> TransactionPlan:
         for target in targets_for_request(request.targets, False)
         for source in inventories[target]
     )
-    return TransactionPlan("install", target_plans, source_evidence)
+    local = TransactionPlan("install", target_plans, source_evidence)
+    if Target.PI not in request.targets:
+        return local
+    if pi_project_root is None:  # defensive; the branch above always sets it
+        raise ValueError("Pi install requires an explicit project_root")
+    return PiInstallPlan(
+        local=local,
+        external=_pi_external_plan(request, project_root=pi_project_root),
+    )
 
 
-def preflight_uninstall(repo_root: Path, request: Request) -> TransactionPlan:
+def preflight_uninstall(
+    repo_root: Path, request: Request
+) -> TransactionPlan | PiInstallPlan:
     _validate_request(request, "uninstall")
     validate_request_compatibility(request)
     root = normalized_absolute(repo_root)
@@ -1410,10 +1553,31 @@ def preflight_uninstall(repo_root: Path, request: Request) -> TransactionPlan:
         for target in targets_for_request(request.targets, False)
         for source in inventories[target]
     )
-    return TransactionPlan("uninstall", target_plans, source_evidence)
+    local = TransactionPlan("uninstall", target_plans, source_evidence)
+    if Target.PI not in request.targets or not request.remove_pi_package:
+        return local
+    project_root = validate_project_root(root)
+    return PiInstallPlan(
+        local=local,
+        external=_pi_external_plan(
+            request,
+            project_root=project_root,
+            operation="uninstall",
+        ),
+    )
 
 
-def render_plan(plan: TransactionPlan) -> str:
+def _local_transaction(plan: TransactionPlan | PiInstallPlan) -> TransactionPlan:
+    """Return the repository-owned transaction from a Pi composite plan."""
+
+    local = plan.local if isinstance(plan, PiInstallPlan) else plan
+    if not isinstance(local, TransactionPlan):
+        raise TypeError("plan must be a TransactionPlan or PiInstallPlan")
+    return local
+
+
+def render_plan(plan: TransactionPlan | PiInstallPlan) -> str:
+    plan = _local_transaction(plan)
     lines = [f"operation: {plan.operation}"]
     for target in plan.targets:
         lines.append(
@@ -1472,12 +1636,11 @@ def _safe_conflict(value: str) -> str:
 
 
 def render_plan_json(
-    plan: TransactionPlan, *, recovery: RecoverySummary | None = None
+    plan: TransactionPlan | PiInstallPlan, *, recovery: RecoverySummary | None = None
 ) -> bytes:
     """Render a deterministic, versioned plan without source or user content."""
 
-    if not isinstance(plan, TransactionPlan):
-        raise TypeError("plan must be a TransactionPlan")
+    plan = _local_transaction(plan)
     if recovery is None:
         recovery = plan.recovery
     if not isinstance(recovery, RecoverySummary):

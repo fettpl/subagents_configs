@@ -374,6 +374,12 @@ def _reviewed_policy_hash() -> str:
     return _sha256(PACKAGE_POLICY_PATH)
 
 
+def pi_package_policy_hash() -> str:
+    """Return the hash of the currently reviewed Pi package policy."""
+
+    return _reviewed_policy_hash()
+
+
 def _revalidate_reviewed_policy(expected_hash: str) -> None:
     if _reviewed_policy_hash() != expected_hash:
         raise ValueError("Pi package policy changed during command")
@@ -1576,6 +1582,43 @@ def load_pi_package_receipt(agent_dir: Path) -> PiPackageReceipt | None:
     return _receipt_from_mapping(_read_json(path, "Pi package receipt", private=True))
 
 
+def validate_pi_package_receipt(
+    agent_dir: Path,
+    evidence: PiPackageEvidence,
+    *,
+    require_current: bool = True,
+) -> PiPackageReceipt | None:
+    """Validate durable ownership evidence against the current package state.
+
+    Planning uses this read-only contract before constructing an optional
+    removal phase.  Keeping the policy/hash checks here prevents callers from
+    accidentally treating a merely parseable receipt as proof of ownership.
+    """
+
+    if type(evidence) is not PiPackageEvidence:
+        raise TypeError("Pi package evidence has the wrong type")
+    receipt = load_pi_package_receipt(agent_dir)
+    if receipt is None:
+        return None
+    try:
+        policy_hash = _reviewed_policy_hash()
+    except (OSError, ValueError, TransactionError) as exc:
+        raise PiPackageError("Pi package policy is invalid") from exc
+    valid = (
+        receipt.operation == "install"
+        and receipt.source == _PACKAGE_SOURCE
+        and receipt.remove_source == _REMOVE_SOURCE
+        and receipt.created_exact_entry
+        and receipt.package_policy_hash == policy_hash
+        and evidence.status == "exact"
+        and receipt.package_manifest_hash == evidence.manifest_hash
+        and receipt.settings_after_hash == evidence.settings_hash
+    )
+    if require_current and not valid:
+        raise PiPackageError("Pi receipt does not prove current package ownership")
+    return receipt if valid else None
+
+
 def _durable_receipt_evidence(
     agent_dir: Path, expected_receipt: PiPackageReceipt
 ) -> IdentityEvidence:
@@ -1609,13 +1652,23 @@ def _durable_receipt_evidence(
     return evidence
 
 
-def store_pi_package_receipt(agent_dir: Path, receipt: PiPackageReceipt) -> None:
+def store_pi_package_receipt(
+    agent_dir: Path,
+    receipt: PiPackageReceipt,
+    *,
+    expected_evidence: PiPackageEvidence | None = None,
+) -> None:
     if type(receipt) is not PiPackageReceipt:
         raise TypeError("receipt has the wrong type")
     if receipt.operation != "install":
         raise ValueError("only an install receipt can be stored")
     if not receipt.created_exact_entry:
         raise ValueError("receipt must prove a newly created exact entry")
+    if (
+        expected_evidence is not None
+        and type(expected_evidence) is not PiPackageEvidence
+    ):
+        raise TypeError("expected package evidence has the wrong type")
     _receipt_from_mapping(
         {
             "schema_version": receipt.schema_version,
@@ -1632,7 +1685,19 @@ def store_pi_package_receipt(agent_dir: Path, receipt: PiPackageReceipt) -> None
     normalized = _validate_agent_dir(agent_dir)
     receipt_path = _receipt_filesystem_path(normalized)
     parent = receipt_path.parent
+    created_receipt_evidence: IdentityEvidence | None = None
     try:
+        if expected_evidence is not None:
+            current = inspect_pi_package_state(normalized)
+            if current != expected_evidence:
+                raise ValueError("Pi package evidence changed before receipt")
+            if (
+                current.status != "exact"
+                or not current.package_identity_valid
+                or receipt.settings_after_hash != current.settings_hash
+                or receipt.package_manifest_hash != current.manifest_hash
+            ):
+                raise ValueError("Pi receipt does not match package evidence")
         filesystem.ensure_private_directory(parent)
         payload = {
             "schema_version": receipt.schema_version,
@@ -1648,10 +1713,27 @@ def store_pi_package_receipt(agent_dir: Path, receipt: PiPackageReceipt) -> None
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
             "utf-8"
         )
-        filesystem.safe_mutate(receipt_path, None, DesiredFile(encoded, mode=0o600))
+        created_receipt_evidence = filesystem.safe_mutate(
+            receipt_path, None, DesiredFile(encoded, mode=0o600)
+        )
+        if created_receipt_evidence is None:
+            raise ValueError("Pi receipt create postcondition is unavailable")
         if load_pi_package_receipt(normalized) != receipt:
             raise ValueError("Pi receipt postcondition could not be proved")
+        if expected_evidence is not None:
+            current = inspect_pi_package_state(normalized)
+            if current != expected_evidence:
+                raise ValueError("Pi package evidence changed after receipt")
     except (OSError, ValueError, TransactionError) as exc:
+        if created_receipt_evidence is not None:
+            try:
+                filesystem.safe_mutate(
+                    receipt_path, created_receipt_evidence, None
+                )
+            except (OSError, ValueError, TransactionError):
+                # Preserve any concurrent replacement; CAS only removes the
+                # exact receipt identity created by this call.
+                pass
         raise PiPackageError("Pi receipt cannot be stored") from exc
 
 

@@ -15,14 +15,19 @@ from .compatibility import (
 from .diagnostics import DiagnosticCode, emit_diagnostic
 from .errors import CliError, ValidationBlockedError
 from .locks import locked_target_homes
-from .models import Journal, Request, Target
+from .models import Journal, PiExternalPlan, PiInstallPlan, Request, Target
 from .paths import normalized_absolute
 from .pi_package import (
+    PiPackageEvidence,
     PiPackageReceipt,
     PiRuntimeEvidence,
+    inspect_pi_package_state,
     install_pi_package_external,
+    load_pi_package_policy,
+    pi_package_policy_hash,
     store_pi_package_receipt,
     validate_pi_executable,
+    validate_pi_package_receipt,
 )
 from .pi_package import remove_pi_package as _remove_pi_package
 from .planning import (
@@ -33,6 +38,7 @@ from .planning import (
     preflight_uninstall,
     render_plan,
     render_plan_json,
+    validate_project_root,
     validate_request_shape,
 )
 from .recovery import recover_transaction
@@ -325,7 +331,7 @@ def _recover_groups(
         recover_transaction(homes, tuple(homes))
 
 
-def _plan(request: Request, repo_root: Path) -> TransactionPlan:
+def _plan(request: Request, repo_root: Path) -> TransactionPlan | PiInstallPlan:
     if request.operation == "install":
         # The command's explicit repository root is also its project-resource
         # discovery root.  Passing it through keeps Pi planning independent of
@@ -363,6 +369,116 @@ def install_pi_package(
     )
 
 
+def verify_pi_install_postcondition(
+    external: PiExternalPlan, receipt: PiPackageReceipt
+) -> None:
+    """Re-check package, policy inventory, and project-root postconditions.
+
+    This is intentionally the small Plan 1 contract.  Effective project
+    discovery and override analysis belongs to the later effective-catalog
+    phase; here we only prove that the reviewed package and bundled inventory
+    still match the pinned policy before ownership becomes durable.
+    """
+
+    if type(external) is not PiExternalPlan or type(receipt) is not PiPackageReceipt:
+        raise TypeError("Pi install postcondition arguments are invalid")
+    evidence = inspect_pi_package_state(external.agent_dir)
+    verify_pi_package_postcondition(external, evidence)
+    policy = load_pi_package_policy()
+    source = policy.get("source")
+    remove_source = policy.get("removeSource")
+    if (
+        type(source) is not str
+        or type(remove_source) is not str
+        or receipt.operation != "install"
+        or not receipt.created_exact_entry
+        or receipt.source != source
+        or receipt.remove_source != remove_source
+        or receipt.package_policy_hash != pi_package_policy_hash()
+        or receipt.settings_before_hash != external.before.settings_hash
+        or receipt.settings_after_hash != evidence.settings_hash
+        or receipt.package_manifest_hash != evidence.manifest_hash
+    ):
+        raise ValueError("Pi package receipt postcondition is invalid")
+
+
+def verify_pi_package_postcondition(
+    external: PiExternalPlan, package: PiPackageEvidence
+) -> None:
+    """Prove the reviewed Pi package is still exact before local apply."""
+
+    if type(external) is not PiExternalPlan or type(package) is not PiPackageEvidence:
+        raise TypeError("Pi package postcondition arguments are invalid")
+    if validate_project_root(external.project_root) != external.project_root:
+        raise ValueError("Pi project root changed during package phase")
+    policy = load_pi_package_policy()
+    from .pi_catalog import PI_BUNDLED_ROLES
+
+    if policy.get("bundledAgents") != list(PI_BUNDLED_ROLES):
+        raise ValueError("Pi bundled inventory policy is invalid")
+    if package.status != "exact" or not package.package_identity_valid:
+        raise ValueError("Pi package postcondition is not exact")
+
+
+def _rendered_pi_contracts(plan: TransactionPlan) -> Mapping[str, object]:
+    """Parse the rendered Pi agent bytes supplied to the effective evaluator."""
+
+    from .pi_catalog import PI_DEFAULT_ROLES, PI_OPTIONAL_ROLES, validate_pi_agent
+
+    roles = frozenset(PI_DEFAULT_ROLES + PI_OPTIONAL_ROLES)
+    rendered: dict[str, object] = {}
+    for target_plan in plan.targets:
+        if target_plan.target is not Target.PI:
+            continue
+        for operation in target_plan.operations:
+            if operation.identifier not in roles or operation.content is None:
+                continue
+            rendered[operation.identifier] = validate_pi_agent(
+                operation.identifier,
+                operation.content,
+                allow_rendered_extension=True,
+            )
+    if not rendered:
+        raise ValueError("Pi rendered contract evidence is unavailable")
+    return rendered
+
+
+def verify_pi_effective_postcondition(
+    external: PiExternalPlan,
+    local_plan: TransactionPlan,
+    package: PiPackageEvidence,
+) -> None:
+    """Evaluate Pi's effective catalog before taking package ownership.
+
+    Task 5 owns the evaluator. Until that module is present, this seam is
+    deliberately fail-closed: a package receipt and local repository apply
+    must never proceed on the assumption that effective discovery was safe.
+    """
+
+    if type(external) is not PiExternalPlan or type(package) is not PiPackageEvidence:
+        raise TypeError("Pi effective postcondition arguments are invalid")
+    if type(local_plan) is not TransactionPlan:
+        raise TypeError("Pi effective local plan is invalid")
+    try:
+        from .pi_effective import inspect_effective_catalog
+    except (ImportError, AttributeError) as exc:
+        raise ValueError("Pi effective catalog evaluator is unavailable") from exc
+    if validate_project_root(external.project_root) != external.project_root:
+        raise ValueError("Pi project root changed during effective verification")
+    try:
+        result = inspect_effective_catalog(
+            external.agent_dir,
+            _rendered_pi_contracts(local_plan),
+            package,
+            project_root=external.project_root,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError("Pi effective catalog verification failed") from exc
+    conflicts = getattr(result, "conflicts", None)
+    if type(conflicts) is not tuple or conflicts:
+        raise ValueError("Pi effective catalog verification found conflicts")
+
+
 def remove_pi_package(
     executable: Path | PiRuntimeEvidence,
     agent_dir: Path,
@@ -381,29 +497,17 @@ def remove_pi_package(
 def _external_plan(plan: object) -> object | None:
     """Return a Pi external phase only for the typed composite install plan."""
 
-    external = getattr(plan, "external", None)
-    if external is None:
+    if not isinstance(plan, PiInstallPlan):
         return None
-    # Do not treat arbitrary user-provided objects as package plans.  The
-    # dataclass is defined in models.py; this structural gate avoids importing
-    # it here and keeps the generic transaction path unchanged on older plans.
-    required = (
-        "action",
-        "executable",
-        "agent_dir",
-        "package_source",
-        "before",
-        "consent_third_party_code",
-        "consent_network",
-        "removal_receipt",
-    )
-    return external if all(hasattr(external, name) for name in required) else None
+    if not isinstance(plan.external, PiExternalPlan):
+        raise TypeError("Pi external plan is invalid")
+    return plan.external
 
 
 def _local_plan(plan: object) -> TransactionPlan:
     """Unwrap the repository transaction from a composite Pi plan."""
 
-    local = getattr(plan, "local", plan)
+    local = plan.local if isinstance(plan, PiInstallPlan) else plan
     if not isinstance(local, TransactionPlan):
         raise TypeError("local transaction plan is invalid")
     return local
@@ -441,7 +545,44 @@ def _evidence_fingerprint(value: object) -> tuple[object, ...] | None:
     return tuple(getattr(value, field) for field in fields)
 
 
-def _plan_fingerprint(plan: TransactionPlan) -> tuple[object, ...]:
+def _external_fingerprint(plan: object) -> tuple[object, ...] | None:
+    """Capture only stable, non-content Pi package evidence for dry runs."""
+
+    if not isinstance(plan, PiInstallPlan):
+        return None
+    external = plan.external
+    before = external.before
+    receipt = external.removal_receipt
+    receipt_fingerprint = None
+    if receipt is not None:
+        receipt_fingerprint = (
+            receipt.operation,
+            receipt.source,
+            receipt.remove_source,
+            receipt.settings_before_hash,
+            receipt.settings_after_hash,
+            receipt.package_manifest_hash,
+            receipt.package_policy_hash,
+            receipt.created_exact_entry,
+        )
+    return (
+        external.action,
+        str(normalized_absolute(external.agent_dir)),
+        str(normalized_absolute(external.project_root)),
+        external.package_source,
+        before.status,
+        before.exact_pinned_entry,
+        before.settings_hash,
+        before.installed_lock_root_hash,
+        before.manifest_hash,
+        before.package_identity_valid,
+        receipt_fingerprint,
+    )
+
+
+def _plan_fingerprint(plan: object) -> tuple[object, ...]:
+    composite = plan
+    plan = _local_plan(plan)
     targets = []
     for target in plan.targets:
         operations = []
@@ -473,7 +614,7 @@ def _plan_fingerprint(plan: TransactionPlan) -> tuple[object, ...]:
         (item.identifier, item.kind, item.format, item.source_hash)
         for item in plan.sources
     )
-    return (plan.operation, tuple(targets), sources)
+    return (plan.operation, tuple(targets), sources, _external_fingerprint(composite))
 
 
 def _state_fingerprint(request: Request) -> tuple[object, ...]:
@@ -546,7 +687,7 @@ def _recovery_fingerprint(
 
 def _collect_stable_dry_run_evidence(
     request: Request, repo_root: Path | None = None
-) -> tuple[TransactionPlan, tuple[object, ...]]:
+) -> tuple[TransactionPlan | PiInstallPlan, tuple[object, ...]]:
     """Collect complete read-only planning evidence twice without acquiring locks."""
 
     root = Path(__file__).parents[1] if repo_root is None else repo_root
@@ -603,7 +744,7 @@ def _collect_stable_dry_run_evidence(
 
 def collect_stable_dry_run_evidence(
     request: Request, repo_root: Path | None = None
-) -> TransactionPlan:
+) -> TransactionPlan | PiInstallPlan:
     """Collect complete read-only planning evidence twice without acquiring locks."""
 
     plan, _fingerprint = _collect_stable_dry_run_evidence(request, repo_root)
@@ -816,24 +957,52 @@ def _run_mutating_locked(
 
             external = _external_plan(plan)
             if request.operation == "install" and external is not None:
-                if getattr(external, "action", None) == "install":
-                    try:
+                try:
+                    action = getattr(external, "action", None)
+                    if action == "install":
                         receipt = install_pi_package(
                             external.executable,
                             external.agent_dir,
                             external.consent_third_party_code,
                             external.consent_network,
                         )
+                        verify_pi_install_postcondition(external, receipt)
+                        package = inspect_pi_package_state(external.agent_dir)
+                        verify_pi_package_postcondition(external, package)
+                        verify_pi_effective_postcondition(
+                            external, local_plan, package
+                        )
                         # The no-receipt primitive is intentional: ownership
                         # becomes durable only after all external postconditions
                         # have succeeded, and remains outside the local journal.
                         store_pi_package_receipt(
-                            external.agent_dir, receipt
+                            external.agent_dir,
+                            receipt,
+                            expected_evidence=package,
                         )
-                    except Exception:
-                        return _finish(
-                            _pi_phase_failure(request, stderr, phase="package")
+                        package = inspect_pi_package_state(external.agent_dir)
+                        verify_pi_package_postcondition(external, package)
+                        if (
+                            validate_pi_package_receipt(
+                                external.agent_dir, package, require_current=True
+                            )
+                            != receipt
+                        ):
+                            raise ValueError(
+                                "Pi package receipt postcondition is not durable"
+                            )
+                    elif action == "none":
+                        package = inspect_pi_package_state(external.agent_dir)
+                        verify_pi_package_postcondition(external, package)
+                        verify_pi_effective_postcondition(
+                            external, local_plan, package
                         )
+                    else:
+                        raise ValueError("unknown Pi external action")
+                except Exception:
+                    return _finish(
+                        _pi_phase_failure(request, stderr, phase="package")
+                    )
             try:
                 apply_transaction(local_plan, failure_injector=failure_injector)
             except IncompleteRollbackError:
@@ -1094,7 +1263,7 @@ def run(
             )
             return EXIT_PREFLIGHT_ERROR
         try:
-            rendered = render_plan_json(plan).decode("utf-8")
+            rendered = render_plan_json(_local_plan(plan)).decode("utf-8")
         except Exception:
             _emit_request(
                 stderr,
@@ -1133,7 +1302,9 @@ def run(
         try:
             if not _write_output(stdout, rendered):
                 raise OSError("structured output unavailable")
-            has_conflicts = any(target.conflicts for target in plan.targets)
+            has_conflicts = any(
+                target.conflicts for target in _local_plan(plan).targets
+            )
         except Exception:
             _emit_request(
                 stderr,
@@ -1326,9 +1497,9 @@ def run(
 
     try:
         if request.dry_run_format == "json":
-            rendered = render_plan_json(plan).decode("utf-8")
+            rendered = render_plan_json(_local_plan(plan)).decode("utf-8")
         else:
-            rendered = render_plan(plan)
+            rendered = render_plan(_local_plan(plan))
     except Exception:
         _emit_request(
             stderr,
@@ -1348,7 +1519,7 @@ def run(
         )
         return EXIT_PREFLIGHT_ERROR
     try:
-        has_conflicts = any(target.conflicts for target in plan.targets)
+        has_conflicts = any(target.conflicts for target in _local_plan(plan).targets)
     except Exception:
         _emit_request(
             stderr,
@@ -1371,7 +1542,7 @@ def run(
         return EXIT_SUCCESS
 
     try:
-        apply_transaction(plan, failure_injector=failure_injector)
+        apply_transaction(_local_plan(plan), failure_injector=failure_injector)
     except IncompleteRollbackError:
         _emit_request(
             stderr,
@@ -1401,7 +1572,7 @@ def run(
         return EXIT_APPLY_ERROR
 
     try:
-        has_conflicts = any(target.conflicts for target in plan.targets)
+        has_conflicts = any(target.conflicts for target in _local_plan(plan).targets)
     except Exception:
         _emit_request(
             stderr,
@@ -1413,7 +1584,7 @@ def run(
         return EXIT_PREFLIGHT_ERROR
     if request.operation == "uninstall" and has_conflicts:
         try:
-            for target in plan.targets:
+            for target in _local_plan(plan).targets:
                 for conflict in target.conflicts:
                     del conflict
                     if not emit_diagnostic(
