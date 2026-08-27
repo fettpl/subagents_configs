@@ -1,0 +1,31 @@
+{
+  "source": "npm:pi-subagents@0.56.0",
+  "removeSource": "npm:pi-subagents",
+  "name": "pi-subagents",
+  "version": "0.56.0",
+  "testedPiVersion": "0.84.1",
+  "upstreamCommit": "a0e2b9e31de5970215a567e20e2d781bbbddf235",
+  "distIntegrity": "sha512-XBmKqvrj4mCVQ6/uXiPqCmzHxGfBB+jjwmfNR3El+IfhnaJwZ+W6evXYRI3lQEXe6Nf56xfzUXQExIzE8cT5BQ==",
+  "packageJsonSha256": "e35c5acf7f2c75fcfd182b1eaa67f8485abc5ea81ac63598ef8ad637d3e788be",
+  "packageLockSha256": "76b359ad4a8ecf20892d169ba5cce7892a54d8217024b115bff9262c5a1d4f04",
+  "type": "module",
+  "pi": {
+    "extensions": ["./index.ts"],
+    "skills": ["./skills"],
+    "prompts": ["./prompts"]
+  },
+  "dependencies": {
+    "acorn": "8.18.0",
+    "jiti": "2.7.0",
+    "typebox": "1.1.38",
+    "yaml": "2.8.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": ">=0.80.0",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "bundledAgents": ["delegate", "oracle", "researcher", "reviewer", "scout", "worker"],
+  "forbiddenLifecycleScripts": ["preinstall", "install", "postinstall", "prepare"]
+}

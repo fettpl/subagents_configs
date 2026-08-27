@@ -1057,6 +1057,8 @@ def _inventory_state_fd(
         "validation",
         "claude-hooks",
     }
+    if descriptor.target is Target.PI:
+        allowed.add("pi-package-receipt.json")
     unknown = names - allowed
     if unknown:
         raise ValueError(f"unknown state entries: {sorted(unknown)}")
@@ -1068,6 +1070,41 @@ def _inventory_state_fd(
             raise ValueError("state file must be a regular file")
         if stat.S_IMODE(result.st_mode) & ~0o600:
             raise ValueError("state file must be private")
+    if "pi-package-receipt.json" in names:
+        if descriptor.target is not Target.PI:
+            raise ValueError("Pi package receipt is only valid for Pi state")
+        result = _fd_stat(state_fd, "pi-package-receipt.json", "Pi package receipt")
+        if result is None or not stat.S_ISREG(result.st_mode):
+            raise ValueError("Pi package receipt must be a regular file")
+        if (
+            result.st_uid != os.getuid()
+            or result.st_nlink != 1
+            or stat.S_IMODE(result.st_mode) != 0o600
+        ):
+            raise ValueError("Pi package receipt must be owner-private mode 0600")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            receipt_fd = os.open("pi-package-receipt.json", flags, dir_fd=state_fd)
+        except OSError as exc:
+            raise ValueError("Pi package receipt cannot be opened safely") from exc
+        try:
+            opened = os.fstat(receipt_fd)
+            if (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_nlink,
+                stat.S_IMODE(opened.st_mode),
+            ) != (
+                result.st_dev,
+                result.st_ino,
+                result.st_size,
+                result.st_nlink,
+                stat.S_IMODE(result.st_mode),
+            ) or opened.st_uid != os.getuid():
+                raise ValueError("Pi package receipt identity changed")
+        finally:
+            os.close(receipt_fd)
     if "backups" in names:
         backups_fd = _open_private_directory(state_fd, "backups", "backup directory")
         try:
@@ -1121,7 +1158,10 @@ def _read_state_files(
     if (
         result["manifest.json"] is None
         and result["journal.json"] is None
-        and not state_names.intersection({"backups", "validation", "claude-hooks"})
+        and state_names
+        and not state_names.intersection(
+            {"backups", "validation", "claude-hooks", "pi-package-receipt.json"}
+        )
     ):
         raise ValueError("unknown or unsafe .subagents_configs state")
     return result
