@@ -1511,6 +1511,14 @@ def inspect_pi_package_state(agent_dir: Path) -> PiPackageEvidence:
     return _inspect_pi_package_state_snapshot(agent_dir).evidence
 
 
+def inspect_pi_package_store_identity(
+    agent_dir: Path,
+) -> tuple[int, int, int, int, int] | None:
+    """Return only the private store identity needed for dry-run race checks."""
+
+    return _inspect_pi_package_state_snapshot(agent_dir).package_store_identity
+
+
 def _receipt_path(agent_dir: Path) -> Path:
     normalized = _validate_agent_dir(agent_dir)
     path = normalized / _RECEIPT_RELATIVE

@@ -27,6 +27,7 @@ from .pi_package import (
     PiPackageReceipt,
     PiRuntimeEvidence,
     inspect_pi_package_state,
+    inspect_pi_package_store_identity,
     install_pi_package_external,
     load_pi_package_policy,
     pi_package_policy_hash,
@@ -614,6 +615,10 @@ def _external_fingerprint(plan: object) -> tuple[object, ...] | None:
         return None
     external = plan.external
     before = external.before
+    # The public evidence intentionally omits race-only package-store data;
+    # include the private identity proof in the dry-run comparison so an
+    # equivalent directory replacement cannot pass as unchanged.
+    store_identity = inspect_pi_package_store_identity(external.agent_dir)
     receipt = external.removal_receipt
     receipt_fingerprint = None
     if receipt is not None:
@@ -638,6 +643,7 @@ def _external_fingerprint(plan: object) -> tuple[object, ...] | None:
         before.installed_lock_root_hash,
         before.manifest_hash,
         before.package_identity_valid,
+        store_identity,
         receipt_fingerprint,
     )
 
@@ -1035,6 +1041,33 @@ def _run_mutating_locked(
                             request, stderr, phase="package", code="PI_CONSENT_REQUIRED"
                         )
                     )
+                if action == "none":
+                    try:
+                        # An exact package still requires fresh executable
+                        # evidence before repository-owned changes are applied.
+                        validate_pi_executable(
+                            external.executable,
+                            agent_dir=external.agent_dir,
+                            execute=True,
+                        )
+                    except PiPackageError as exc:
+                        return _finish(
+                            _pi_phase_failure(
+                                request,
+                                stderr,
+                                phase="package",
+                                code=_pi_code(exc, fallback="PI_RUNTIME_INCOMPATIBLE"),
+                            )
+                        )
+                    except (OSError, ValueError, RuntimeError):
+                        return _finish(
+                            _pi_phase_failure(
+                                request,
+                                stderr,
+                                phase="package",
+                                code="PI_EXECUTABLE_INVALID",
+                            )
+                        )
                 try:
                     if action == "install":
                         receipt = install_pi_package(
@@ -1524,215 +1557,4 @@ def run(
             status="conflict",
         )
         return EXIT_MANAGED_CONFLICT
-    return EXIT_SUCCESS
-
-    # Unreachable for the dry-run path; retained below for the mutating
-    # orchestration helper's recovery implementation.
-    groups = ()
-
-    try:
-        _recover_groups(groups)
-    except IncompleteRollbackError:
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.RECOVERY_INCOMPLETE,
-            phase="recovery",
-            status="incomplete",
-        )
-        return EXIT_INCOMPLETE_ROLLBACK
-    except (ValueError, OSError, TransactionError, RuntimeError):
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.VALIDATION_BLOCKED,
-            phase="recovery",
-            status="blocked",
-        )
-        return EXIT_BLOCKED_VALIDATION
-    except Exception:
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.APPLY_AMBIGUOUS,
-            phase="recovery",
-            status="ambiguous",
-        )
-        return EXIT_INCOMPLETE_ROLLBACK
-
-    try:
-        if request.dry_run_format == "json":
-            plan = collect_stable_dry_run_evidence(request, repo_root)
-        else:
-            plan = _plan(request, repo_root)
-    except CompatibilityPreflightError as failure:
-        return _handle_compatibility_failure(
-            request, failure, stdout=stdout, stderr=stderr
-        )
-    except ConcurrentDryRunChangeError:
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.PREFLIGHT_CONCURRENT_CHANGE,
-            phase="preflight",
-            status="rejected",
-        )
-        return EXIT_PREFLIGHT_ERROR
-    except ValidationBlockedError:
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.VALIDATION_BLOCKED,
-            phase="validation",
-            status="blocked",
-        )
-        return EXIT_BLOCKED_VALIDATION
-    except ValueError:
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.PREFLIGHT_REJECTED,
-            phase="preflight",
-            status="rejected",
-        )
-        return EXIT_PREFLIGHT_ERROR
-    except RuntimeError:
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.VALIDATION_BLOCKED,
-            phase="validation",
-            status="blocked",
-        )
-        return EXIT_BLOCKED_VALIDATION
-    except OSError:
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.PREFLIGHT_REJECTED,
-            phase="preflight",
-            status="rejected",
-        )
-        return EXIT_PREFLIGHT_ERROR
-    except Exception:
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.PREFLIGHT_REJECTED,
-            phase="preflight",
-            status="rejected",
-        )
-        return EXIT_PREFLIGHT_ERROR
-
-    try:
-        if request.dry_run_format == "json":
-            rendered = render_plan_json(_local_plan(plan)).decode("utf-8")
-        else:
-            rendered = render_plan(_local_plan(plan))
-    except Exception:
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.OUTPUT_FAILED,
-            phase="output",
-            status="failed",
-        )
-        return EXIT_PREFLIGHT_ERROR
-    if not _write_output(stdout, rendered):
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.OUTPUT_FAILED,
-            phase="output",
-            status="failed",
-        )
-        return EXIT_PREFLIGHT_ERROR
-    try:
-        has_conflicts = any(target.conflicts for target in _local_plan(plan).targets)
-    except Exception:
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.OUTPUT_FAILED,
-            phase="output",
-            status="failed",
-        )
-        return EXIT_PREFLIGHT_ERROR
-    if request.operation == "install" and has_conflicts:
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.MANAGED_CONFLICT,
-            phase="preflight",
-            status="conflict",
-        )
-        return EXIT_MANAGED_CONFLICT
-    if request.dry_run:
-        return EXIT_SUCCESS
-
-    try:
-        apply_transaction(_local_plan(plan), failure_injector=failure_injector)
-    except IncompleteRollbackError:
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.APPLY_AMBIGUOUS,
-            phase="apply",
-            status="ambiguous",
-        )
-        return EXIT_INCOMPLETE_ROLLBACK
-    except (TransactionError, OSError, ValueError):
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.APPLY_ROLLED_BACK,
-            phase="apply",
-            status="rolled-back",
-        )
-        return EXIT_APPLY_ERROR
-    except Exception:
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.APPLY_ROLLED_BACK,
-            phase="apply",
-            status="rolled-back",
-        )
-        return EXIT_APPLY_ERROR
-
-    try:
-        has_conflicts = any(target.conflicts for target in _local_plan(plan).targets)
-    except Exception:
-        _emit_request(
-            stderr,
-            request,
-            DiagnosticCode.OUTPUT_FAILED,
-            phase="output",
-            status="failed",
-        )
-        return EXIT_PREFLIGHT_ERROR
-    if request.operation == "uninstall" and has_conflicts:
-        try:
-            for target in _local_plan(plan).targets:
-                for conflict in target.conflicts:
-                    del conflict
-                    if not emit_diagnostic(
-                        stdout,
-                        DiagnosticCode.UNRESOLVED_UNINSTALL,
-                        (target.target.value,),
-                        (str(target.home),),
-                        request.operation,
-                        "output",
-                        "unresolved",
-                    ):
-                        raise OSError("unresolved output unavailable")
-        except Exception:
-            _emit_request(
-                stderr,
-                request,
-                DiagnosticCode.OUTPUT_FAILED,
-                phase="output",
-                status="failed",
-            )
-        return EXIT_UNRESOLVED_UNINSTALL
     return EXIT_SUCCESS

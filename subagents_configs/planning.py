@@ -1455,13 +1455,6 @@ def validate_request_shape(request: Request, operation: str | None = None) -> No
         ):
             raise ValueError("dry-run must not retain Pi consent")
     if (
-        request.operation == "install"
-        and Target.PI in request.targets
-        and not request.dry_run
-        and not (request.consent_third_party_code and request.consent_network)
-    ):
-        raise ValueError("Pi install requires third-party-code and network consent")
-    if (
         request.operation == "uninstall"
         and request.pi_executable is not None
         and not request.remove_pi_package
