@@ -54,6 +54,7 @@ _LIFECYCLE_AUTHORITIES: dict[str, frozenset[AuthorityCapability]] = {
     "manifest": frozenset({AuthorityCapability.FILESYSTEM_WRITE}),
     "runtime": frozenset({AuthorityCapability.FILESYSTEM_WRITE}),
 }
+_PI_ONLY_SOURCE_KINDS = frozenset({"target-extension", "package-policy", "skill"})
 
 
 def _safe_identifier(value: object, field: str) -> str:
@@ -870,17 +871,20 @@ def _parse_generated_catalog(raw: dict[str, object]) -> NormalizedCatalog:
         _safe_source_identifier(item["source"], "source path")
         if item["destination"] is not None:
             _safe_path(item["destination"], "source destination")
-        _safe_identifier(item["kind"], "source kind")
+        kind = _safe_identifier(item["kind"], "source kind")
+        if target is not Target.PI and kind in _PI_ONLY_SOURCE_KINDS:
+            raise ValueError("Pi-only source kind is invalid for this target")
         _safe_identifier(item["source_format"], "source format")
         if item["optional_role"] is not None:
             _safe_identifier(item["optional_role"], "optional role")
         source_hashes[identifier] = _hash_value(item["sha256"], "source sha256")
-        kind = str(item["kind"])
         source_authorities[identifier] = frozenset()
         if kind == "target-extension":
             source_authorities[identifier] = frozenset({AuthorityCapability.EXTENSION})
         elif kind == "package-policy":
-            source_authorities[identifier] = frozenset({AuthorityCapability.PACKAGE})
+            source_authorities[identifier] = frozenset(
+                {AuthorityCapability.PACKAGE, AuthorityCapability.SKILL}
+            )
         elif kind == "skill":
             source_authorities[identifier] = frozenset({AuthorityCapability.SKILL})
         source_keys.append((kind, identifier))

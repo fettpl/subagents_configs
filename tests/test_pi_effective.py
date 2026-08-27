@@ -45,6 +45,12 @@ def _package(home: Path, *, entries: tuple[str, ...] = ()) -> PiPackageEvidence:
     )
 
 
+def _project(root: Path) -> Path:
+    project = root / "project"
+    project.mkdir(mode=0o700, exist_ok=True)
+    return project
+
+
 class EffectiveCatalogTests(unittest.TestCase):
     def test_clean_empty_scope_returns_complete_contract(self):
         from subagents_configs.pi_effective import inspect_effective_catalog
@@ -54,7 +60,10 @@ class EffectiveCatalogTests(unittest.TestCase):
             agent_dir = root / "agent"
             agent_dir.mkdir(mode=0o700)
             result = inspect_effective_catalog(
-                agent_dir, _rendered(agent_dir), _package(agent_dir), project_root=root
+                agent_dir,
+                _rendered(agent_dir),
+                _package(agent_dir),
+                project_root=_project(root),
             )
             self.assertEqual(result.managed_roles, tuple(PI_DEFAULT_ROLES))
             self.assertEqual(
@@ -77,7 +86,10 @@ class EffectiveCatalogTests(unittest.TestCase):
                 "private settings", encoding="utf-8"
             )
             result = inspect_effective_catalog(
-                agent_dir, _rendered(agent_dir), _package(agent_dir), project_root=root
+                agent_dir,
+                _rendered(agent_dir),
+                _package(agent_dir),
+                project_root=_project(root),
             )
             self.assertTrue(
                 any(item.kind == "path-collision" for item in result.conflicts)
@@ -106,7 +118,7 @@ class EffectiveCatalogTests(unittest.TestCase):
                 agent_dir,
                 _rendered(),
                 _package(agent_dir, entries=("npm:pi-subagents",)),
-                project_root=root,
+                project_root=_project(root),
             )
             kinds = {item.kind for item in result.conflicts}
             self.assertIn("package-drift", kinds)
@@ -129,6 +141,37 @@ class EffectiveCatalogTests(unittest.TestCase):
                     project_root=root / "missing",
                 )
 
+    def test_project_root_overlap_with_pi_home_is_rejected_before_scope_discovery(
+        self,
+    ):
+        from subagents_configs.pi_effective import inspect_effective_catalog
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agent_dir = root / "agent"
+            agent_dir.mkdir(mode=0o700)
+            rendered = _rendered(agent_dir)
+            package = _package(agent_dir)
+            overlapping_roots = (
+                agent_dir,
+                root,
+                agent_dir / "nested-project",
+            )
+            (agent_dir / ".pi/extensions").mkdir(mode=0o700, parents=True)
+            (root / ".pi/extensions").mkdir(mode=0o700, parents=True)
+            (agent_dir / "nested-project/.pi/extensions").mkdir(
+                mode=0o700, parents=True
+            )
+            for project_root in overlapping_roots:
+                with self.subTest(project_root=project_root):
+                    with self.assertRaises(ValueError):
+                        inspect_effective_catalog(
+                            agent_dir,
+                            rendered,
+                            package,
+                            project_root=project_root,
+                        )
+
     def test_exact_repository_managed_files_are_not_collisions(self):
         from subagents_configs.pi_catalog import render_pi_source
         from subagents_configs.pi_effective import inspect_effective_catalog
@@ -137,6 +180,7 @@ class EffectiveCatalogTests(unittest.TestCase):
             root = Path(directory)
             agent_dir = root / "agent"
             (agent_dir / "agents").mkdir(mode=0o700, parents=True)
+            project = _project(root)
             for role in PI_DEFAULT_ROLES:
                 source = (ROOT / "pi/agents" / f"{role}.md").read_bytes()
                 if role == "code-validator":
@@ -145,7 +189,10 @@ class EffectiveCatalogTests(unittest.TestCase):
                 destination.write_bytes(source)
                 destination.chmod(0o600)
             result = inspect_effective_catalog(
-                agent_dir, _rendered(agent_dir), _package(agent_dir), project_root=root
+                agent_dir,
+                _rendered(agent_dir),
+                _package(agent_dir),
+                project_root=project,
             )
             self.assertFalse(
                 any(item.kind == "path-collision" for item in result.conflicts)
@@ -158,12 +205,15 @@ class EffectiveCatalogTests(unittest.TestCase):
             root = Path(directory)
             agent_dir = root / "agent"
             agent_dir.mkdir(mode=0o700)
-            project = root / ".pi"
-            (project / "agents").mkdir(mode=0o700, parents=True)
-            (project / "extensions").mkdir(mode=0o700)
-            (project / "settings.json").write_text("{}", encoding="utf-8")
+            project = _project(root)
+            (project / ".pi/agents").mkdir(mode=0o700, parents=True)
+            (project / ".pi/extensions").mkdir(mode=0o700)
+            (project / ".pi/settings.json").write_text("{}", encoding="utf-8")
             result = inspect_effective_catalog(
-                agent_dir, _rendered(agent_dir), _package(agent_dir), project_root=root
+                agent_dir,
+                _rendered(agent_dir),
+                _package(agent_dir),
+                project_root=project,
             )
             fields = {item.field for item in result.conflicts}
             self.assertTrue(
@@ -199,7 +249,7 @@ class EffectiveCatalogTests(unittest.TestCase):
             )
             rendered = _rendered(agent_dir)
             result = inspect_effective_catalog(
-                agent_dir, rendered, package, project_root=root
+                agent_dir, rendered, package, project_root=_project(root)
             )
             self.assertTrue(any(item.field == "manifest" for item in result.conflicts))
 
@@ -209,7 +259,7 @@ class EffectiveCatalogTests(unittest.TestCase):
                 / "npm/node_modules/pi-subagents/missing.json",
             )
             result = inspect_effective_catalog(
-                agent_dir, rendered, missing_manifest, project_root=root
+                agent_dir, rendered, missing_manifest, project_root=_project(root)
             )
             self.assertTrue(any(item.field == "manifest" for item in result.conflicts))
 
@@ -220,7 +270,7 @@ class EffectiveCatalogTests(unittest.TestCase):
             extension_link.rmdir()
             extension_link.symlink_to(outside, target_is_directory=True)
             result = inspect_effective_catalog(
-                agent_dir, rendered, _package(agent_dir), project_root=root
+                agent_dir, rendered, _package(agent_dir), project_root=_project(root)
             )
             self.assertTrue(any(item.field == "config" for item in result.conflicts))
             self.assertNotIn("secret", repr(result.conflicts))
@@ -234,7 +284,7 @@ class EffectiveCatalogTests(unittest.TestCase):
             )
             manifest.parent.symlink_to(outside_manifest, target_is_directory=True)
             result = inspect_effective_catalog(
-                agent_dir, rendered, package, project_root=root
+                agent_dir, rendered, package, project_root=_project(root)
             )
             self.assertTrue(any(item.field == "manifest" for item in result.conflicts))
             self.assertNotIn("secret", repr(result.conflicts))

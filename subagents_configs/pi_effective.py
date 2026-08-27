@@ -447,6 +447,8 @@ def inspect_effective_catalog(
     """Inspect all effective Pi inputs without executing Pi or package code."""
     agent = _directory(agent_dir, "Pi agent directory")
     project = _directory(project_root, "Pi project root")
+    if _under(agent, project) or _under(project, agent):
+        raise ValueError("Pi agent and project roots must not overlap")
     if not isinstance(rendered, Mapping) or not isinstance(package, PiPackageEvidence):
         raise TypeError("Pi effective catalog inputs have invalid types")
     conflicts: list[PiConflict] = []
@@ -671,7 +673,7 @@ def inspect_effective_catalog(
                 or not stat.S_ISREG(settings_info.st_mode)
             ):
                 raise ValueError("Pi project settings is unsafe")
-            if settings_info is not None and not _under(project_settings, agent):
+            if settings_info is not None:
                 conflicts.append(
                     _conflict(
                         "ambient-extension",
@@ -683,7 +685,7 @@ def inspect_effective_catalog(
                 )
             agents_present = _named_directory_present(scope, "agents")
             _named_files(scope, "agents")
-            if agents_present and not _under(scope / "agents", agent):
+            if agents_present:
                 conflicts.append(
                     _conflict(
                         "ambient-extension",
@@ -695,7 +697,7 @@ def inspect_effective_catalog(
                 )
             extensions_present = _named_directory_present(scope, "extensions")
             _named_files(scope, "extensions")
-            if extensions_present and not _under(scope / "extensions", agent):
+            if extensions_present:
                 conflicts.append(
                     _conflict(
                         "ambient-extension",
