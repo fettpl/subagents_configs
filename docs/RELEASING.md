@@ -64,11 +64,40 @@ denial/helper behavior, and cleanup evidence. An unavailable or wrong-version
 executable is a release failure, not support evidence. Windows remains
 fail-closed and unsupported.
 
+For the release record, preserve the literal command outputs for `python
+--version`, `pi --offline --version`, and `pi --help` only after reviewing them
+for secrets. Also record the exact package-policy SHA-256, upstream source
+commit, distribution SHA-512 integrity, package-manifest and lock-file
+SHA-256 values, manifest/dependency/lifecycle checks, operating system,
+isolation backend, ShellCheck version, and the bounded real-Pi smoke result.
+The real-Pi smoke must use the externally supplied absolute executable for
+exact Pi 0.84.1 and the complete `PiReleaseSmokeTests` suite. Never substitute
+an installed package-manager binary, `npx`, an install script, a source clone,
+or a network probe when evidence is unavailable.
+
 Provider smoke is optional and separate from the base Pi support claim. If it
 is run, or if release notes claim live provider interoperability, it requires
 separate manual consent and explicit provider-smoke authorization. Record only
 the reviewed bounded safe result; never record credentials, raw environment
 values, prompts, responses, or transcripts.
+
+The separately authorized command is:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python scripts/run_pi_provider_smoke.py \
+  --authorize-provider-smoke \
+  --pi-executable /absolute/path/to/pi-0.84.1 \
+  --model PROVIDER/ID \
+  --output /private/tmp/pi-provider-smoke.json
+```
+
+Run it only from an interactive terminal with a reviewed provider credential
+allowlist. The JSON artifact contains schema/version/package/model
+identifiers, start/end status, exit code, and a response-hash match; it does
+not contain the prompt, response, credentials, environment, or transcript.
+Treat a missing, non-private, non-interactive, unreviewed-provider, or
+wrong-version input as a release failure. Provider smoke is never run by
+ordinary CI and is not required for the base Pi support claim.
 
 Normal package/catalog work is not atomic and does not imply automatic package
 rollback. Package removal is a separate manual action using the unversioned

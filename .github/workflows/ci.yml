@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -143,6 +144,13 @@ jobs:
           # The canonical validator owns this fixed discovery argv.
           # python -m unittest discover -s tests -p 'test_*.py'
           .venv/bin/python scripts/validate-repository.py
+          .venv/bin/python -m unittest \
+            tests.test_pi_catalog tests.test_pi_package \
+            tests.test_pi_effective tests.test_pi_integration -v
+          .venv/bin/python scripts/validate-catalogs.py
+          .venv/bin/ruff check subagents_configs scripts tests
+          .venv/bin/ruff format --check subagents_configs scripts tests
+          .venv/bin/python -m compileall -q subagents_configs scripts tests
           if test "${{ matrix.os }}" = "ubuntu-24.04"; then
             shellcheck=""
             if test -f /usr/bin/shellcheck && test -x /usr/bin/shellcheck && test "$(realpath /usr/bin/shellcheck)" = /usr/bin/shellcheck && test "$(stat -c '%u' /usr/bin/shellcheck)" = 0; then
@@ -157,3 +165,44 @@ jobs:
             fi
             "$shellcheck" install.sh uninstall.sh install-codex.sh uninstall-codex.sh install-opencode.sh uninstall-opencode.sh install-claude-code.sh uninstall-claude-code.sh
           fi
+
+  pi-release:
+    if: github.event_name == 'workflow_dispatch'
+    needs: quality
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      PI_EXECUTABLE: ${{ vars.PI_EXECUTABLE }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Require externally supplied exact Pi executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${PI_EXECUTABLE:-}"
+          case "$PI_EXECUTABLE" in
+            /*) ;;
+            *) echo "PI_EXECUTABLE must be an absolute path" >&2; exit 1 ;;
+          esac
+          test -f "$PI_EXECUTABLE"
+          test -x "$PI_EXECUTABLE"
+          test "$(realpath "$PI_EXECUTABLE")" = "$PI_EXECUTABLE"
+          test "$(stat -c '%u:%h' "$PI_EXECUTABLE")" = "$(id -u):1"
+          pi_version="$("$PI_EXECUTABLE" --offline --version)"
+          test "$pi_version" = "0.84.1"
+      - name: Create isolated release test environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv --copies .venv
+      - name: Run mandatory exact Pi release smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          PI_EXECUTABLE="$PI_EXECUTABLE" .venv/bin/python -m unittest tests.test_pi_smoke.PiReleaseSmokeTests -v

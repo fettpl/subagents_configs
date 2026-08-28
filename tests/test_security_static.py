@@ -27,6 +27,7 @@ ACTIVE_PYTHON = tuple(
             *((REPOSITORY / "subagents_configs").rglob("*.py")),
             *(REPOSITORY / "scripts/validation_isolation").rglob("*.py"),
             REPOSITORY / "scripts/run-validation-isolated.py",
+            REPOSITORY / "scripts/run_pi_provider_smoke.py",
             REPOSITORY / "scripts/manage-subagents-configs.py",
             REPOSITORY / "scripts/generate-catalogs.py",
             REPOSITORY / "scripts/validate-catalogs.py",
@@ -66,6 +67,7 @@ EXPECTED_ACTIVE_PYTHON = frozenset(
         "scripts/generate-catalogs.py",
         "scripts/validate-catalogs.py",
         "scripts/run-validation-isolated.py",
+        "scripts/run_pi_provider_smoke.py",
         "scripts/validation_isolation/__init__.py",
         "scripts/validation_isolation/backend.py",
         "scripts/validation_isolation/cli.py",
@@ -483,6 +485,27 @@ class StaticSecurityTests(unittest.TestCase):
         self.assertNotIn("subprocess.run", source)
         self.assertNotIn("subprocess.call", source)
         self.assertNotRegex(source, r"(?<![A-Za-z])(?:npm|npx|node|git)\s")
+
+    def test_provider_smoke_harness_is_bounded_authorized_and_no_fallback(self):
+        source = (REPOSITORY / "scripts/run_pi_provider_smoke.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(_pi_static_issues_from_source(source), [])
+        self.assertIn("authorize-provider-smoke", source)
+        self.assertIn('EXPECTED_PI_VERSION = "0.84.1"', source)
+        self.assertIn("--no-session", source)
+        self.assertIn("--no-context-files", source)
+        self.assertIn("--no-tools", source)
+        self.assertIn("--no-project-context", source)
+        self.assertIn("--no-telemetry", source)
+        self.assertIn("--no-update-check", source)
+        self.assertIn("_MAX_STREAM = 8192", source)
+        self.assertIn("shell=False", source)
+        self.assertIn("close_fds=True", source)
+        self.assertNotIn("subprocess.run", source)
+        self.assertNotRegex(source, r"(?<![A-Za-z])(?:npx|node|git)\s")
+        result_source = source.split("result: dict", 1)[-1]
+        self.assertNotIn("prompt", result_source)
 
     def test_negative_fixture_and_policy_prose_are_outside_executable_scan_scope(self):
         with private_tempdir() as directory:

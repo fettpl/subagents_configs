@@ -40,6 +40,36 @@ COMPATIBILITY_REASONS = frozenset(
         "client_version_too_old",
     }
 )
+
+
+def pi_release_transition_allowed(
+    evidence: Mapping[str, object], *, all_gates_passed: bool
+) -> bool:
+    """Return whether release evidence permits a future Pi support change.
+
+    This predicate is intentionally side-effect free: it never changes the
+    checked-in matrix. The current repository remains truthful until an owner
+    supplies exact real-Pi evidence and confirms every release gate.
+    """
+
+    if type(all_gates_passed) is not bool or not all_gates_passed:
+        return False
+    if not isinstance(evidence, Mapping):
+        return False
+    if evidence.get("status") != "ok" or evidence.get("version") != "0.84.1":
+        return False
+    if evidence.get("package_status") != "exact":
+        return False
+    observed = evidence.get("evidence")
+    if not isinstance(observed, (tuple, list, set, frozenset)):
+        return False
+    return {
+        "PI_SMOKE_OK",
+        "VALIDATOR_HELPER_EXECUTED",
+        "BASH_REJECTED",
+    }.issubset(observed)
+
+
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _FORMATS = frozenset({"toml", "yaml-frontmatter", "markdown"})
 _PLATFORMS = frozenset({"linux", "macos"})

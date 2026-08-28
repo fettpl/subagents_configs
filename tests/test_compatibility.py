@@ -12,6 +12,7 @@ from subagents_configs.compatibility import (
     ClientCompatibility,
     CompatibilityResult,
     load_compatibility_matrix,
+    pi_release_transition_allowed,
     validate_client_compatibility,
 )
 from subagents_configs.errors import CliError
@@ -266,6 +267,31 @@ class CompatibilityLoaderTests(unittest.TestCase):
         self.assertIsNone(pi.package_source)
         self.assertEqual(pi.supported_platforms, ())
         self.assertIsNone(pi.scope)
+
+    def test_pi_transition_is_release_only_and_requires_complete_evidence(self):
+        evidence = {
+            "status": "ok",
+            "version": "0.84.1",
+            "package_status": "exact",
+            "evidence": (
+                "PI_SMOKE_OK",
+                "VALIDATOR_HELPER_EXECUTED",
+                "BASH_REJECTED",
+            ),
+        }
+        self.assertFalse(
+            pi_release_transition_allowed(evidence, all_gates_passed=False)
+        )
+        self.assertTrue(pi_release_transition_allowed(evidence, all_gates_passed=True))
+        incomplete = dict(evidence, evidence=("PI_SMOKE_OK",))
+        self.assertFalse(
+            pi_release_transition_allowed(incomplete, all_gates_passed=True)
+        )
+        rows = load_compatibility_matrix(
+            Path(__file__).parents[1] / "catalogs/client-compatibility.json"
+        )
+        pi = next(row for row in rows if row.target == "pi")
+        self.assertEqual((pi.supported, pi.status), (False, "unreleased"))
 
     def test_status_is_required_and_closed(self):
         valid = _row(status="released")
