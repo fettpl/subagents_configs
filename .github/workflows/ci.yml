@@ -169,12 +169,14 @@ jobs:
   pi-release:
     if: github.event_name == 'workflow_dispatch'
     needs: quality
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, linux, x64, pi-release]
     permissions:
       contents: read
     env:
       PI_EXECUTABLE: ${{ vars.PI_EXECUTABLE }}
       PI_SMOKE_ROOT: ${{ vars.PI_SMOKE_ROOT }}
+      PI_RELEASE_EVIDENCE_OUTPUT: ${{ vars.PI_RELEASE_EVIDENCE_OUTPUT }}
+      PI_RELEASE_BACKEND: ${{ vars.PI_RELEASE_BACKEND }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -188,6 +190,8 @@ jobs:
           set -euo pipefail
           test -n "${PI_EXECUTABLE:-}"
           test -n "${PI_SMOKE_ROOT:-}"
+          test -n "${PI_RELEASE_EVIDENCE_OUTPUT:-}"
+          test -n "${PI_RELEASE_BACKEND:-}"
           case "$PI_EXECUTABLE" in
             /*) ;;
             *) echo "PI_EXECUTABLE must be an absolute path" >&2; exit 1 ;;
@@ -207,6 +211,20 @@ jobs:
           test "$(stat -c '%u' "$PI_SMOKE_ROOT")" = "$(id -u)"
           smoke_root_mode="$(stat -c '%a' "$PI_SMOKE_ROOT")"
           test "$((8#$smoke_root_mode & 8#077))" -eq 0
+          case "$PI_RELEASE_EVIDENCE_OUTPUT" in
+            /*) ;;
+            *) echo "PI_RELEASE_EVIDENCE_OUTPUT must be an absolute path" >&2; exit 1 ;;
+          esac
+          evidence_parent="$(dirname "$PI_RELEASE_EVIDENCE_OUTPUT")"
+          test -d "$evidence_parent"
+          test "$(realpath "$evidence_parent")" = "$evidence_parent"
+          test "$(stat -c '%u' "$evidence_parent")" = "$(id -u)"
+          evidence_parent_mode="$(stat -c '%a' "$evidence_parent")"
+          test "$((8#$evidence_parent_mode & 8#077))" -eq 0
+          case "$PI_RELEASE_BACKEND" in
+            bubblewrap) ;;
+            *) echo "PI_RELEASE_BACKEND must be the trusted bubblewrap backend" >&2; exit 1 ;;
+          esac
       - name: Bootstrap release test environment
         shell: bash
         run: |

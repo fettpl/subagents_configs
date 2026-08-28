@@ -31,6 +31,11 @@ def _write_fake(
     expected_prompt = "PI provider compatibility check\n"
     marker_literal = repr(str(marker))
     descendant_code = f"import time; time.sleep(1); open({marker_literal}, 'w').close()"
+    resistant_code = (
+        "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({(str(marker) + '.ready')!r}, 'w').close(); "
+        f"time.sleep(0.8); open({marker_literal}, 'w').close()"
+    )
     path.write_text(
         f"#!{sys.executable}\n"
         "import json\n"
@@ -60,6 +65,17 @@ def _write_fake(
         "    os.close(sys.stdout.fileno())\n"
         "    os.close(sys.stderr.fileno())\n"
         "    time.sleep(3)\n"
+        f"if {behavior!r} == 'leader-exits-term-resistant':\n"
+        "    import signal\n"
+        "    import subprocess\n"
+        f"    resistant = {resistant_code!r}\n"
+        "    subprocess.Popen([sys.executable, '-c', resistant])\n"
+        f"    print(json.dumps({{'type': 'response', 'command': 'prompt', "
+        f"'success': True, 'data': {{'text': {response!r}}}}}), flush=True)\n"
+        "    time.sleep(0.5)\n"
+        "    os.close(sys.stdout.fileno())\n"
+        "    os.close(sys.stderr.fileno())\n"
+        "    raise SystemExit(0)\n"
         f"if {behavior!r} == 'bad-rpc':\n"
         '    print(\'{"type":"response","type":"response"}\', flush=True)\n'
         "    raise SystemExit(0)\n"
@@ -73,6 +89,34 @@ def _write_fake(
     )
     path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
     return path
+
+
+def _release_evidence() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "status": "ok",
+        "pi_version": "0.84.1",
+        "pi_executable_sha256": "a" * 64,
+        "package_source": "npm:pi-subagents@0.56.0",
+        "package_version": "0.56.0",
+        "package_policy_sha256": (
+            "d0f902d54cda2f073215701b4c04a38480c29ef1a8a7f6e3d4981d70657e4722"
+        ),
+        "upstream_commit": "a0e2b9e31de5970215a567e20e2d781bbbddf235",
+        "dist_integrity": (
+            "sha512-XBmKqvrj4mCVQ6/uXiPqCmzHxGfBB+jjwmfNR3El+IfhnaJwZ+"
+            "W6evXYRI3lQEXe6Nf56xfzUXQExIzE8cT5BQ=="
+        ),
+        "package_manifest_sha256": "b" * 64,
+        "package_lock_sha256": "c" * 64,
+        "platform": "linux",
+        "backend": "bubblewrap",
+        "smoke_evidence": [
+            "PI_SMOKE_OK",
+            "VALIDATOR_HELPER_EXECUTED",
+            "BASH_REJECTED",
+        ],
+    }
 
 
 class PiProviderSmokeTests(unittest.TestCase):
@@ -154,6 +198,19 @@ class PiProviderSmokeTests(unittest.TestCase):
                 )
             observed_data = __import__("json").loads(observed.read_text())
             self.assertNotIn("--offline", observed_data["argv"])
+            contract = json.loads(
+                (
+                    Path(__file__).parents[1]
+                    / "tests/fixtures/pi-0.84.1-runtime-contract.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                tuple(observed_data["argv"]),
+                tuple(
+                    "openai/gpt-test" if argument == "<MODEL>" else argument
+                    for argument in contract["rpc"]["provider_argv"]
+                ),
+            )
             self.assertTrue(
                 set(observed_data["env"]).issubset(
                     {
@@ -312,6 +369,29 @@ class PiProviderSmokeTests(unittest.TestCase):
                 time.sleep(1.2)
                 self.assertFalse(marker.exists())
 
+    def test_term_resistant_descendant_is_killed_after_leader_exits(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pi-provider-term-resistant-") as raw:
+            root = Path(raw)
+            marker = root / "term-resistant-marker"
+            executable = _write_fake(
+                root / "pi",
+                behavior="leader-exits-term-resistant",
+                marker=marker,
+            )
+            with patch.dict(os.environ, {"OPENAI_API_KEY": "synthetic-provider-key"}):
+                with patch("scripts.run_pi_provider_smoke._TIMEOUT_SECONDS", 0.8):
+                    with self.assertRaisesRegex(ProviderSmokeError, "PI_TIMEOUT"):
+                        run_provider_smoke(
+                            executable,
+                            "openai/gpt-test",
+                            root / "result.json",
+                            authorize_provider_smoke=True,
+                            interactive=True,
+                        )
+            self.assertTrue((root / "term-resistant-marker.ready").exists())
+            time.sleep(1.4)
+            self.assertFalse(marker.exists())
+
     def test_executable_identity_rejects_writable_and_replaced_files(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pi-provider-identity-") as raw:
             root = Path(raw)
@@ -444,25 +524,75 @@ class PiProviderSmokeTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         evidence = SimpleNamespace(status="ok", version="0.84.1")
-        with patch.dict(
-            os.environ,
-            {
-                "PI_EXECUTABLE": "/private/var/pi-0.84.1",
-                "PI_SMOKE_ROOT": "/private/var/pi-release-root",
-            },
-            clear=True,
-        ):
-            with patch.object(
-                module,
-                "select_pi_executable",
-                return_value=evidence,
-            ) as selector:
-                self.assertEqual(module.main(), 0)
+        with tempfile.TemporaryDirectory(prefix="pi-release-selector-") as raw:
+            output = Path(raw) / "release-evidence.json"
+            with patch.dict(
+                os.environ,
+                {
+                    "PI_EXECUTABLE": "/private/var/pi-0.84.1",
+                    "PI_SMOKE_ROOT": "/private/var/pi-release-root",
+                    "PI_RELEASE_EVIDENCE_OUTPUT": str(output),
+                    "PI_RELEASE_BACKEND": "bubblewrap",
+                },
+                clear=True,
+            ):
+                with (
+                    patch.object(
+                        module,
+                        "select_pi_executable",
+                        return_value=evidence,
+                    ) as selector,
+                    patch.object(
+                        module,
+                        "build_release_evidence",
+                        return_value=_release_evidence(),
+                    ),
+                ):
+                    self.assertEqual(module.main(), 0)
         selector.assert_called_once_with(
             Path("/private/var/pi-0.84.1"),
             Path("/private/var/pi-release-root"),
             release=True,
         )
+
+    def test_release_entrypoint_records_complete_safe_evidence(self) -> None:
+        script = Path(__file__).parents[1] / "scripts/run-pi-release-smoke.py"
+        spec = importlib.util.spec_from_file_location("pi_release_evidence", script)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        evidence = _release_evidence()
+        with tempfile.TemporaryDirectory(prefix="pi-release-evidence-") as raw:
+            root = Path(raw)
+            output = root / "release-evidence.json"
+            with patch.dict(
+                os.environ,
+                {
+                    "PI_EXECUTABLE": "/private/var/pi-0.84.1",
+                    "PI_SMOKE_ROOT": "/private/var/pi-release-root",
+                    "PI_RELEASE_EVIDENCE_OUTPUT": str(output),
+                    "PI_RELEASE_BACKEND": "bubblewrap",
+                },
+                clear=True,
+            ):
+                with (
+                    patch.object(
+                        module,
+                        "select_pi_executable",
+                        return_value=SimpleNamespace(status="ok", version="0.84.1"),
+                    ),
+                    patch.object(
+                        module, "build_release_evidence", return_value=evidence
+                    ),
+                ):
+                    self.assertEqual(module.main(), 0)
+            recorded = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(recorded, evidence)
+            self.assertEqual(set(recorded), set(evidence))
+            self.assertNotIn("PI_EXECUTABLE", recorded)
+            self.assertNotIn("PI_SMOKE_ROOT", recorded)
+            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
 
     def test_release_entrypoint_resolves_repository_imports_when_run_directly(
         self,

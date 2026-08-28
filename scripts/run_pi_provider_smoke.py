@@ -37,6 +37,18 @@ _RUNTIME_CONTRACT = (
     / "tests/fixtures/pi-0.84.1-runtime-contract.json"
 )
 _RPC_REQUEST = {"type": "prompt", "prompt": _PROMPT}
+_PROVIDER_ARG_TEMPLATE = (
+    "--mode",
+    "rpc",
+    "--no-session",
+    "--no-context-files",
+    "--no-tools",
+    "--no-project-context",
+    "--no-telemetry",
+    "--no-update-check",
+    "--model",
+    "<MODEL>",
+)
 _MAX_MODEL_LENGTH = 256
 _MAX_CREDENTIAL_LENGTH = 4096
 
@@ -111,6 +123,7 @@ def _runtime_rpc_contract() -> dict[str, object]:
         or rpc.get("response_type") != "response"
         or rpc.get("provider_request") != _RPC_REQUEST
         or tuple(rpc.get("provider_response_data_keys", ())) != ("text",)
+        or tuple(rpc.get("provider_argv", ())) != _PROVIDER_ARG_TEMPLATE
     ):
         raise ProviderSmokeError("RPC_CONTRACT_INVALID")
     return rpc
@@ -279,6 +292,16 @@ def _terminate_process(child: object) -> None:
 
     if not isinstance(child, subprocess.Popen):
         return
+
+    def group_exists() -> bool:
+        try:
+            os.killpg(child.pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True
+        return True
+
     try:
         os.killpg(child.pid, signal.SIGTERM)
     except OSError:
@@ -290,17 +313,20 @@ def _terminate_process(child: object) -> None:
     try:
         child.wait(timeout=0.5)
     except subprocess.TimeoutExpired:
+        pass
+    if group_exists():
         try:
             os.killpg(child.pid, signal.SIGKILL)
         except OSError:
-            try:
-                child.kill()
-            except OSError:
-                pass
-        try:
-            child.wait(timeout=0.5)
-        except subprocess.TimeoutExpired:
-            pass
+            if child.poll() is None:
+                try:
+                    child.kill()
+                except OSError:
+                    pass
+    try:
+        child.wait(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _bounded_child(
@@ -430,18 +456,10 @@ def run_provider_smoke(
     version = _version(executable, {**child_environment, "PI_OFFLINE": "1"})
     rpc = _runtime_rpc_contract()
     started = _timestamp()
+    provider_template = tuple(rpc["provider_argv"])
     argv = (
         str(executable),
-        "--mode",
-        "rpc",
-        "--no-session",
-        "--no-context-files",
-        "--no-tools",
-        "--no-project-context",
-        "--no-telemetry",
-        "--no-update-check",
-        "--model",
-        model,
+        *(model if item == "<MODEL>" else item for item in provider_template),
     )
     identity = _executable_identity(executable)
     code, stdout, _stderr = _bounded_child(

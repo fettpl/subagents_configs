@@ -559,10 +559,15 @@ class CiContractTests(unittest.TestCase):
         self.assertEqual(release["needs"], "quality")
         self.assertEqual(release["if"], "github.event_name == 'workflow_dispatch'")
         self.assertEqual(
+            release["runs-on"], ["self-hosted", "linux", "x64", "pi-release"]
+        )
+        self.assertEqual(
             release["env"],
             {
                 "PI_EXECUTABLE": "${{ vars.PI_EXECUTABLE }}",
                 "PI_SMOKE_ROOT": "${{ vars.PI_SMOKE_ROOT }}",
+                "PI_RELEASE_EVIDENCE_OUTPUT": "${{ vars.PI_RELEASE_EVIDENCE_OUTPUT }}",
+                "PI_RELEASE_BACKEND": "${{ vars.PI_RELEASE_BACKEND }}",
             },
         )
         text = "\n".join(
@@ -571,8 +576,12 @@ class CiContractTests(unittest.TestCase):
         )
         self.assertIn('test -n "${PI_EXECUTABLE:-}"', text)
         self.assertIn('test -n "${PI_SMOKE_ROOT:-}"', text)
+        self.assertIn('test -n "${PI_RELEASE_EVIDENCE_OUTPUT:-}"', text)
+        self.assertIn('test -n "${PI_RELEASE_BACKEND:-}"', text)
         self.assertIn('case "$PI_EXECUTABLE" in', text)
         self.assertIn("PI_EXECUTABLE must be an absolute path", text)
+        self.assertIn("PI_RELEASE_EVIDENCE_OUTPUT must be an absolute path", text)
+        self.assertIn("PI_RELEASE_BACKEND must be the trusted bubblewrap backend", text)
         self.assertIn('test -x "$PI_EXECUTABLE"', text)
         self.assertIn("scripts/bootstrap-developer.sh", text)
         self.assertIn("scripts/run-pi-release-smoke.py", text)

@@ -91,3 +91,27 @@ The direct provider entrypoint was verified first as a failing `126`
 permission-denied invocation, then as a passing executable invocation after
 the mode fix. No real Pi, provider, network, package installation, or
 download was performed.
+
+## Review round 2 follow-up
+
+The final five review findings were resolved with regression coverage: process
+groups are escalated to `SIGKILL` even after a leader exits; the manual gate
+requires a trusted pre-provisioned release runner; complete safe smoke facts
+are bound to the release-transition proof; provider argv are fixture-validated;
+and the release helper writes bounded safe evidence rather than reducing it to
+an `OK` line. Pi remains source-unreleased because no external real-Pi evidence
+was supplied.
+
+Fresh ordinary verification on the complete follow-up diff:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -q — 894 passed, 1 skipped
+PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python -m unittest tests.test_pi_provider_smoke tests.test_ci tests.test_compatibility tests.test_pi_smoke tests.test_security_static -q — 105 passed
+PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python scripts/validate-catalogs.py — passed
+/Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/ruff check subagents_configs scripts tests — passed
+/Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/ruff format --check subagents_configs scripts tests — passed
+sh -n ./*.sh; shellcheck install.sh uninstall.sh install-codex.sh uninstall-codex.sh install-opencode.sh uninstall-opencode.sh install-claude-code.sh uninstall-claude-code.sh; PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python -m compileall -q subagents_configs scripts tests; git diff --check — passed
+```
+
+The printed release-evidence objects above were generated solely by fake test
+executables and contain only the explicitly safe schema fields.

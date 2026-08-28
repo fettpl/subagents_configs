@@ -8,6 +8,7 @@ is the only version evidence used.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping
@@ -41,7 +42,6 @@ COMPATIBILITY_REASONS = frozenset(
     }
 )
 
-_RELEASE_PROOF = object()
 _RELEASE_EVIDENCE_KEYS = frozenset(
     {
         "schema_version",
@@ -66,6 +66,49 @@ _RELEASE_MARKERS = frozenset(
 
 
 @dataclass(frozen=True)
+class _ReleaseProof:
+    binding: str
+
+
+def _release_binding(
+    *,
+    schema_version: int,
+    status: str,
+    pi_version: str,
+    pi_executable_sha256: str,
+    package_source: str,
+    package_version: str,
+    package_policy_sha256: str,
+    upstream_commit: str,
+    dist_integrity: str,
+    package_manifest_sha256: str,
+    package_lock_sha256: str,
+    platform: str,
+    backend: str,
+    smoke_evidence: tuple[str, ...],
+) -> str:
+    payload = {
+        "schema_version": schema_version,
+        "status": status,
+        "pi_version": pi_version,
+        "pi_executable_sha256": pi_executable_sha256,
+        "package_source": package_source,
+        "package_version": package_version,
+        "package_policy_sha256": package_policy_sha256,
+        "upstream_commit": upstream_commit,
+        "dist_integrity": dist_integrity,
+        "package_manifest_sha256": package_manifest_sha256,
+        "package_lock_sha256": package_lock_sha256,
+        "platform": platform,
+        "backend": backend,
+        "smoke_evidence": list(smoke_evidence),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+@dataclass(frozen=True)
 class PiReleaseEvidence:
     """Validated, sealed evidence accepted by the release-only predicate."""
 
@@ -83,11 +126,32 @@ class PiReleaseEvidence:
     platform: CompatibilityPlatform
     backend: str
     smoke_evidence: tuple[str, ...]
-    _proof: object = field(repr=False, compare=False)
+    _proof: _ReleaseProof = field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self._proof is not _RELEASE_PROOF:
+        if not isinstance(self._proof, _ReleaseProof):
             raise ValueError("Pi release evidence is not sealed")
+        try:
+            expected_binding = _release_binding(
+                schema_version=self.schema_version,
+                status=self.status,
+                pi_version=self.pi_version,
+                pi_executable_sha256=self.pi_executable_sha256,
+                package_source=self.package_source,
+                package_version=self.package_version,
+                package_policy_sha256=self.package_policy_sha256,
+                upstream_commit=self.upstream_commit,
+                dist_integrity=self.dist_integrity,
+                package_manifest_sha256=self.package_manifest_sha256,
+                package_lock_sha256=self.package_lock_sha256,
+                platform=self.platform,
+                backend=self.backend,
+                smoke_evidence=self.smoke_evidence,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Pi release evidence is not sealed") from exc
+        if self._proof.binding != expected_binding:
+            raise ValueError("Pi release evidence binding is invalid")
         if (
             self.schema_version != 1
             or self.status != "ok"
@@ -163,6 +227,7 @@ def validate_pi_release_evidence(value: Mapping[str, object]) -> PiReleaseEviden
         or not _RELEASE_MARKERS.issubset(markers)
     ):
         raise ValueError("Pi release smoke evidence is incomplete")
+    smoke_tuple = tuple(markers)
     return PiReleaseEvidence(
         schema_version=1,
         status="ok",
@@ -177,9 +242,51 @@ def validate_pi_release_evidence(value: Mapping[str, object]) -> PiReleaseEviden
         package_lock_sha256=value["package_lock_sha256"],  # type: ignore[arg-type]
         platform=value["platform"],  # type: ignore[arg-type]
         backend=value["backend"],  # type: ignore[arg-type]
-        smoke_evidence=tuple(markers),
-        _proof=_RELEASE_PROOF,
+        smoke_evidence=smoke_tuple,
+        _proof=_ReleaseProof(
+            _release_binding(
+                schema_version=1,
+                status="ok",
+                pi_version="0.84.1",
+                pi_executable_sha256=value["pi_executable_sha256"],  # type: ignore[arg-type]
+                package_source="npm:pi-subagents@0.56.0",
+                package_version="0.56.0",
+                package_policy_sha256=value["package_policy_sha256"],  # type: ignore[arg-type]
+                upstream_commit=commit,
+                dist_integrity=value["dist_integrity"],  # type: ignore[arg-type]
+                package_manifest_sha256=value["package_manifest_sha256"],  # type: ignore[arg-type]
+                package_lock_sha256=value["package_lock_sha256"],  # type: ignore[arg-type]
+                platform=value["platform"],  # type: ignore[arg-type]
+                backend=value["backend"],  # type: ignore[arg-type]
+                smoke_evidence=smoke_tuple,
+            )
+        ),
     )
+
+
+def release_evidence_record(evidence: PiReleaseEvidence) -> dict[str, object]:
+    """Return the complete safe JSON record for validated release evidence."""
+
+    if not isinstance(evidence, PiReleaseEvidence):
+        raise TypeError("Pi release evidence must be validated")
+    if not pi_release_transition_allowed(evidence, all_gates_passed=True):
+        raise ValueError("Pi release evidence binding is invalid")
+    return {
+        "schema_version": evidence.schema_version,
+        "status": evidence.status,
+        "pi_version": evidence.pi_version,
+        "pi_executable_sha256": evidence.pi_executable_sha256,
+        "package_source": evidence.package_source,
+        "package_version": evidence.package_version,
+        "package_policy_sha256": evidence.package_policy_sha256,
+        "upstream_commit": evidence.upstream_commit,
+        "dist_integrity": evidence.dist_integrity,
+        "package_manifest_sha256": evidence.package_manifest_sha256,
+        "package_lock_sha256": evidence.package_lock_sha256,
+        "platform": evidence.platform,
+        "backend": evidence.backend,
+        "smoke_evidence": list(evidence.smoke_evidence),
+    }
 
 
 def pi_release_transition_allowed(evidence: object, *, all_gates_passed: bool) -> bool:
@@ -194,7 +301,22 @@ def pi_release_transition_allowed(evidence: object, *, all_gates_passed: bool) -
         return False
     if not isinstance(evidence, PiReleaseEvidence):
         return False
-    return evidence._proof is _RELEASE_PROOF
+    return evidence._proof.binding == _release_binding(
+        schema_version=evidence.schema_version,
+        status=evidence.status,
+        pi_version=evidence.pi_version,
+        pi_executable_sha256=evidence.pi_executable_sha256,
+        package_source=evidence.package_source,
+        package_version=evidence.package_version,
+        package_policy_sha256=evidence.package_policy_sha256,
+        upstream_commit=evidence.upstream_commit,
+        dist_integrity=evidence.dist_integrity,
+        package_manifest_sha256=evidence.package_manifest_sha256,
+        package_lock_sha256=evidence.package_lock_sha256,
+        platform=evidence.platform,
+        backend=evidence.backend,
+        smoke_evidence=evidence.smoke_evidence,
+    )
 
 
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")

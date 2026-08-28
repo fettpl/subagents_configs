@@ -306,6 +306,15 @@ class CompatibilityLoaderTests(unittest.TestCase):
         self.assertTrue(pi_release_transition_allowed(validated, all_gates_passed=True))
         with self.assertRaises(ValueError):
             replace(validated, pi_version="0.84.0")
+        for field, value in {
+            "pi_executable_sha256": "b" * 64,
+            "package_manifest_sha256": "c" * 64,
+            "package_lock_sha256": "d" * 64,
+            "backend": "forged-backend",
+        }.items():
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    replace(validated, **{field: value})
         self.assertFalse(pi_release_transition_allowed(evidence, all_gates_passed=True))
         incomplete = dict(evidence, smoke_evidence=("PI_SMOKE_OK",))
         with self.assertRaises(ValueError):

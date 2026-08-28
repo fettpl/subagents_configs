@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -17,6 +18,7 @@ from tests.pi_smoke_support import (
     PiSmokeEvidence,
     _bounded_process,
     _safe_state,
+    build_release_evidence,
     load_runtime_contract,
     run_pi_smoke,
     select_pi_executable,
@@ -380,6 +382,44 @@ class PiReleaseSmokeTests(unittest.TestCase):
             self._write_exact_package(root / "agent")
             evidence = run_pi_smoke(executable, root, release=True)
             self.assertEqual(evidence.package_status, "exact")
+
+    def test_release_evidence_records_only_bound_safe_facts(self):
+        with tempfile.TemporaryDirectory(prefix="pi-release-evidence-") as temporary:
+            root = Path(temporary)
+            executable = _write_fake_pi(root / "pi")
+            (root / "agent").mkdir(mode=0o700)
+            self._write_exact_package(root / "agent")
+            smoke = run_pi_smoke(executable, root, release=True)
+            backend = "sandbox-exec" if sys.platform == "darwin" else "bubblewrap"
+            record = build_release_evidence(executable, root, smoke, backend=backend)
+            self.assertEqual(record["pi_version"], "0.84.1")
+            self.assertEqual(
+                record["package_lock_sha256"],
+                hashlib.sha256(
+                    (root / "agent/npm/package-lock.json").read_bytes()
+                ).hexdigest(),
+            )
+            self.assertEqual(
+                set(record),
+                {
+                    "schema_version",
+                    "status",
+                    "pi_version",
+                    "pi_executable_sha256",
+                    "package_source",
+                    "package_version",
+                    "package_policy_sha256",
+                    "upstream_commit",
+                    "dist_integrity",
+                    "package_manifest_sha256",
+                    "package_lock_sha256",
+                    "platform",
+                    "backend",
+                    "smoke_evidence",
+                },
+            )
+            self.assertNotIn(str(root), repr(record))
+            self.assertNotIn("PI_CODING_AGENT_DIR", repr(record))
 
     def test_unreviewed_effective_tool_role_is_rejected(self):
         with tempfile.TemporaryDirectory(prefix="pi-smoke-tools-") as temporary:

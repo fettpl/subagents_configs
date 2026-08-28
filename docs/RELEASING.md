@@ -64,12 +64,28 @@ denial/helper behavior, and cleanup evidence. An unavailable or wrong-version
 executable is a release failure, not support evidence. Windows remains
 fail-closed and unsupported.
 
-The manual `workflow_dispatch` release job supplies both `PI_EXECUTABLE` and
-`PI_SMOKE_ROOT`. `PI_EXECUTABLE` is the externally supplied absolute Pi binary;
+The manual `workflow_dispatch` release job runs only on the explicitly
+pre-provisioned trusted runner labeled `self-hosted`, `linux`, `x64`,
+`pi-release`; it is not a hosted runner with path-shaped inputs. The runner
+owner must supply `PI_EXECUTABLE`, `PI_SMOKE_ROOT`,
+`PI_RELEASE_EVIDENCE_OUTPUT`, and `PI_RELEASE_BACKEND` as repository variables.
+`PI_EXECUTABLE` is the externally supplied absolute Pi binary;
 `PI_SMOKE_ROOT` is an existing private disposable smoke root containing the
-exact package receipt/manifest evidence required by `PiReleaseSmokeTests`.
-The release helper invokes the selector with `release=True`, so it never
-creates package evidence or falls back to an unpinned install.
+exact package receipt/manifest evidence required by `PiReleaseSmokeTests`;
+`PI_RELEASE_EVIDENCE_OUTPUT` is an existing-private-parent path for the new
+owner-only evidence file; and `PI_RELEASE_BACKEND` is `bubblewrap` on this
+Linux runner (a macOS runner must use `sandbox-exec`). The release helper
+invokes the selector with `release=True`, so it never creates package evidence
+or falls back to an unpinned install.
+
+After the real smoke succeeds, `scripts/run-pi-release-smoke.py` emits and
+durably records one bounded JSON object containing the exact runtime,
+executable, package-policy, package-manifest/lock, platform/backend, and smoke
+marker evidence required by the compatibility transition predicate. It uses
+an owner-only (`0600`) atomic write and prints no executable paths, package
+paths, credentials, prompts, responses, or transcripts. The recorded object
+is the release evidence artifact; a success line without this artifact is not
+release evidence.
 
 For the release record, preserve the literal command outputs for `python
 --version`, `pi --offline --version`, and `pi --help` only after reviewing them

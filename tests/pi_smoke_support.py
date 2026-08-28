@@ -34,6 +34,7 @@ from subagents_configs.pi_effective import inspect_effective_catalog
 from subagents_configs.pi_package import (
     inspect_pi_package_state,
     load_pi_package_policy,
+    pi_package_policy_hash,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +75,16 @@ _RESPONSE_DATA_OPTIONAL = (
     "package_tools",
 )
 _VALIDATOR_REQUEST = ("--", "bash", "-c", "pi-smoke-forbidden")
+_EXPECTED_RELEASE_SMOKE_EVIDENCE = (
+    "PI_SMOKE_OK",
+    "state-redacted",
+    "PI_VERSION_0.84.1",
+    "RPC_GET_STATE",
+    "OFFLINE",
+    "helper-present;bash-rejected",
+    "VALIDATOR_HELPER_EXECUTED",
+    "BASH_REJECTED",
+)
 _ENV_KEYS = (
     "HOME",
     "PI_CODING_AGENT_DIR",
@@ -219,6 +230,35 @@ def _file_digest(path: Path) -> tuple[int, int, int, int, int, str]:
         item.st_nlink,
         digest,
     )
+
+
+def _owned_private_file_digest(path: Path) -> str:
+    """Hash an already-selected private file without following its final link."""
+
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        item = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(item.st_mode)
+            or item.st_uid != os.getuid()
+            or item.st_nlink != 1
+            or stat.S_IMODE(item.st_mode) & 0o077
+        ):
+            raise ValueError("Pi release package evidence is unsafe")
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        if (item.st_dev, item.st_ino, item.st_size, item.st_nlink) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_nlink,
+        ):
+            raise ValueError("Pi release package evidence changed")
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
 
 
 def _executable_digest(path: Path) -> tuple[int, int, int, int, int, str]:
@@ -637,6 +677,69 @@ def _require_release_package(package) -> None:
     policy = load_pi_package_policy()
     if package.manifest_hash != policy.get("packageJsonSha256"):
         raise ValueError("PI_PACKAGE_INCOMPATIBLE")
+
+
+def build_release_evidence(
+    executable: Path,
+    root: Path,
+    smoke: PiSmokeEvidence,
+    *,
+    backend: str,
+) -> dict[str, object]:
+    """Build the complete safe release record from one successful smoke.
+
+    The record contains only the hashes and reviewed identifiers consumed by
+    the release transition predicate.  Paths, process output, credentials,
+    and Pi state are intentionally excluded.
+    """
+
+    if (
+        not isinstance(smoke, PiSmokeEvidence)
+        or smoke.status != "ok"
+        or smoke.version != "0.84.1"
+        or smoke.package_status != "exact"
+        or not isinstance(backend, str)
+    ):
+        raise ValueError("PI_RELEASE_EVIDENCE_INCOMPLETE")
+    if type(smoke.evidence) is not tuple or smoke.evidence != (
+        _EXPECTED_RELEASE_SMOKE_EVIDENCE
+    ):
+        raise ValueError("PI_RELEASE_EVIDENCE_INCOMPLETE")
+    if sys.platform == "linux":
+        platform = "linux"
+        if backend != "bubblewrap":
+            raise ValueError("PI_RELEASE_BACKEND_INVALID")
+    elif sys.platform == "darwin":
+        platform = "macos"
+        if backend != "sandbox-exec":
+            raise ValueError("PI_RELEASE_BACKEND_INVALID")
+    else:
+        raise ValueError("PI_RELEASE_PLATFORM_UNSUPPORTED")
+
+    if not isinstance(executable, Path) or not isinstance(root, Path):
+        raise TypeError("Pi release paths must be Path values")
+    root = _private_directory(root, "Pi smoke root")
+    agent = _private_directory(root / "agent", "Pi agent directory")
+    package = _package_evidence(agent)
+    _require_release_package(package)
+    policy = load_pi_package_policy()
+    executable_hash = _executable_digest(executable)[-1]
+    return {
+        "schema_version": 1,
+        "status": "ok",
+        "pi_version": "0.84.1",
+        "pi_executable_sha256": executable_hash,
+        "package_source": policy["source"],
+        "package_version": policy["version"],
+        "package_policy_sha256": pi_package_policy_hash(),
+        "upstream_commit": policy["upstreamCommit"],
+        "dist_integrity": policy["distIntegrity"],
+        "package_manifest_sha256": package.manifest_hash,
+        "package_lock_sha256": _owned_private_file_digest(package.installed_lock_path),
+        "platform": platform,
+        "backend": backend,
+        "smoke_evidence": list(smoke.evidence),
+    }
 
 
 def _redact(text: str, agent: Path) -> str:
