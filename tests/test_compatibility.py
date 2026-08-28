@@ -303,7 +303,9 @@ class CompatibilityLoaderTests(unittest.TestCase):
         self.assertFalse(
             pi_release_transition_allowed(validated, all_gates_passed=False)
         )
-        self.assertTrue(pi_release_transition_allowed(validated, all_gates_passed=True))
+        self.assertFalse(
+            pi_release_transition_allowed(validated, all_gates_passed=True)
+        )
         with self.assertRaises(ValueError):
             replace(validated, pi_version="0.84.0")
         for field, value in {

@@ -78,14 +78,17 @@ Linux runner (a macOS runner must use `sandbox-exec`). The release helper
 invokes the selector with `release=True`, so it never creates package evidence
 or falls back to an unpinned install.
 
-After the real smoke succeeds, `scripts/run-pi-release-smoke.py` emits and
-durably records one bounded JSON object containing the exact runtime,
-executable, package-policy, package-manifest/lock, platform/backend, and smoke
-marker evidence required by the compatibility transition predicate. It uses
-an owner-only (`0600`) atomic write and prints no executable paths, package
-paths, credentials, prompts, responses, or transcripts. The recorded object
-is the release evidence artifact; a success line without this artifact is not
-release evidence.
+The release helper currently fails closed before starting Pi because this
+revision does not yet wire a verified Bubblewrap/Seatbelt wrapper into the
+Pi smoke harness. No backend name is recorded as evidence for an unsandboxed
+child, and no release artifact is produced in that state. A separately
+reviewed owner change must add the actual wrapper and a matching
+`SANDBOX_VERIFIED` smoke marker before a release can proceed. Once that gate
+exists, the helper will emit and durably record one bounded JSON object
+containing the exact runtime, executable, package-policy, package-manifest/
+lock, platform/backend, and smoke-marker evidence required by the compatibility
+record. It uses an owner-only (`0600`) atomic write and prints no executable
+paths, package paths, credentials, prompts, responses, or transcripts.
 
 For the release record, preserve the literal command outputs for `python
 --version`, `pi --offline --version`, and `pi --help` only after reviewing them
@@ -127,7 +130,10 @@ rollback. Package removal is a separate manual action using the unversioned
 `npm:pi-subagents` command only after exact pinned receipt evidence. The owner
 must manually inspect the complete diff, approve third-party execution and
 publication, obtain independent security/documentation review, and sign the
-commit/tag before changing `supported: false` to `supported: true`.
+commit/tag before changing `supported: false` to `supported: true`. The
+compatibility transition predicate remains deliberately false until that
+owner-reviewed transition commit; a self-hashed caller record cannot
+authorize support.
 
 ## Clean-tree verification
 

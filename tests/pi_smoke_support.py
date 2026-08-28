@@ -120,6 +120,7 @@ class PiSmokeEvidence:
     validator: str
     package_status: str
     evidence: tuple[str, ...]
+    sandbox_backend: str | None = None
     error: str | None = None
 
     @property
@@ -540,6 +541,15 @@ def _bounded_process(
     timed_out = False
 
     def terminate_group() -> None:
+        def group_exists() -> bool:
+            try:
+                os.killpg(child.pid, 0)
+            except ProcessLookupError:
+                return False
+            except OSError:
+                return True
+            return True
+
         try:
             os.killpg(child.pid, signal.SIGTERM)
         except OSError:
@@ -548,14 +558,17 @@ def _bounded_process(
         try:
             child.wait(timeout=0.5)
         except subprocess.TimeoutExpired:
+            pass
+        if group_exists():
             try:
                 os.killpg(child.pid, signal.SIGKILL)
             except OSError:
-                child.kill()
-            try:
-                child.wait(timeout=0.5)
-            except subprocess.TimeoutExpired:
-                pass
+                if child.poll() is None:
+                    child.kill()
+        try:
+            child.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
 
     try:
         while selector.get_map():
@@ -698,6 +711,7 @@ def build_release_evidence(
         or smoke.status != "ok"
         or smoke.version != "0.84.1"
         or smoke.package_status != "exact"
+        or smoke.sandbox_backend != backend
         or not isinstance(backend, str)
     ):
         raise ValueError("PI_RELEASE_EVIDENCE_INCOMPLETE")
@@ -902,6 +916,11 @@ def run_pi_smoke(
     load_runtime_contract()
     if not isinstance(executable, Path):
         raise TypeError("Pi executable must be a Path")
+    if release:
+        # This release path is intentionally closed until a reviewed wrapper
+        # executes the Pi child through a verified Bubblewrap/Seatbelt backend
+        # and supplies the matching sandbox proof to the evidence builder.
+        raise ValueError("PI_RELEASE_SANDBOX_UNAVAILABLE")
     root = _private_directory(root, "Pi smoke root")
     agent = _private_directory(root / "agent", "Pi agent directory")
     project = _private_directory(root / "project", "Pi project directory")

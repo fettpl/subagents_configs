@@ -269,8 +269,6 @@ def release_evidence_record(evidence: PiReleaseEvidence) -> dict[str, object]:
 
     if not isinstance(evidence, PiReleaseEvidence):
         raise TypeError("Pi release evidence must be validated")
-    if not pi_release_transition_allowed(evidence, all_gates_passed=True):
-        raise ValueError("Pi release evidence binding is invalid")
     return {
         "schema_version": evidence.schema_version,
         "status": evidence.status,
@@ -299,24 +297,10 @@ def pi_release_transition_allowed(evidence: object, *, all_gates_passed: bool) -
 
     if type(all_gates_passed) is not bool or not all_gates_passed:
         return False
-    if not isinstance(evidence, PiReleaseEvidence):
-        return False
-    return evidence._proof.binding == _release_binding(
-        schema_version=evidence.schema_version,
-        status=evidence.status,
-        pi_version=evidence.pi_version,
-        pi_executable_sha256=evidence.pi_executable_sha256,
-        package_source=evidence.package_source,
-        package_version=evidence.package_version,
-        package_policy_sha256=evidence.package_policy_sha256,
-        upstream_commit=evidence.upstream_commit,
-        dist_integrity=evidence.dist_integrity,
-        package_manifest_sha256=evidence.package_manifest_sha256,
-        package_lock_sha256=evidence.package_lock_sha256,
-        platform=evidence.platform,
-        backend=evidence.backend,
-        smoke_evidence=evidence.smoke_evidence,
-    )
+    # No caller-provided mapping, self-hashed record, or locally constructed
+    # evidence can authorize support.  An owner-reviewed transition commit is
+    # required to replace this deliberate fail-closed boundary.
+    return False
 
 
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")

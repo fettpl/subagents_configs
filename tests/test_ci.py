@@ -557,7 +557,9 @@ class CiContractTests(unittest.TestCase):
         release = self.workflow["jobs"].get("pi-release")
         self.assertIsNotNone(release)
         self.assertEqual(release["needs"], "quality")
-        self.assertEqual(release["if"], "github.event_name == 'workflow_dispatch'")
+        self.assertIn("github.event_name == 'workflow_dispatch'", release["if"])
+        self.assertIn("github.ref == 'refs/heads/main'", release["if"])
+        self.assertIn("github.ref_protected == true", release["if"])
         self.assertEqual(
             release["runs-on"], ["self-hosted", "linux", "x64", "pi-release"]
         )
@@ -578,6 +580,12 @@ class CiContractTests(unittest.TestCase):
         self.assertIn('test -n "${PI_SMOKE_ROOT:-}"', text)
         self.assertIn('test -n "${PI_RELEASE_EVIDENCE_OUTPUT:-}"', text)
         self.assertIn('test -n "${PI_RELEASE_BACKEND:-}"', text)
+        self.assertIn("ref: ${{ github.sha }}", self.text)
+        self.assertIn("Verify protected reviewed main checkout", text)
+        self.assertIn('test "${GITHUB_REF:-}" = "$EXPECTED_REF"', text)
+        self.assertIn('test "${GITHUB_REF_PROTECTED:-false}" = true', text)
+        self.assertIn('test "$EXPECTED_SHA" = "$(git rev-parse HEAD)"', text)
+        self.assertIn("git status --porcelain=v1 --untracked-files=all", text)
         self.assertIn('case "$PI_EXECUTABLE" in', text)
         self.assertIn("PI_EXECUTABLE must be an absolute path", text)
         self.assertIn("PI_RELEASE_EVIDENCE_OUTPUT must be an absolute path", text)

@@ -15,7 +15,6 @@ if str(_REPOSITORY) not in sys.path:
 from scripts.run_pi_provider_smoke import _private_output  # noqa: E402
 from subagents_configs import filesystem  # noqa: E402
 from subagents_configs.compatibility import (  # noqa: E402
-    pi_release_transition_allowed,
     release_evidence_record,
     validate_pi_release_evidence,
 )
@@ -52,8 +51,6 @@ def main() -> int:
             executable, smoke_root, evidence, backend=backend
         )
         validated = validate_pi_release_evidence(raw_record)
-        if not pi_release_transition_allowed(validated, all_gates_passed=True):
-            raise ValueError("PI_RELEASE_EVIDENCE_INVALID")
         record = release_evidence_record(validated)
         payload = (
             json.dumps(record, ensure_ascii=True, sort_keys=True, indent=2) + "\n"

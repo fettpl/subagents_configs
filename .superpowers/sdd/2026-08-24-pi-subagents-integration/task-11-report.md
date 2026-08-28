@@ -115,3 +115,42 @@ sh -n ./*.sh; shellcheck install.sh uninstall.sh install-codex.sh uninstall-code
 
 The printed release-evidence objects above were generated solely by fake test
 executables and contain only the explicitly safe schema fields.
+
+## Review round 3 follow-up
+
+The four round-3 findings are resolved with an explicit fail-closed boundary:
+
+- the release smoke path now stops before starting Pi with
+  `PI_RELEASE_SANDBOX_UNAVAILABLE` until a separately reviewed
+  Bubblewrap/Seatbelt wrapper supplies verified sandbox evidence; it does not
+  claim that an unsandboxed child used the configured backend or produce a
+  release artifact;
+- the manual `pi-release` job is restricted to protected `main`, checks out
+  the exact `github.sha`, and verifies the protected ref, commit identity, and
+  clean tree before Python setup, bootstrap, or smoke execution;
+- bounded process cleanup checks the process group after the leader exits and
+  escalates to `SIGKILL`, with a regression fixture whose descendant ignores
+  `SIGTERM`; and
+- `PiReleaseEvidence` can still validate and bind safe facts, but the
+  compatibility transition predicate remains false for every caller-provided
+  record until a manual owner-reviewed transition commit replaces this
+  boundary. A fabricated or altered record therefore cannot authorize
+  support. The Pi catalog row remains `supported: false`.
+
+Canonical ordinary verification after the round-3 changes:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -q — 895 passed, 1 skipped
+PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python -m unittest tests.test_pi_smoke.PiReleaseSmokeTests.test_release_fails_closed_without_verified_sandbox tests.test_pi_smoke.PiReleaseSmokeTests.test_release_evidence_cannot_claim_an_unused_backend tests.test_pi_smoke.PiReleaseSmokeTests.test_term_resistant_descendant_is_killed_after_leader_exits tests.test_compatibility.CompatibilityLoaderTests.test_pi_transition_is_release_only_and_requires_complete_evidence tests.test_ci.CiContractTests.test_release_job_requires_external_exact_pi_and_full_release_smoke -v — 5 passed
+PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python scripts/validate-catalogs.py — passed
+/Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/ruff check subagents_configs scripts tests — passed
+/Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/ruff format --check subagents_configs scripts tests — passed (87 files)
+sh -n ./*.sh — passed
+shellcheck install.sh uninstall.sh install-codex.sh uninstall-codex.sh install-opencode.sh uninstall-opencode.sh install-claude-code.sh uninstall-claude-code.sh — passed
+PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python -m compileall -q subagents_configs scripts tests — passed
+git diff --check — passed
+```
+
+No real Pi, provider, network, package installation, or download was
+performed. Release evidence objects in tests came only from fake executables
+and synthetic fixture data.
