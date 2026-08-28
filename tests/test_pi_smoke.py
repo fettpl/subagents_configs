@@ -250,6 +250,21 @@ class PiSmokeContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 run_pi_smoke(executable, root)
 
+    def test_symlinked_extension_directory_is_rejected_before_write(self):
+        with tempfile.TemporaryDirectory(
+            prefix="pi-smoke-extension-link-"
+        ) as temporary:
+            root = Path(temporary)
+            executable = _write_fake_pi(root / "pi")
+            agent = root / "agent"
+            agent.mkdir(mode=0o700)
+            outside = root / "outside"
+            outside.mkdir(mode=0o700)
+            (agent / "extensions").symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                run_pi_smoke(executable, root)
+            self.assertFalse((outside / "subagents-configs-run-validation.ts").exists())
+
     def test_malformed_package_tools_are_rejected(self):
         malformed = (None, [], {"delegate": "bash"}, {"delegate": ["read", 1]})
         for payload in malformed:

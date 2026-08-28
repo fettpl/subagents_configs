@@ -305,9 +305,10 @@ def _source_inventory() -> tuple[str, ...]:
 
 
 def _install_extension(agent: Path) -> None:
-    extension_dir = agent / "extensions"
-    extension_dir.mkdir(mode=0o700, exist_ok=True)
-    extension_dir.chmod(0o700)
+    # Validate the conventional loader directory with lstat before selecting
+    # any target below it; a symlink here could redirect the write outside the
+    # private Pi home.
+    extension_dir = _private_directory(agent / "extensions", "Pi extension directory")
     target = extension_dir / "subagents-configs-run-validation.ts"
     source = ROOT / "pi/extensions/run-validation.ts"
     if not target.exists():
