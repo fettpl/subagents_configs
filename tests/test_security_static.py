@@ -470,9 +470,7 @@ class StaticSecurityTests(unittest.TestCase):
                     self.assertTrue(issues)
 
     def test_pi_smoke_harness_is_bounded_offline_and_fixed_argv(self):
-        source = (REPOSITORY / "tests/pi_smoke_support.py").read_text(
-            encoding="utf-8"
-        )
+        source = (REPOSITORY / "tests/pi_smoke_support.py").read_text(encoding="utf-8")
         self.assertEqual(_pi_static_issues_from_source(source), [])
         self.assertIn("EXPECTED_CLI_ARGS", source)
         self.assertIn('"PI_OFFLINE": "1"', source)
