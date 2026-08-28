@@ -10,7 +10,7 @@
     "response_type": "response",
     "response_required_keys": ["type", "command", "success", "data"],
     "response_data_required_keys": ["model", "thinkingLevel", "isStreaming", "isCompacting", "steeringMode", "followUpMode", "sessionFile", "sessionId", "autoCompactionEnabled", "messageCount", "pendingMessageCount"],
-    "response_data_optional_keys": ["sessionName"]
+    "response_data_optional_keys": ["sessionName", "version", "agents", "extensions", "tools", "packages", "package_tools"]
   },
   "extension": {
     "loader": "extensions",

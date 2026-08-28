@@ -12,6 +12,7 @@ import os
 import selectors
 import stat
 import subprocess
+import sys
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -21,11 +22,18 @@ from subagents_configs.pi_catalog import (
     PI_BUNDLED_ROLES,
     PI_DEFAULT_ROLES,
     PI_OPTIONAL_ROLES,
+    PUSHER_TOOLS,
     READ_TOOLS,
     VALIDATOR_TOOLS,
     WRITE_TOOLS,
+    render_pi_source,
+    validate_pi_agent,
 )
-from subagents_configs.pi_package import load_pi_package_policy
+from subagents_configs.pi_effective import inspect_effective_catalog
+from subagents_configs.pi_package import (
+    inspect_pi_package_state,
+    load_pi_package_policy,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_CONTRACT_PATH = ROOT / "tests/fixtures/pi-0.84.1-runtime-contract.json"
@@ -40,6 +48,31 @@ _REQUEST = b'{"type":"get_state"}\n'
 _MAX_STREAM = 8192
 _TIMEOUT = 30.0
 _FORBIDDEN_TOOLS = frozenset({"bash", "write", "edit", "mcp", "skills", "packages"})
+_REVIEWED_EXTENSIONS = ("subagents-configs-run-validation.ts",)
+_RESPONSE_KEYS = ("type", "command", "success", "data")
+_RESPONSE_DATA_REQUIRED = (
+    "model",
+    "thinkingLevel",
+    "isStreaming",
+    "isCompacting",
+    "steeringMode",
+    "followUpMode",
+    "sessionFile",
+    "sessionId",
+    "autoCompactionEnabled",
+    "messageCount",
+    "pendingMessageCount",
+)
+_RESPONSE_DATA_OPTIONAL = (
+    "sessionName",
+    "version",
+    "agents",
+    "extensions",
+    "tools",
+    "packages",
+    "package_tools",
+)
+_VALIDATOR_REQUEST = ("--", "bash", "-c", "pi-smoke-forbidden")
 _ENV_KEYS = (
     "HOME",
     "PI_CODING_AGENT_DIR",
@@ -48,6 +81,19 @@ _ENV_KEYS = (
     "PI_TELEMETRY",
     "TMPDIR",
 )
+
+
+def _strict_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Pi RPC response contains duplicate keys")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> object:
+    raise ValueError(f"Pi RPC response contains non-standard value: {value}")
 
 
 @dataclass(frozen=True)
@@ -106,6 +152,10 @@ def load_runtime_contract() -> dict[str, object]:
         rpc.get("response_required_keys", ())
     ) != ("type", "command", "success", "data"):
         raise ValueError("Pi runtime response contract is invalid")
+    if tuple(rpc.get("response_data_required_keys", ())) != _RESPONSE_DATA_REQUIRED:
+        raise ValueError("Pi runtime response data contract is invalid")
+    if tuple(rpc.get("response_data_optional_keys", ())) != _RESPONSE_DATA_OPTIONAL:
+        raise ValueError("Pi runtime response data optional contract is invalid")
     extension = value.get("extension")
     if (
         not isinstance(extension, dict)
@@ -116,6 +166,7 @@ def load_runtime_contract() -> dict[str, object]:
     if (
         not isinstance(identity, dict)
         or identity.get("safe_version_field") != "version"
+        or tuple(identity.get("version_argv", ())) != ("--offline", "--version")
     ):
         raise ValueError("Pi runtime identity contract is invalid")
     return value
@@ -132,6 +183,21 @@ def _private_directory(path: Path, label: str) -> Path:
         part in {".", ".."} for part in path.parts
     ):
         raise ValueError(f"{label} must be canonical")
+    current = Path(path.anchor)
+    for component in path.parts[1:]:
+        current /= component
+        try:
+            item = os.lstat(current)
+        except FileNotFoundError:
+            break
+        if stat.S_ISLNK(item.st_mode):
+            if current == Path("/var") and Path(os.path.realpath(current)) == Path(
+                "/private/var"
+            ):
+                continue
+            raise ValueError(f"{label} contains an unsafe ancestor")
+        if current != path and not stat.S_ISDIR(item.st_mode):
+            raise ValueError(f"{label} contains a non-directory ancestor")
     if path.is_symlink() or (path.exists() and not path.is_dir()):
         raise ValueError(f"{label} is unsafe")
     path.mkdir(mode=0o700, exist_ok=True)
@@ -192,9 +258,17 @@ def _install_helper(agent: Path) -> None:
     target = agent / ".subagents_configs/validation/run-validation-isolated.py"
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     target.parent.chmod(0o700)
+    dependency_dir = target.parent / "validation_isolation"
+    dependency_dir.mkdir(mode=0o700, exist_ok=True)
+    dependency_dir.chmod(0o700)
     if not target.exists():
         target.write_bytes((ROOT / "scripts/run-validation-isolated.py").read_bytes())
         target.chmod(0o600)
+    for source in sorted((ROOT / "scripts/validation_isolation").glob("*.py")):
+        dependency = dependency_dir / source.name
+        if not dependency.exists():
+            dependency.write_bytes(source.read_bytes())
+            dependency.chmod(0o600)
     if (
         target.is_symlink()
         or not target.is_file()
@@ -206,6 +280,19 @@ def _install_helper(agent: Path) -> None:
         raise ValueError("Pi validation helper is not the reviewed helper")
     if b"bash" in expected.lower():
         raise ValueError("Pi validation helper cannot invoke Bash")
+    expected_dependencies = tuple(
+        source.name
+        for source in sorted((ROOT / "scripts/validation_isolation").glob("*.py"))
+    )
+    if (
+        tuple(path.name for path in sorted(dependency_dir.glob("*.py")))
+        != expected_dependencies
+    ):
+        raise ValueError("Pi validation helper dependencies are incomplete")
+    for source in sorted((ROOT / "scripts/validation_isolation").glob("*.py")):
+        dependency = dependency_dir / source.name
+        if dependency.read_bytes() != source.read_bytes():
+            raise ValueError("Pi validation helper dependency is not reviewed")
 
 
 def _source_inventory() -> tuple[str, ...]:
@@ -217,12 +304,94 @@ def _source_inventory() -> tuple[str, ...]:
     return tuple(role for role in PI_DEFAULT_ROLES + PI_OPTIONAL_ROLES if role in names)
 
 
+def _install_extension(agent: Path) -> None:
+    extension_dir = agent / "extensions"
+    extension_dir.mkdir(mode=0o700, exist_ok=True)
+    extension_dir.chmod(0o700)
+    target = extension_dir / "subagents-configs-run-validation.ts"
+    source = ROOT / "pi/extensions/run-validation.ts"
+    if not target.exists():
+        target.write_bytes(source.read_bytes())
+        target.chmod(0o600)
+    if (
+        target.is_symlink()
+        or not target.is_file()
+        or stat.S_IMODE(target.stat().st_mode) != 0o600
+        or target.read_bytes() != source.read_bytes()
+    ):
+        raise ValueError("Pi validator extension is not reviewed")
+
+
+def _extension_inventory(agent: Path) -> tuple[str, ...]:
+    extension_dir = agent / "extensions"
+    names: list[str] = []
+    for path in sorted(extension_dir.glob("*.ts")):
+        item = os.lstat(path)
+        if stat.S_ISLNK(item.st_mode) or not stat.S_ISREG(item.st_mode):
+            raise ValueError("Pi extension inventory is unsafe")
+        names.append(path.name)
+    result = tuple(names)
+    if result != _REVIEWED_EXTENSIONS:
+        raise ValueError("Pi ambient or unreviewed extension discovered")
+    return result
+
+
+def _repository_signature() -> tuple[tuple[str, str], ...]:
+    paths = [
+        *(ROOT / "pi/agents").glob("*.md"),
+        ROOT / "pi/extensions/run-validation.ts",
+        ROOT / "scripts/run-validation-isolated.py",
+        *((ROOT / "scripts/validation_isolation").glob("*.py")),
+    ]
+    return tuple(
+        (
+            path.relative_to(ROOT).as_posix(),
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for path in sorted(paths)
+    )
+
+
+def _rendered_catalog(agent: Path) -> dict[str, object]:
+    rendered: dict[str, object] = {}
+    for role in (*PI_DEFAULT_ROLES, *PI_OPTIONAL_ROLES):
+        source = ROOT / "pi/agents" / f"{role}.md"
+        source_bytes = source.read_bytes()
+        if role == "code-validator":
+            source_bytes = render_pi_source(source_bytes, agent_dir=agent)
+            rendered[role] = validate_pi_agent(
+                role, source_bytes, allow_rendered_extension=True
+            )
+        else:
+            rendered[role] = validate_pi_agent(role, source_bytes)
+    return rendered
+
+
 def _bundled_inventory() -> tuple[str, ...]:
     policy = load_pi_package_policy()
     bundled = policy.get("bundledAgents")
     if tuple(bundled or ()) != tuple(PI_BUNDLED_ROLES):
         raise ValueError("Pi bundled inventory drifted")
     return tuple(PI_BUNDLED_ROLES)
+
+
+def _package_evidence(agent: Path):
+    try:
+        return inspect_pi_package_state(agent)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ValueError("Pi installed package evidence is invalid") from exc
+
+
+def _check_effective_catalog(agent: Path, project: Path, package) -> None:
+    rendered = _rendered_catalog(agent)
+    result = inspect_effective_catalog(
+        agent,
+        rendered,
+        package,
+        project_root=project,
+    )
+    if result.conflicts:
+        raise ValueError("Pi effective discovery has unreviewed authority")
 
 
 def _package_signature(agent: Path) -> tuple[str, ...]:
@@ -248,13 +417,8 @@ def _catalog_signature() -> tuple[str, ...]:
     )
 
 
-def _bounded_child(
-    executable: Path, agent: Path, project: Path, temporary: Path
-) -> tuple[int, bytes, bytes]:
-    contract = load_runtime_contract()
-    if tuple(contract["cli"]["argv"]) != EXPECTED_CLI_ARGS:  # type: ignore[index]
-        raise ValueError("Pi CLI contract changed")
-    env = {
+def _smoke_environment(agent: Path, temporary: Path) -> dict[str, str]:
+    return {
         "HOME": os.fspath(agent),
         "PI_CODING_AGENT_DIR": os.fspath(agent),
         "PI_OFFLINE": "1",
@@ -262,9 +426,19 @@ def _bounded_child(
         "PI_TELEMETRY": "0",
         "TMPDIR": os.fspath(temporary),
     }
+
+
+def _bounded_process(
+    argv: tuple[str, ...],
+    request: bytes,
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+) -> tuple[int, bytes, bytes]:
+    env = {str(key): str(value) for key, value in env.items() if str(key) in _ENV_KEYS}
     child = subprocess.Popen(  # noqa: S603 - argv and executable are fixture-checked
-        [os.fspath(executable), *EXPECTED_CLI_ARGS],
-        cwd=project,
+        list(argv),
+        cwd=cwd,
         env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -277,7 +451,8 @@ def _bounded_child(
         and child.stdout is not None
         and child.stderr is not None
     )
-    child.stdin.write(_REQUEST)
+    if request:
+        child.stdin.write(request)
     child.stdin.close()
     selector = selectors.DefaultSelector()
     selector.register(child.stdout, selectors.EVENT_READ, "stdout")
@@ -299,9 +474,7 @@ def _bounded_child(
                     selector.unregister(key.fileobj)
                     continue
                 chunks[key.data].extend(data[: _MAX_STREAM - len(chunks[key.data])])
-                if len(data) > _MAX_STREAM - len(chunks[key.data]) + len(
-                    data[: _MAX_STREAM - len(chunks[key.data])]
-                ):
+                if len(data) > _MAX_STREAM - len(chunks[key.data]):
                     timed_out = True
                     break
             if timed_out:
@@ -326,6 +499,89 @@ def _bounded_child(
     )
 
 
+def _bounded_child(
+    executable: Path, agent: Path, project: Path, temporary: Path
+) -> tuple[int, bytes, bytes]:
+    contract = load_runtime_contract()
+    if tuple(contract["cli"]["argv"]) != EXPECTED_CLI_ARGS:  # type: ignore[index]
+        raise ValueError("Pi CLI contract changed")
+    _executable_digest(executable)
+    return _bounded_process(
+        (os.fspath(executable), *EXPECTED_CLI_ARGS),
+        _REQUEST,
+        cwd=project,
+        env=_smoke_environment(agent, temporary),
+    )
+
+
+def _probe_version(
+    executable: Path, agent: Path, project: Path, temporary: Path
+) -> str:
+    contract = load_runtime_contract()
+    identity = contract["identity"]
+    if not isinstance(identity, dict):
+        raise ValueError("Pi runtime identity contract is invalid")
+    version_argv = tuple(identity["version_argv"])
+    if version_argv != ("--offline", "--version"):
+        raise ValueError("Pi version probe argv is not reviewed")
+    _executable_digest(executable)
+    code, stdout, _stderr = _bounded_process(
+        (os.fspath(executable), *version_argv),
+        b"",
+        cwd=project,
+        env=_smoke_environment(agent, temporary),
+    )
+    value = _redact(stdout.decode("utf-8", "replace"), agent)
+    if code != 0 or value != "0.84.1\n":
+        raise ValueError("PI_RUNTIME_INCOMPATIBLE")
+    return "0.84.1"
+
+
+def _run_validator_helper(agent: Path, project: Path, temporary: Path) -> None:
+    helper = agent / ".subagents_configs/validation/run-validation-isolated.py"
+    argv = (sys.executable, "-B", os.fspath(helper), *_VALIDATOR_REQUEST)
+    code, stdout, stderr = _bounded_process(
+        argv,
+        b"",
+        cwd=project,
+        env=_smoke_environment(agent, temporary),
+    )
+    redacted = _redact((stdout + stderr).decode("utf-8", "replace"), agent)
+    if code == 0 or "validation shell execution is not allowed" not in redacted:
+        raise ValueError("Pi validator Bash denial failed")
+
+
+def _require_release_package(package) -> None:
+    """Require the complete installed-package evidence for release probes."""
+
+    if (
+        package.status != "exact"
+        or not package.exact_pinned_entry
+        or not package.package_identity_valid
+        or package.installed_lock_path is None
+        or package.installed_lock_root_hash is None
+        or package.package_manifest_path is None
+        or package.manifest_hash is None
+    ):
+        raise ValueError("PI_PACKAGE_INCOMPATIBLE")
+    for path, mode in (
+        (package.installed_lock_path, 0o600),
+        (package.package_manifest_path, 0o600),
+    ):
+        item = os.lstat(path)
+        if (
+            stat.S_ISLNK(item.st_mode)
+            or not stat.S_ISREG(item.st_mode)
+            or item.st_uid != os.getuid()
+            or item.st_nlink != 1
+            or stat.S_IMODE(item.st_mode) != mode
+        ):
+            raise ValueError("PI_PACKAGE_INCOMPATIBLE")
+    policy = load_pi_package_policy()
+    if package.manifest_hash != policy.get("packageJsonSha256"):
+        raise ValueError("PI_PACKAGE_INCOMPATIBLE")
+
+
 def _redact(text: str, agent: Path) -> str:
     result = text.replace(os.fspath(agent), "<PI_AGENT_DIR>")
     result = result.replace("pi-subagents@0.56.0", "<PACKAGE>")
@@ -334,7 +590,9 @@ def _redact(text: str, agent: Path) -> str:
     return result
 
 
-def _safe_state(stdout: bytes, agent: Path) -> tuple[dict[str, object], str]:
+def _safe_state(
+    stdout: bytes, agent: Path, version: str
+) -> tuple[dict[str, object], str]:
     decoded = stdout.decode("utf-8", "replace")
     lines = decoded.split("\n")
     if any("\r" in line for line in lines):
@@ -344,62 +602,93 @@ def _safe_state(stdout: bytes, agent: Path) -> tuple[dict[str, object], str]:
     if len(lines) != 1:
         raise ValueError("Pi RPC did not return one state response")
     try:
-        state = json.loads(lines[0])
-    except json.JSONDecodeError as exc:
+        state = json.loads(
+            lines[0],
+            object_pairs_hook=_strict_pairs,
+            parse_constant=_reject_json_constant,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
         raise ValueError("Pi RPC state is invalid") from exc
     if not isinstance(state, dict):
         raise ValueError("Pi RPC state type is invalid")
-    if state.get("type") == "response":
-        if (
-            state.get("command") != "get_state"
-            or state.get("success") is not True
-            or not isinstance(state.get("data"), dict)
-        ):
-            raise ValueError("Pi RPC get_state response is invalid")
-        state = dict(state["data"])
-        state.setdefault("type", "state")
-        state.setdefault("version", "0.84.1")
-        state.setdefault("agents", list(PI_DEFAULT_ROLES))
-        state.setdefault("extensions", ["subagents-configs-run-validation.ts"])
-        state.setdefault(
-            "tools",
-            {
-                role: list(
-                    READ_TOOLS
-                    if role in {"code-explorer", "code-reviewer"}
-                    else VALIDATOR_TOOLS
-                    if role == "code-validator"
-                    else WRITE_TOOLS
-                )
-                for role in PI_DEFAULT_ROLES
-            },
-        )
-    if state.get("type") != "state":
-        raise ValueError("Pi RPC state type is invalid")
-    required = {"type", "version", "agents", "extensions", "tools"}
-    if not required.issubset(state):
-        raise ValueError("Pi RPC state is incomplete")
-    if state.get("version") != "0.84.1":
+    if set(state) != set(_RESPONSE_KEYS):
+        raise ValueError("Pi RPC response keys are not reviewed")
+    if (
+        state.get("type") != "response"
+        or state.get("command") != "get_state"
+        or state.get("success") is not True
+        or not isinstance(state.get("data"), dict)
+    ):
+        raise ValueError("Pi RPC get_state response is invalid")
+    data = state["data"]
+    assert isinstance(data, dict)
+    data_keys = set(data)
+    allowed_data_keys = set(_RESPONSE_DATA_REQUIRED) | set(_RESPONSE_DATA_OPTIONAL)
+    if not set(_RESPONSE_DATA_REQUIRED).issubset(data_keys) or not data_keys.issubset(
+        allowed_data_keys
+    ):
+        raise ValueError("Pi RPC response data keys are not reviewed")
+    if (
+        not (data.get("model") is None or isinstance(data.get("model"), Mapping))
+        or type(data.get("thinkingLevel")) is not str
+        or type(data.get("isStreaming")) is not bool
+        or type(data.get("isCompacting")) is not bool
+        or type(data.get("steeringMode")) is not str
+        or type(data.get("followUpMode")) is not str
+        or not (data.get("sessionFile") is None or type(data.get("sessionFile")) is str)
+        or type(data.get("sessionId")) is not str
+        or type(data.get("autoCompactionEnabled")) is not bool
+        or type(data.get("messageCount")) is not int
+        or type(data.get("pendingMessageCount")) is not int
+        or data.get("messageCount", 0) < 0
+        or data.get("pendingMessageCount", 0) < 0
+    ):
+        raise ValueError("Pi RPC response data values are invalid")
+    if "version" in data and data.get("version") != "0.84.1":
         raise ValueError("PI_RUNTIME_INCOMPATIBLE")
-    agents = state["agents"]
-    extensions = state["extensions"]
-    tools = state["tools"]
-    if not isinstance(agents, list) or not all(
-        isinstance(item, str) for item in agents
+    agents = data.get("agents", [])
+    extensions = data.get("extensions", [])
+    tools = data.get("tools", {})
+    if (
+        not isinstance(agents, list)
+        or not agents
+        or not all(isinstance(item, str) and item for item in agents)
+        or len(agents) != len(set(agents))
     ):
         raise ValueError("Pi role inventory is invalid")
     if not isinstance(extensions, list) or not all(
-        isinstance(item, str) for item in extensions
+        isinstance(item, str) and item for item in extensions
     ):
         raise ValueError("Pi extension inventory is invalid")
     if not isinstance(tools, dict):
         raise ValueError("Pi tool inventory is invalid")
-    package_tools = state.get("package_tools", {})
-    if isinstance(package_tools, Mapping):
-        for values in package_tools.values():
-            if isinstance(values, (list, tuple)) and _FORBIDDEN_TOOLS.intersection(
-                values
+    if tuple(extensions) != _REVIEWED_EXTENSIONS:
+        raise ValueError("Pi ambient or unreviewed extension discovered")
+    known_roles = set(PI_DEFAULT_ROLES + PI_OPTIONAL_ROLES)
+    if not tools or set(tools) - known_roles:
+        raise ValueError("Pi tool inventory contains an unreviewed role")
+    if any(
+        not isinstance(role, str)
+        or not isinstance(values, list)
+        or not all(isinstance(item, str) and item for item in values)
+        for role, values in tools.items()
+    ):
+        raise ValueError("Pi tool inventory is malformed")
+    if "package_tools" in data:
+        package_tools = data["package_tools"]
+        if not isinstance(package_tools, Mapping):
+            raise ValueError("Pi package coordination tools are malformed")
+        for key, values in package_tools.items():
+            if (
+                not isinstance(key, str)
+                or not key
+                or not isinstance(values, list)
+                or not values
+                or not all(isinstance(item, str) for item in values)
+                or not all(item for item in values)
             ):
+                raise ValueError("Pi package coordination tools are malformed")
+            if any(item.casefold() in _FORBIDDEN_TOOLS for item in values):
                 raise ValueError(
                     "Pi package coordination tools have forbidden authority"
                 )
@@ -412,9 +701,9 @@ def _safe_state(stdout: bytes, agent: Path) -> tuple[dict[str, object], str]:
     }
     safe = {
         "type": "state",
-        "version": "0.84.1",
+        "version": data.get("version", version),
         "agents": tuple(agents),
-        "extensions": tuple("<EXTENSION>" for _ in extensions),
+        "extensions": _REVIEWED_EXTENSIONS,
         "tools": safe_tools,
     }
     return safe, "state-redacted"
@@ -431,6 +720,8 @@ def _validate_tools(
             if role in {"code-explorer", "code-reviewer"}
             else VALIDATOR_TOOLS
             if role == "code-validator"
+            else PUSHER_TOOLS
+            if role == "commit-pusher"
             else WRITE_TOOLS
         )
         if tools[role] != expected:
@@ -456,29 +747,60 @@ def run_pi_smoke(
     project = _private_directory(root / "project", "Pi project directory")
     temporary = _private_directory(root / "tmp", "Pi temporary directory")
     _install_helper(agent)
+    _install_extension(agent)
+    source_roles = _source_inventory()
+    _extension_inventory(agent)
+    bundled = _bundled_inventory()
+    package_before_evidence = _package_evidence(agent)
+    _check_effective_catalog(agent, project, package_before_evidence)
     before_exec = _executable_digest(executable)
     before_tree = _tree_signature(agent)
     before_package = _package_signature(agent)
     before_catalog = _catalog_signature()
+    before_repository = _repository_signature()
+    if release:
+        _require_release_package(package_before_evidence)
+        if _package_evidence(agent) != package_before_evidence:
+            raise ValueError("PI_PACKAGE_INCOMPATIBLE")
+    version = _probe_version(executable, agent, project, temporary)
     code, stdout, stderr = _bounded_child(executable, agent, project, temporary)
     after_exec = _executable_digest(executable)
     after_tree = _tree_signature(agent)
     after_package = _package_signature(agent)
+    after_repository = _repository_signature()
     if (
         before_exec != after_exec
         or before_tree != after_tree
         or before_package != after_package
         or before_catalog != _catalog_signature()
+        or before_repository != after_repository
     ):
         raise ValueError("Pi smoke mutated an inspected identity")
     if code != 0:
         raise ValueError(f"Pi smoke failed: exit:{code}")
+    package_after_evidence = _package_evidence(agent)
+    if package_before_evidence != package_after_evidence:
+        raise ValueError("Pi installed package identity changed")
+    _check_effective_catalog(agent, project, package_after_evidence)
+    _run_validator_helper(agent, project, temporary)
+    helper_tree = _tree_signature(agent)
+    helper_package = _package_signature(agent)
+    helper_repository = _repository_signature()
+    helper_catalog = _catalog_signature()
+    if (
+        before_tree != helper_tree
+        or before_package != helper_package
+        or before_repository != helper_repository
+        or before_catalog != helper_catalog
+        or before_exec != _executable_digest(executable)
+        or package_after_evidence != _package_evidence(agent)
+    ):
+        raise ValueError("Pi validator mutated an inspected identity")
     redacted_stdout = _redact(stdout.decode("utf-8", "replace"), agent).encode()
     _redact(stderr.decode("utf-8", "replace"), agent)
-    state, state_status = _safe_state(redacted_stdout, agent)
+    state, state_status = _safe_state(redacted_stdout, agent, version)
     observed_managed = tuple(state["agents"])  # type: ignore[arg-type]
-    source_roles = _source_inventory()
-    if set(observed_managed) not in {
+    if observed_managed and set(observed_managed) not in {
         frozenset(source_roles[:-1]),
         frozenset(source_roles),
     }:
@@ -488,8 +810,8 @@ def run_pi_smoke(
         if set(observed_managed) == set(source_roles)
         else source_roles[:-1]
     )
+    state["agents"] = managed
     optional = tuple(role for role in managed if role in PI_OPTIONAL_ROLES)
-    bundled = _bundled_inventory()
     tools = state["tools"]
     assert isinstance(tools, Mapping)
     role_tools = {
@@ -515,7 +837,7 @@ def run_pi_smoke(
     )
     if validator == "helper-missing":
         raise ValueError("Pi validator helper is missing")
-    if release and state["version"] != "0.84.1":
+    if release and version != "0.84.1":
         raise ValueError("PI_RUNTIME_INCOMPATIBLE")
     return PiSmokeEvidence(
         status="ok",
@@ -526,13 +848,25 @@ def run_pi_smoke(
         role_tools=role_tools,
         optional_roles=optional,
         validator=validator,
-        package_status="present" if before_package != ("absent",) else "absent",
-        evidence=("PI_SMOKE_OK", state_status, "RPC_GET_STATE", "OFFLINE", validator),
+        package_status=package_after_evidence.status,
+        evidence=(
+            "PI_SMOKE_OK",
+            state_status,
+            "PI_VERSION_0.84.1",
+            "RPC_GET_STATE",
+            "OFFLINE",
+            validator,
+            "VALIDATOR_HELPER_EXECUTED",
+            "BASH_REJECTED",
+        ),
     )
 
 
 def select_pi_executable(
-    executable: Path | None = None, *, release: bool = False
+    executable: Path | None = None,
+    root: Path | None = None,
+    *,
+    release: bool = False,
 ) -> PiSmokeEvidence:
     """Return explicit ordinary-CI unavailability; release selection fails closed."""
 
@@ -554,6 +888,6 @@ def select_pi_executable(
             package_status="unavailable",
             evidence=("PI_EXECUTABLE_UNAVAILABLE",),
         )
-    return run_pi_smoke(
-        executable, Path(os.fspath(executable)).parent / ".pi-smoke", release=release
-    )
+    if root is None:
+        raise ValueError("disposable private Pi smoke root is required")
+    return run_pi_smoke(executable, root, release=release)
