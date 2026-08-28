@@ -26,14 +26,15 @@ installation, or network operations.
 
 | Command | Result |
 | --- | --- |
-| `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tests.test_readme_contract tests.test_docs tests.test_compatibility -v` | Blocked: `.venv/bin/python` is absent in this checkout. |
-| `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_docs tests.test_compatibility -v` | PASS — 34 tests. |
-| `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_readme_contract.ReadmeContractTests.test_pi_provenance_lifecycle_and_trust_boundary_are_documented tests.test_readme_contract.ReadmeContractTests.test_pi_commands_and_ownership_are_exact -v` | PASS — 2 tests. |
-| `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_readme_contract tests.test_docs tests.test_compatibility -v` | Partial under system Python: documentation/compatibility assertions pass, but the existing parsed-agent test cannot import unavailable PyYAML. |
+| `PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python -m unittest tests.test_readme_contract tests.test_docs tests.test_compatibility -v` | PASS — 45 tests. |
+| `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_docs tests.test_compatibility -v` | PASS — 34 tests (initial dependency-light probe). |
+| `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_readme_contract.ReadmeContractTests.test_pi_provenance_lifecycle_and_trust_boundary_are_documented tests.test_readme_contract.ReadmeContractTests.test_pi_commands_and_ownership_are_exact -v` | PASS — 2 tests (initial dependency-light probe). |
+| `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_readme_contract tests.test_docs tests.test_compatibility -v` | Initial partial probe under system Python: documentation/compatibility assertions pass, but the existing parsed-agent test could not import unavailable PyYAML. |
 | `PYTHONDONTWRITEBYTECODE=1 python3 -c 'import ast; ...'` (three changed Python tests) | PASS — all files parse. |
-| `python3 scripts/validate-catalogs.py` | Blocked: PyYAML is unavailable for OpenCode source validation. |
+| `PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python scripts/validate-catalogs.py` | PASS — catalog validation passed. |
 | `python3 scripts/validate-repository.py` | Blocked before repository checks by the environment fixed-tool gate (`status=blocked`, no child output). |
-| `ruff check ...` / `ruff format --check ...` | Not run: Ruff is not installed in this checkout. |
+| `/Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/ruff check tests/test_readme_contract.py tests/test_docs.py tests/test_compatibility.py` | PASS — all checks passed. |
+| `/Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/ruff format --check tests/test_readme_contract.py tests/test_docs.py tests/test_compatibility.py` | PASS — 3 files already formatted. |
 | `git diff --check` | PASS. |
 
 ## Changed files
@@ -48,13 +49,15 @@ installation, or network operations.
 
 ## Remaining risks
 
-- The full focused command and catalog validator require the repository's
-  PyYAML-enabled `.venv`, which was not present; no dependency was installed.
 - The canonical repository validator could not run because this environment's
   fixed tool gate is blocked.
-- Ruff is unavailable, so its checks must be run by the parent/release gate in
-  the normal pinned developer environment.
+- The worktree-local `.venv` symlink/environment is absent; verification used
+  the shared pinned repository venv supplied by the parent, without installing
+  dependencies.
 - Pi remains intentionally unreleased and unsupported until Task 11 completes
   its mandatory isolated real-Pi smoke and owner-approved release transition.
 
-Commit: pending
+Implementation commit: `63517b0` (`docs: publish pi compatibility and trust boundary`)
+The verification table was updated after that commit when the parent supplied
+the shared pinned venv; this report-only update is intentionally separate from
+the implementation commit.
