@@ -28,8 +28,9 @@ runtime probe or package-manager check. For each supported Codex, OpenCode, or
 Claude Code row, independently review the exact native format, required and
 optional features, Linux/macOS platform evidence, user scope, and package
 identity (currently none). Keep the compatibility-only Pi row unsupported and
-without platform, package, or version claims until a separate Pi task is
-authorized. Update the matrix and README/SECURITY wording together, then run
+without platform, package, or version claims in the machine matrix until a
+separate Pi task is authorized; the human projection may describe the intended
+evidence boundary without turning it into a support claim. Update the matrix and README/SECURITY wording together, then run
 the focused compatibility tests, full unittest discovery, catalog validation,
 Ruff, compile checks, shell/YAML checks, and `git diff --check`. Release notes
 must state whether a client version was caller-supplied or derived from the
@@ -38,6 +39,43 @@ maintained tested row; they must never imply that installation probed a client.
 Branch protection, required checks, review rules, signing policy, and security
 channel setup are hosting/owner decisions. Do not attempt to configure them
 from this task.
+
+## Pi release gate (Task 11 only)
+
+Task 10 publishes documentation and the explicit unreleased compatibility row;
+it does not transition Pi to support. Only Task 11 may transition Pi to
+supported and change the canonical row
+after every gate below passes and an owner approves publication.
+
+Before any Pi release, review the exact `pi/package-policy.json` source commit
+and package policy, the upstream provenance, package name/version, SHA-512 distribution integrity,
+package JSON SHA-256, lock SHA-256, manifest, dependency versions, peer
+dependencies, and forbidden lifecycle-script list. The first intended package
+is `npm:pi-subagents@0.56.0`, tested against exact Pi 0.84.1 and peer
+`@earendil-works/pi-ai >=0.80.0`. A pin change requires a fresh source commit,
+integrity, manifest, dependency, lifecycle, compatibility, and release-note
+review; release notes must call out the changed pin and evidence.
+
+The release gate records Python 3.11, Python 3.12, Python 3.13, and Python 3.14,
+the exact Pi version, operating system and backend (macOS/Linux only), and the package-policy
+identifiers. It must run the mandatory isolated real-Pi smoke in offline mode,
+including discovery, managed and bundled inventories, canaries, validator
+denial/helper behavior, and cleanup evidence. An unavailable or wrong-version
+executable is a release failure, not support evidence. Windows remains
+fail-closed and unsupported.
+
+Provider smoke is optional and separate from the base Pi support claim. If it
+is run, or if release notes claim live provider interoperability, it requires
+separate manual consent and explicit provider-smoke authorization. Record only
+the reviewed bounded safe result; never record credentials, raw environment
+values, prompts, responses, or transcripts.
+
+Normal package/catalog work is not atomic and does not imply automatic package
+rollback. Package removal is a separate manual action using the unversioned
+`npm:pi-subagents` command only after exact pinned receipt evidence. The owner
+must manually inspect the complete diff, approve third-party execution and
+publication, obtain independent security/documentation review, and sign the
+commit/tag before changing `supported: false` to `supported: true`.
 
 ## Clean-tree verification
 

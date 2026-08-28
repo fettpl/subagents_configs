@@ -2,11 +2,12 @@
 
 This repository distributes the same least-privilege role catalog and routing
 policy in the native formats of Codex, OpenCode, Claude Code, and the
-explicitly selected Pi target. Pi remains unreleased and unsupported in the
-compatibility matrix; Task 1 only registers its safe explicit-selection
-boundary. Pi is never selected by `--all` and does not yet install
-Pi-specific sources or packages; its future instruction placeholder is
-`APPEND_SYSTEM.md`.
+explicitly selected Pi target. Pi follows the project lineage of Mario
+Zechner's coding agent, currently maintained by Earendil Works. The separately
+authored third-party `pi-subagents` package is by Nico Bailon and is a distinct
+trust boundary. Pi remains unreleased and unsupported in the compatibility
+matrix; Task 11 is the sole support transition. Pi is never selected by
+`--all`; its future instruction placeholder is `APPEND_SYSTEM.md`.
 See [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
 
 The installer is deliberately conservative: it plans every selected target
@@ -21,7 +22,7 @@ authority, credentials, network access, or approval rights.
 | Codex | `agents/*.toml` | `AGENTS.md` | `~/.codex` | `CODEX_HOME` |
 | OpenCode | `agents/*.md` with YAML frontmatter | `AGENTS.md` | `~/.config/opencode` | `OPENCODE_HOME` |
 | Claude Code | `agents/*.md` with YAML frontmatter | `CLAUDE.md` | `~/.claude` | `CLAUDE_CONFIG_DIR` |
-| Pi (unreleased) | reserved for a later task | reserved | `~/.pi/agent` | `PI_CODING_AGENT_DIR` |
+| Pi (unreleased) | `pi/agents/*.md` | `APPEND_SYSTEM.md` (opt-in) | `~/.pi/agent` | `PI_CODING_AGENT_DIR` |
 
 All six roles are rendered for the three released/supported clients:
 
@@ -44,6 +45,15 @@ that field; it is not an inherited or implied override. Codex uses explicit
 effort and sandbox values, OpenCode has no effort override, and Claude Code
 inherits the parent model. The matrix also records Claude's read-only tools
 and plan permission.
+
+Pi roles inherit the active parent model and provider. The native Pi
+representation is omission: managed Pi frontmatter uses omission of native
+model fields, omitting `model`,
+`fallbackModels`, and `thinking`, rather than copying a provider identifier or
+inventing a fallback. This is semantic inheritance through omitted frontmatter.
+A provider smoke is separate, optional release evidence
+and requires its own explicit authorization; it is not run by normal install,
+validation, or this unreleased compatibility claim.
 
 ## Target-role policy matrix
 
@@ -144,6 +154,58 @@ Opt-ins change the inventory only when requested:
 Global routing, the Codex multi-agent table, and `commit-pusher` are absent by
 default. Routing and Codex configuration are never enabled merely because a
 file already exists.
+
+### Pi integration boundary
+
+The Pi managed inventory is five roles by default—`code-explorer`,
+`code-reviewer`, `code-validator`, `quick-implementer`, and `implementer`—with
+`commit-pusher` as the optional sixth role. The bundled third-party inventory
+(`scout`, `researcher`, `worker`, `reviewer`, `oracle`, and `delegate`) is
+separate and is never misreported as repository-managed. Pi's validator has no
+Bash authority: it exposes only the Pi-native `run_validation` tool, which
+invokes the existing isolated Python helper through a fixed argv boundary.
+Five default roles and one optional role form the managed inventory.
+
+The exact Pi examples are:
+
+```sh
+./install.sh --target pi --pi-executable /absolute/path/to/pi \
+  --consent-third-party-code --consent-network
+./install.sh --target pi --dry-run --pi-executable /absolute/path/to/pi
+./uninstall.sh --target pi --dry-run --home pi=/tmp/pi-agent
+./uninstall.sh --target pi --home pi=/absolute/path/to/pi-agent \
+  --pi-executable /absolute/path/to/pi --remove-pi-package
+```
+
+Dry-run does not execute the Pi executable. Dry-run neither requires consent
+nor executes the executable, and creates no package, catalog, state, or
+temporary-file changes. A non-dry Pi package install requires both
+`--consent-third-party-code` and `--consent-network`; both consents are required
+for that non-dry package phase.
+Pi's package and repository-catalog phases are non-atomic: a later failure
+does not claim that an external package was rolled back automatically.
+
+The official Pi package command is the only package path. The installer never
+uses `npx`, `install.mjs`, npm directly, `git clone`, `git pull`, or a git
+fallback. The exact first package pin is `npm:pi-subagents@0.56.0`; its peer
+boundary includes `@earendil-works/pi-ai >=0.80.0`. Changing that pin requires
+source, manifest, dependency, lifecycle, integrity, compatibility, and
+release-note review.
+
+Ownership is deliberately explicit. Repository-owned paths are
+`agents/*.md`, `extensions/subagents-configs-run-validation.ts`,
+`.subagents_configs/validation/**`, the optional `APPEND_SYSTEM.md` managed
+block, and `.subagents_configs/pi-package-receipt.json`. The installer only
+inspects, and does not own, Pi-owned `settings.json`,
+`extensions/subagent/config.json`, and `npm/node_modules/pi-subagents/**`.
+Package removal is never part of normal uninstall. `--remove-pi-package` uses
+unversioned `npm:pi-subagents` only after exact pinned receipt evidence;
+uninstall preserves drift and keeps the receipt on failure.
+
+Pi is macOS/Linux-only for the intended evidence boundary. Windows remains
+unsupported and fail-closed until a separate approved design and release
+gate. Task 11 must run the mandatory isolated offline real-Pi smoke for exact
+Pi 0.84.1 before the matrix can claim support.
 
 ## Safe defaults
 
@@ -304,8 +366,8 @@ expose only the target, support status, and these typed reasons.
 
 The matrix deliberately contains an unsupported, compatibility-only `pi` row.
 Pi can be selected explicitly for dry-run/contract validation, but it is not
-included in `--all`, has no install sources yet, and cannot be released by
-this task. Updating a row is a separately authorized release-owner action:
+included in `--all` and cannot be released by this task. Updating a row is a
+separately authorized release-owner action:
 obtain read-only version
 evidence from the client, review format/features/platform/scope/package
 identity, update the JSON and documentation together, and rerun catalog,

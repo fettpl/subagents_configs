@@ -204,6 +204,66 @@ class DocumentationContractTests(unittest.TestCase):
             self.assertIn(expected, text)
             self.assertNotIn("python3 scripts/validate-repository.py", text)
 
+    def test_pi_security_boundary_covers_package_drift_diagnostics_and_providers(self):
+        text = (ROOT / "SECURITY.md").read_text(encoding="utf-8").lower()
+        for phrase in (
+            "third-party package",
+            "package execution",
+            "settings",
+            "config",
+            "package",
+            "receipt",
+            "drift",
+            "redacted diagnostics",
+            "no automatic package rollback",
+            "provider",
+            "credential",
+            "pi-subagents",
+            "pi 0.84.1",
+            "npm:pi-subagents@0.56.0",
+            "non-atomic",
+            "windows",
+            "fail-closed",
+        ):
+            self.assertIn(phrase, text, phrase)
+        self.assertRegex(
+            text,
+            r"provider.{0,160}(?:credential|secret).{0,160}(?:exclude|omit|never)",
+        )
+        self.assertRegex(
+            text, r"diagnostic.{0,120}(?:redact|safe).{0,120}(?:path|output|secret)"
+        )
+
+    def test_pi_release_gate_documents_evidence_and_manual_governance(self):
+        text = (ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8").lower()
+        for phrase in (
+            "pi-subagents",
+            "0.56.0",
+            "0.84.1",
+            "package policy",
+            "source commit",
+            "integrity",
+            "manifest",
+            "dependency",
+            "lifecycle",
+            "python 3.11",
+            "python 3.14",
+            "macos",
+            "linux",
+            "mandatory isolated real-pi smoke",
+            "offline",
+            "release-note",
+            "pin change",
+            "manual consent",
+            "publication",
+            "provider smoke",
+        ):
+            self.assertIn(phrase, text, phrase)
+        self.assertRegex(text, r"only task 11.{0,160}(?:supported|transition)")
+        self.assertRegex(
+            text, r"provider smoke.{0,160}(?:separate|explicitly authorized)"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -79,6 +79,64 @@ class CompatibilityLoaderTests(unittest.TestCase):
         self.assertEqual(pi.supported_platforms, ())
         self.assertEqual(pi.status, "unreleased")
 
+    def test_compatibility_projection_has_canonical_columns_and_pi_boundary(self):
+        rows = load_compatibility_matrix(
+            Path(__file__).parents[1] / "catalogs/client-compatibility.json"
+        )
+        text = (Path(__file__).parents[1] / "docs/COMPATIBILITY.md").read_text(
+            encoding="utf-8"
+        )
+        table = ("| Client |" + text.split("| Client |", 1)[1]).split("\n\n", 1)[0]
+        lines = [
+            line.strip() for line in table.splitlines() if line.strip().startswith("|")
+        ]
+        self.assertGreaterEqual(len(lines), 2)
+        self.assertEqual(
+            [cell.strip().lower() for cell in lines[0].strip("|").split("|")],
+            [
+                "client",
+                "supported scope",
+                "home variable/default",
+                "native format",
+                "runtime/package evidence",
+                "validation backends",
+                "unsupported scope",
+            ],
+        )
+        data = [
+            line
+            for line in lines[1:]
+            if set(line.replace("|", "").replace("-", "").replace(":", "").strip())
+        ]
+        self.assertEqual(len(data), len(rows))
+        for row, line in zip(rows, data, strict=True):
+            cells = [cell.strip().lower() for cell in line.strip("|").split("|")]
+            self.assertEqual(len(cells), 7)
+            self.assertEqual(cells[0], row.target)
+            self.assertIn(row.status, cells[1])
+            if row.target == "pi":
+                self.assertIn("unsupported", cells[1])
+                self.assertIn("PI_CODING_AGENT_DIR".lower(), cells[2])
+                self.assertIn("~/.pi/agent", cells[2])
+                self.assertIn("markdown", cells[3])
+                self.assertIn("0.84.1", cells[4])
+                self.assertIn("npm:pi-subagents@0.56.0", cells[4])
+                self.assertIn("@earendil-works/pi-ai >=0.80.0", cells[4])
+                self.assertIn("macos/linux", cells[5])
+                self.assertIn("windows", cells[6])
+
+    def test_pi_row_remains_unreleased_and_unclaimed_in_machine_matrix(self):
+        rows = load_compatibility_matrix(
+            Path(__file__).parents[1] / "catalogs/client-compatibility.json"
+        )
+        pi = next(row for row in rows if row.target == "pi")
+        self.assertEqual((pi.supported, pi.status), (False, "unreleased"))
+        self.assertIsNone(pi.minimum_client_version)
+        self.assertIsNone(pi.tested_client_version)
+        self.assertIsNone(pi.package_source)
+        self.assertEqual(pi.supported_platforms, ())
+        self.assertIsNone(pi.scope)
+
     def test_status_is_required_and_closed(self):
         valid = _row(status="released")
         invalid = (
