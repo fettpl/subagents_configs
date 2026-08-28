@@ -61,3 +61,20 @@ Implementation commit: `63517b0` (`docs: publish pi compatibility and trust boun
 The verification table was updated after that commit when the parent supplied
 the shared pinned venv; this report-only update is intentionally separate from
 the implementation commit.
+
+## Review round 1 follow-up
+
+Added a complete compatibility-table projection contract. Every displayed
+column for Codex, OpenCode, Claude Code, and Pi is now checked against parsed
+matrix rows, canonical target descriptors/capabilities, and the reviewed Pi
+package policy. Existing projection and Pi-boundary assertions remain intact;
+no documentation or catalog content changed.
+
+Verification:
+
+- `PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python -m unittest tests.test_compatibility tests.test_docs -v` — PASS (35 tests).
+- `/Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/ruff check tests/test_compatibility.py` — PASS.
+- `/Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/ruff format --check tests/test_compatibility.py` — PASS.
+- `git diff --check` — PASS.
+
+Review-round-1 follow-up commit: `b63f4da` (`test: enforce full compatibility projection parity`)
