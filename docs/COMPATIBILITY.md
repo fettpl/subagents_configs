@@ -1,34 +1,32 @@
 # Client compatibility
 
-This repository currently maintains native installation support for Codex,
-OpenCode, and Claude Code. Pi is registered as an explicit-only target so its
-selection and safety boundaries can be developed incrementally; it is not yet
-released or supported for installation.
-
-| Target | Status | Selection | Home | Environment variable |
-| --- | --- | --- | --- | --- |
-| Codex | supported | `--target codex`, `--all` | `~/.codex` | `CODEX_HOME` |
-| OpenCode | supported | `--target opencode`, `--all` | `~/.config/opencode` | `OPENCODE_HOME` |
-| Claude Code | supported | `--target claude-code`, `--all` | `~/.claude` | `CLAUDE_CONFIG_DIR` |
-| Pi | unreleased / unsupported | `--target pi` only | `~/.pi/agent` | `PI_CODING_AGENT_DIR` |
-
-Pi is intentionally absent from `--all`; its future global instruction file is
-`APPEND_SYSTEM.md`. Its home is resolved in this order:
-an explicit `--home pi=PATH` > `target_defaults.pi.home` >
-`PI_CODING_AGENT_DIR` > `~/.pi/agent`.
-Every Pi install, including `--dry-run`, requires an explicit lexically
-absolute `--pi-executable`; dry-run reports the compatibility boundary and
-never executes it. The Pi executable and third-party/network consents are explicit CLI authority;
-profiles may provide only a safe Pi home default and may not select Pi.
-
-The checked-in machine-readable source is
+The canonical compatibility source is
 [`catalogs/client-compatibility.json`](../catalogs/client-compatibility.json).
-The Pi row must remain `supported: false` until later tasks provide exact
-runtime/package evidence and release-owner approval.
+This Markdown table is its human-readable projection; the machine-readable
+Pi row remains `supported: false` and `status: "unreleased"` until Task 11.
 
-The remaining Pi work is intentionally staged across Tasks 2–11: source and
-role rendering, planning, external package lifecycle, transaction/recovery
-boundaries, catalogs, documentation and CI, followed by a release transition.
-Task 11 requires mandatory isolated real-Pi smoke evidence for the pinned
-`pi-coding-agent` and `pi-subagents` versions before the compatibility row can
-be marked supported.
+| Client | Supported scope | Home variable/default | Native format | Runtime/package evidence | Validation backends | Unsupported scope |
+| --- | --- | --- | --- | --- | --- | --- |
+| codex | released / supported | `CODEX_HOME` / `~/.codex` | TOML agents plus Markdown routing | maintained client row; no package | linux/macOS: bwrap / sandbox-exec | Pi-only lifecycle and package features |
+| opencode | released / supported | `OPENCODE_HOME` / `~/.config/opencode` | YAML frontmatter plus Markdown | maintained client row; no package | linux/macOS: bwrap / sandbox-exec | Pi-only lifecycle and package features |
+| claude-code | released / supported | `CLAUDE_CONFIG_DIR` / `~/.claude` | YAML frontmatter plus Markdown | maintained client row; no package | linux/macOS: bwrap / sandbox-exec | Pi-only lifecycle and package features |
+| pi | unreleased / unsupported | `PI_CODING_AGENT_DIR` / `~/.pi/agent` | Markdown agents plus TypeScript extension | intended evidence boundary: Pi 0.84.1; `pi --offline --version` / `pi --help`; `npm:pi-subagents@0.56.0`; peer `@earendil-works/pi-ai >=0.80.0` | macOS/Linux: isolated offline real-Pi smoke required by Task 11 | Windows fail-closed; project scope and live provider smoke are not supported claims |
+
+The Pi row is explicit so selection and reporting can be validated without
+implying a release. Its intended user home is resolved in this order:
+explicit `--home pi=PATH`, an explicitly selected profile
+`target_defaults.pi.home`, `PI_CODING_AGENT_DIR`, then `~/.pi/agent`.
+Profiles cannot select Pi, and `--all` excludes it. Pi is not supported on
+Windows; unsupported or unusable platform backends fail closed.
+
+Pi follows the project lineage of Mario Zechner's Pi coding agent, currently
+maintained by Earendil Works. `pi-subagents` is a separately authored
+third-party package by Nico Bailon, so its source, package manifest,
+dependencies, lifecycle scripts, and integrity are a separate trust boundary.
+The exact first-release package pin is `npm:pi-subagents@0.56.0`, with the
+reviewed peer `@earendil-works/pi-ai >=0.80.0`; later pins require a new review.
+
+Task 11 is the sole support transition. It must complete the mandatory
+isolated real-Pi smoke for exact Pi 0.84.1 and the complete release gate before
+the JSON row may change to `supported: true`. A provider smoke is optional,
+separately authorized release evidence and is never implied by this row.

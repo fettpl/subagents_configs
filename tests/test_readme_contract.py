@@ -356,6 +356,86 @@ class ReadmeContractTests(unittest.TestCase):
             self.assertIn(phrase.lower(), self.lower)
         self.assertRegex(self.lower, r"manual.{0,100}(?:journal|backup|unresolved)")
 
+    def test_pi_provenance_lifecycle_and_trust_boundary_are_documented(self):
+        searchable = " ".join(self.lower.split())
+        for phrase in (
+            "Mario Zechner",
+            "Earendil Works",
+            "Nico Bailon",
+            "pi-subagents",
+            "third-party",
+            "PI_CODING_AGENT_DIR",
+            "~/.pi/agent",
+            "0.84.1",
+            "npm:pi-subagents@0.56.0",
+            "@earendil-works/pi-ai >=0.80.0",
+            "--consent-third-party-code",
+            "--consent-network",
+            "--pi-executable",
+            "--remove-pi-package",
+            "--target pi",
+            "--all",
+            "APPEND_SYSTEM.md",
+            "run_validation",
+            "model",
+            "provider",
+            "omitting",
+            "bundled",
+            "five",
+            "commit-pusher",
+            "no Bash",
+            "non-atomic",
+            "npx",
+            "install.mjs",
+            "git fallback",
+            "Windows",
+            "fail-closed",
+        ):
+            self.assertIn(phrase.lower(), searchable, phrase)
+        self.assertRegex(searchable, r"pi.{0,100}parent model.{0,120}provider")
+        self.assertRegex(searchable, r"omit(?:ting|ted).{0,100}(?:model|thinking)")
+        self.assertIn("five default roles and one optional role", searchable)
+        self.assertIn("pi is never selected by `--all`", searchable)
+        self.assertRegex(
+            searchable, r"provider.{0,100}(?:separate|optional).{0,100}authori"
+        )
+
+    def test_pi_commands_and_ownership_are_exact(self):
+        expected_commands = (
+            "./install.sh --target pi --pi-executable /absolute/path/to/pi "
+            "--consent-third-party-code --consent-network",
+            "./install.sh --target pi --dry-run --pi-executable /absolute/path/to/pi",
+            "./uninstall.sh --target pi --dry-run --home pi=/tmp/pi-agent",
+            "./uninstall.sh --target pi --home pi=/absolute/path/to/pi-agent "
+            "--pi-executable /absolute/path/to/pi --remove-pi-package",
+        )
+        normalized = " ".join(self.text.replace("\\\n", " ").split())
+        for command in expected_commands:
+            self.assertIn(command, normalized)
+        for path in (
+            "agents/*.md",
+            "extensions/subagents-configs-run-validation.ts",
+            ".subagents_configs/validation/**",
+            "APPEND_SYSTEM.md",
+            ".subagents_configs/pi-package-receipt.json",
+            "settings.json",
+            "extensions/subagent/config.json",
+            "npm/node_modules/pi-subagents/**",
+        ):
+            self.assertIn(path, self.text)
+        for phrase in (
+            "dry-run neither requires consent",
+            "non-dry",
+            "both consents",
+            "never part of normal uninstall",
+            "unversioned",
+            "npm:pi-subagents",
+            "exact pinned receipt",
+            "preserves drift",
+            "keeps the receipt on failure",
+        ):
+            self.assertIn(phrase, self.lower)
+
 
 if __name__ == "__main__":
     unittest.main()

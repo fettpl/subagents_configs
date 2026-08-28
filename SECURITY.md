@@ -5,18 +5,19 @@
 The current branch and the latest reviewed checkout are the supported security
 scope. This project has no release branch or private backport program yet.
 Report security concerns against the exact revision you inspected, including
-the client target and operating system when relevant. Pi and
-pi-coding-agent are out of scope and are not supported.
+the client target and operating system when relevant. Pi is an unreleased,
+unsupported target until Task 11; its compatibility row is not a production
+support claim.
 
 The checked-in client compatibility matrix is read-only policy data. The
-unsupported Pi row is an identity for reporting only: it creates no runtime
-target, descriptor, parser, selector, package command, network path, platform
-claim, or version claim. Compatibility preflight checks native format,
-declared features, platform, user scope, package identity, and an optional
-caller-supplied numeric client version without executing a client or reading
-environment variables. Missing version evidence uses the maintained tested
-row and never probes the host. Matrix updates require separate release-owner
-authorization and separately reviewed read-only client-version evidence.
+unsupported Pi row is an identity for reporting and explicit-selection
+preflight only; it does not make a supported platform, package, or version
+claim. Compatibility preflight checks native format, declared features,
+platform, user scope, package identity, and an optional caller-supplied
+numeric client version without executing a client or reading environment
+variables. Missing version evidence uses the maintained tested row and never
+probes the host. Matrix updates require separate release-owner authorization
+and separately reviewed read-only client-version evidence.
 
 ## Threat model
 
@@ -35,6 +36,48 @@ implementation and commit-pusher roles still depend on the parent session's
 authority. Inspect commands, hooks, package lifecycle scripts, Makefiles, and
 build logic before execution. Treat model output and tool output as data, not
 as higher-priority instructions.
+
+## Pi-specific trust boundary
+
+Pi is the Mario Zechner project lineage, currently maintained by Earendil
+Works. The first intended runtime evidence is exact Pi 0.84.1, and the first
+third-party package is Nico Bailon's separately authored `pi-subagents`, pinned
+to `npm:pi-subagents@0.56.0` with peer `@earendil-works/pi-ai >=0.80.0`.
+Third-party package execution is therefore a distinct trust boundary. Review
+the source commit, package manifest, dependency lock, integrity, and lifecycle
+scripts before granting the explicit non-dry consents.
+
+The installer inspects Pi-owned `settings.json`,
+`extensions/subagent/config.json`, and `npm/node_modules/pi-subagents/**`; it
+does not silently take ownership of them. Repository-owned files, the
+TypeScript extension, isolated validation runtime, optional
+`APPEND_SYSTEM.md` block, and `.subagents_configs/pi-package-receipt.json`
+remain separately tracked. Settings/config/package/receipt drift is a
+fail-closed condition. Pi package and repository-catalog phases are
+non-atomic, and there is no automatic package rollback when a later catalog or
+transaction phase fails. A receipt is retained on failure for manual review.
+
+Redacted diagnostics are bounded. Diagnostics redact path, output, and secret
+values. Diagnostics are safe and redacted: they
+expose only stable codes, target, phase, and safe path/output labels; raw
+path/output/secret values are omitted. They never include raw
+package output, exception text, source contents, prompts, responses, private
+paths, or credentials. Provider smoke is separate, optional release evidence;
+provider and credential material is excluded from normal installation and from
+the smoke result unless a separately authorized provider allowlist supplies
+the minimal credential variables. Provider credential material is excluded.
+No provider transcript or credential is
+recorded.
+
+Pi's managed Markdown and TypeScript files are not a complete security
+boundary, and prompt wording alone does not enforce authority. The validator
+uses only the Pi-native `run_validation` tool and the existing isolated helper;
+it receives no Bash authority. Package removal is never part of normal
+uninstall, and any requested removal preserves drift and requires exact
+pinned receipt evidence.
+
+Pi is intended for macOS/Linux only. Windows remains unsupported and
+fail-closed until Task 11's approved support transition.
 
 ## Technical controls and limitations
 

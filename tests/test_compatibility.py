@@ -79,6 +79,194 @@ class CompatibilityLoaderTests(unittest.TestCase):
         self.assertEqual(pi.supported_platforms, ())
         self.assertEqual(pi.status, "unreleased")
 
+    def test_compatibility_projection_has_canonical_columns_and_pi_boundary(self):
+        rows = load_compatibility_matrix(
+            Path(__file__).parents[1] / "catalogs/client-compatibility.json"
+        )
+        text = (Path(__file__).parents[1] / "docs/COMPATIBILITY.md").read_text(
+            encoding="utf-8"
+        )
+        table = ("| Client |" + text.split("| Client |", 1)[1]).split("\n\n", 1)[0]
+        lines = [
+            line.strip() for line in table.splitlines() if line.strip().startswith("|")
+        ]
+        self.assertGreaterEqual(len(lines), 2)
+        self.assertEqual(
+            [cell.strip().lower() for cell in lines[0].strip("|").split("|")],
+            [
+                "client",
+                "supported scope",
+                "home variable/default",
+                "native format",
+                "runtime/package evidence",
+                "validation backends",
+                "unsupported scope",
+            ],
+        )
+        data = [
+            line
+            for line in lines[1:]
+            if set(line.replace("|", "").replace("-", "").replace(":", "").strip())
+        ]
+        self.assertEqual(len(data), len(rows))
+        for row, line in zip(rows, data, strict=True):
+            cells = [cell.strip().lower() for cell in line.strip("|").split("|")]
+            self.assertEqual(len(cells), 7)
+            self.assertEqual(cells[0], row.target)
+            self.assertIn(row.status, cells[1])
+            if row.target == "pi":
+                self.assertIn("unsupported", cells[1])
+                self.assertIn("PI_CODING_AGENT_DIR".lower(), cells[2])
+                self.assertIn("~/.pi/agent", cells[2])
+                self.assertIn("markdown", cells[3])
+                self.assertIn("0.84.1", cells[4])
+                self.assertIn("npm:pi-subagents@0.56.0", cells[4])
+                self.assertIn("@earendil-works/pi-ai >=0.80.0", cells[4])
+                self.assertIn("macos/linux", cells[5])
+                self.assertIn("windows", cells[6])
+
+    def test_compatibility_projection_derives_every_column_from_canonical_facts(self):
+        root = Path(__file__).parents[1]
+        rows = load_compatibility_matrix(root / "catalogs/client-compatibility.json")
+        package_policy = json.loads(
+            (root / "pi/package-policy.json").read_text(encoding="utf-8")
+        )
+        text = (root / "docs/COMPATIBILITY.md").read_text(encoding="utf-8")
+        table = ("| Client |" + text.split("| Client |", 1)[1]).split("\n\n", 1)[0]
+        lines = [
+            line.strip() for line in table.splitlines() if line.strip().startswith("|")
+        ]
+        data = [
+            line
+            for line in lines[1:]
+            if set(line.replace("|", "").replace("-", "").replace(":", "").strip())
+        ]
+
+        def clean(cell: str) -> str:
+            return cell.strip().lower().replace("`", "")
+
+        def format_name(source_format: str) -> str:
+            return {
+                "toml": "toml",
+                "yaml-frontmatter": "yaml frontmatter",
+                "markdown": "markdown",
+                "typescript": "typescript",
+            }[source_format]
+
+        self.assertEqual(len(data), len(rows))
+        for row, line in zip(rows, data, strict=True):
+            with self.subTest(target=row.target):
+                cells = [clean(cell) for cell in line.strip("|").split("|")]
+                self.assertEqual(len(cells), 7)
+
+                target = Target(row.target)
+                capability = capability_for(target)
+                descriptor = DESCRIPTORS[target]
+                self.assertEqual(cells[0], row.target)
+                self.assertEqual(row.format_version, capability.source_format)
+                self.assertEqual(
+                    row.scope,
+                    capability.scope if row.supported else None,
+                )
+                self.assertEqual(
+                    cells[1],
+                    f"{row.status} / {'supported' if row.supported else 'unsupported'}",
+                )
+                self.assertEqual(
+                    cells[2],
+                    f"{descriptor.environment_variable} / "
+                    f"{descriptor.default_home}".lower(),
+                )
+
+                agent_formats = {
+                    source.source_format
+                    for source in descriptor.sources
+                    if source.kind == "agent"
+                }
+                self.assertEqual(len(agent_formats), 1)
+                agent_format = format_name(next(iter(agent_formats)))
+                extension_sources = [
+                    source
+                    for source in descriptor.sources
+                    if source.kind == "target-extension"
+                ]
+                if extension_sources:
+                    self.assertEqual(len(extension_sources), 1)
+                    native_format = (
+                        f"{agent_format} agents plus "
+                        f"{format_name(extension_sources[0].source_format)} extension"
+                    )
+                else:
+                    routing_sources = [
+                        source
+                        for source in descriptor.sources
+                        if source.kind == "routing-source"
+                    ]
+                    self.assertEqual(len(routing_sources), 1)
+                    routing_format = format_name(routing_sources[0].source_format)
+                    native_format = (
+                        f"{agent_format} plus {routing_format}"
+                        if agent_format == "yaml frontmatter"
+                        else f"{agent_format} agents plus {routing_format} routing"
+                    )
+                self.assertEqual(cells[3], native_format)
+
+                if target is Target.PI:
+                    peer = package_policy["peerDependencies"]["@earendil-works/pi-ai"]
+                    runtime_evidence = (
+                        f"intended evidence boundary: pi "
+                        f"{package_policy['testedPiVersion']}; pi --offline --"
+                        "version / "
+                        f"pi --help; {package_policy['source']}; peer "
+                        f"@earendil-works/pi-ai {peer}"
+                    )
+                else:
+                    package_evidence = (
+                        "no package"
+                        if row.package_source is None
+                        else f"package {row.package_source}"
+                    )
+                    runtime_evidence = f"maintained client row; {package_evidence}"
+                self.assertEqual(cells[4], runtime_evidence)
+
+                if row.supported:
+                    platforms = "/".join(
+                        "macOS" if item == "macos" else item
+                        for item in row.supported_platforms
+                    )
+                    backends = " / ".join(row.tested_os_backends)
+                    self.assertEqual(cells[5], f"{platforms}: {backends}".lower())
+                    self.assertEqual(cells[6], "pi-only lifecycle and package features")
+                else:
+                    intended_platforms = "/".join(
+                        "macOS" if item == "macos" else item
+                        for item in reversed(capability.supported_platforms)
+                    )
+                    self.assertEqual(
+                        cells[5],
+                        (
+                            f"{intended_platforms}: isolated offline real-pi smoke "
+                            "required by task 11"
+                        ).lower(),
+                    )
+                    self.assertEqual(
+                        cells[6],
+                        "windows fail-closed; project scope and live provider smoke "
+                        "are not supported claims",
+                    )
+
+    def test_pi_row_remains_unreleased_and_unclaimed_in_machine_matrix(self):
+        rows = load_compatibility_matrix(
+            Path(__file__).parents[1] / "catalogs/client-compatibility.json"
+        )
+        pi = next(row for row in rows if row.target == "pi")
+        self.assertEqual((pi.supported, pi.status), (False, "unreleased"))
+        self.assertIsNone(pi.minimum_client_version)
+        self.assertIsNone(pi.tested_client_version)
+        self.assertIsNone(pi.package_source)
+        self.assertEqual(pi.supported_platforms, ())
+        self.assertIsNone(pi.scope)
+
     def test_status_is_required_and_closed(self):
         valid = _row(status="released")
         invalid = (
