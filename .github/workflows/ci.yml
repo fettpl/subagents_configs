@@ -174,6 +174,7 @@ jobs:
       contents: read
     env:
       PI_EXECUTABLE: ${{ vars.PI_EXECUTABLE }}
+      PI_SMOKE_ROOT: ${{ vars.PI_SMOKE_ROOT }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -186,6 +187,7 @@ jobs:
         run: |
           set -euo pipefail
           test -n "${PI_EXECUTABLE:-}"
+          test -n "${PI_SMOKE_ROOT:-}"
           case "$PI_EXECUTABLE" in
             /*) ;;
             *) echo "PI_EXECUTABLE must be an absolute path" >&2; exit 1 ;;
@@ -194,15 +196,25 @@ jobs:
           test -x "$PI_EXECUTABLE"
           test "$(realpath "$PI_EXECUTABLE")" = "$PI_EXECUTABLE"
           test "$(stat -c '%u:%h' "$PI_EXECUTABLE")" = "$(id -u):1"
-          pi_version="$("$PI_EXECUTABLE" --offline --version)"
-          test "$pi_version" = "0.84.1"
-      - name: Create isolated release test environment
+          executable_mode="$(stat -c '%a' "$PI_EXECUTABLE")"
+          test "$((8#$executable_mode & 8#022))" -eq 0
+          case "$PI_SMOKE_ROOT" in
+            /*) ;;
+            *) echo "PI_SMOKE_ROOT must be an absolute path" >&2; exit 1 ;;
+          esac
+          test -d "$PI_SMOKE_ROOT"
+          test "$(realpath "$PI_SMOKE_ROOT")" = "$PI_SMOKE_ROOT"
+          test "$(stat -c '%u' "$PI_SMOKE_ROOT")" = "$(id -u)"
+          smoke_root_mode="$(stat -c '%a' "$PI_SMOKE_ROOT")"
+          test "$((8#$smoke_root_mode & 8#077))" -eq 0
+      - name: Bootstrap release test environment
         shell: bash
         run: |
           set -euo pipefail
-          python -m venv --copies .venv
-      - name: Run mandatory exact Pi release smoke
+          scripts/bootstrap-developer.sh
+      - name: Run mandatory exact Pi 0.84.1 release smoke
         shell: bash
         run: |
           set -euo pipefail
+          PI_EXECUTABLE="$PI_EXECUTABLE" .venv/bin/python scripts/run-pi-release-smoke.py
           PI_EXECUTABLE="$PI_EXECUTABLE" .venv/bin/python -m unittest tests.test_pi_smoke.PiReleaseSmokeTests -v

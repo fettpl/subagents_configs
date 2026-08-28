@@ -48,3 +48,46 @@ git diff --check
 Provider tests use only fake executables and synthetic credentials. No real Pi,
 provider, network, package installation, or support-evidence synthesis was
 performed.
+
+## Review round 1 follow-up
+
+All 11 review findings are covered by the current implementation and
+adversarial tests:
+
+- provider children use a bounded selector loop, a private process group, and
+  group termination; EOF cannot bypass the deadline and descendants are
+  cleaned up;
+- executable identity is owner-only, rejects group/other writes, and is
+  rechecked around every version/provider spawn;
+- provider result publication uses the no-follow, descriptor-bound atomic
+  writer with file and parent-directory durability and no path-based chmod;
+- the live provider child uses the reviewed LF-delimited JSON RPC contract,
+  fixed disabled-authority flags, and only the selected provider's bounded,
+  control-free credential strings;
+- the release workflow bootstraps the hash-locked environment and invokes the
+  supplied executable through `release=True` before the full release suite;
+- compatibility transition input is a sealed, exact schema rather than the
+  prior caller-controlled partial mapping;
+- the required hyphenated provider script and release helper are direct
+  executable entrypoints, with repository-import tests; and
+- static security tests reject direct network-client imports with adversarial
+  `urllib`, `requests`, `http.client`, and `socket` fixtures.
+
+The canonical venv verification after the follow-up passed:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python scripts/validate-catalogs.py — passed
+PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v — 891 passed, 1 skipped
+PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python -m unittest tests.test_pi_smoke.PiSmokeTests.test_selector_reports_explicit_unavailable -v — passed
+/Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/ruff check subagents_configs scripts tests — passed
+/Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/ruff format --check subagents_configs scripts tests — passed (87 files)
+sh -n ./*.sh — passed
+shellcheck install.sh uninstall.sh install-codex.sh uninstall-codex.sh install-opencode.sh uninstall-opencode.sh install-claude-code.sh uninstall-claude-code.sh — passed
+PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python -m compileall -q subagents_configs scripts tests — passed
+git diff --check — passed
+```
+
+The direct provider entrypoint was verified first as a failing `126`
+permission-denied invocation, then as a passing executable invocation after
+the mode fix. No real Pi, provider, network, package installation, or
+download was performed.

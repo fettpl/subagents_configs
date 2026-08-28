@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import selectors
+import signal
 import stat
 import subprocess
 import sys
@@ -223,12 +224,47 @@ def _file_digest(path: Path) -> tuple[int, int, int, int, int, str]:
 def _executable_digest(path: Path) -> tuple[int, int, int, int, int, str]:
     if not path.is_absolute() or path != Path(os.path.normpath(path)):
         raise ValueError("Pi executable must be an absolute canonical path")
-    item = os.lstat(path)
-    if stat.S_ISLNK(item.st_mode) or not stat.S_ISREG(item.st_mode):
-        raise ValueError("Pi executable must be a regular file")
-    if item.st_uid != os.getuid() or item.st_nlink != 1 or not item.st_mode & 0o111:
-        raise ValueError("Pi executable identity is unsafe")
-    return _file_digest(path)
+    current = Path(path.anchor)
+    for component in path.parts[1:-1]:
+        current /= component
+        item = os.lstat(current)
+        if stat.S_ISLNK(item.st_mode) and not (
+            current == Path("/var")
+            and Path(os.path.realpath(current)) == Path("/private/var")
+        ):
+            raise ValueError("Pi executable identity is unsafe")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        item = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(item.st_mode)
+            or item.st_uid != os.getuid()
+            or item.st_nlink != 1
+            or not item.st_mode & 0o111
+            or stat.S_IMODE(item.st_mode) & 0o022
+        ):
+            raise ValueError("Pi executable identity is unsafe")
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        if (item.st_dev, item.st_ino, item.st_size, item.st_nlink) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_nlink,
+        ):
+            raise ValueError("Pi executable identity changed")
+        return (
+            item.st_dev,
+            item.st_ino,
+            item.st_size,
+            stat.S_IMODE(item.st_mode),
+            item.st_nlink,
+            digest.hexdigest(),
+        )
+    finally:
+        os.close(descriptor)
 
 
 def _tree_signature(root: Path) -> tuple[tuple[str, int, int, str], ...]:
@@ -446,6 +482,7 @@ def _bounded_process(
         stderr=subprocess.PIPE,
         shell=False,
         close_fds=True,
+        start_new_session=True,
     )
     assert (
         child.stdin is not None
@@ -461,6 +498,25 @@ def _bounded_process(
     chunks = {"stdout": bytearray(), "stderr": bytearray()}
     deadline = time.monotonic() + _TIMEOUT
     timed_out = False
+
+    def terminate_group() -> None:
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except OSError:
+            if child.poll() is None:
+                child.terminate()
+        try:
+            child.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except OSError:
+                child.kill()
+            try:
+                child.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                pass
+
     try:
         while selector.get_map():
             remaining = deadline - time.monotonic()
@@ -481,15 +537,15 @@ def _bounded_process(
             if timed_out:
                 break
         if timed_out:
-            child.terminate()
-            try:
-                child.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait(timeout=1)
+            terminate_group()
         else:
-            child.wait(timeout=max(0.1, deadline - time.monotonic()))
+            try:
+                child.wait(timeout=max(0.1, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                terminate_group()
     finally:
+        if child.poll() is None:
+            terminate_group()
         child.stdout.close()
         child.stderr.close()
         selector.close()

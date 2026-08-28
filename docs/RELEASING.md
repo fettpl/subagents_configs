@@ -64,6 +64,13 @@ denial/helper behavior, and cleanup evidence. An unavailable or wrong-version
 executable is a release failure, not support evidence. Windows remains
 fail-closed and unsupported.
 
+The manual `workflow_dispatch` release job supplies both `PI_EXECUTABLE` and
+`PI_SMOKE_ROOT`. `PI_EXECUTABLE` is the externally supplied absolute Pi binary;
+`PI_SMOKE_ROOT` is an existing private disposable smoke root containing the
+exact package receipt/manifest evidence required by `PiReleaseSmokeTests`.
+The release helper invokes the selector with `release=True`, so it never
+creates package evidence or falls back to an unpinned install.
+
 For the release record, preserve the literal command outputs for `python
 --version`, `pi --offline --version`, and `pi --help` only after reviewing them
 for secrets. Also record the exact package-policy SHA-256, upstream source
@@ -84,7 +91,7 @@ values, prompts, responses, or transcripts.
 The separately authorized command is:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 .venv/bin/python scripts/run_pi_provider_smoke.py \
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python scripts/run-pi-provider-smoke.py \
   --authorize-provider-smoke \
   --pi-executable /absolute/path/to/pi-0.84.1 \
   --model PROVIDER/ID \

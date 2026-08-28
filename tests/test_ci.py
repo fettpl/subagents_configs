@@ -91,7 +91,7 @@ class CiContractTests(unittest.TestCase):
             or setup_positions[0] > bootstrap_positions[0]
         ):
             violations.append("unsafe setup/bootstrap ordering")
-        if text.count("scripts/bootstrap-developer.sh") != 1:
+        if text.count("scripts/bootstrap-developer.sh") != 2:
             violations.append("bootstrap mechanism count")
         if re.search(
             r"(?m)^\s*(?:run:\s*)?(?:(?:python3?|\.venv/bin/python)\s+-m\s+)?pip\s+install\b",
@@ -558,11 +558,25 @@ class CiContractTests(unittest.TestCase):
         self.assertIsNotNone(release)
         self.assertEqual(release["needs"], "quality")
         self.assertEqual(release["if"], "github.event_name == 'workflow_dispatch'")
-        text = "\n".join(step.get("run", "") for step in release["steps"])
+        self.assertEqual(
+            release["env"],
+            {
+                "PI_EXECUTABLE": "${{ vars.PI_EXECUTABLE }}",
+                "PI_SMOKE_ROOT": "${{ vars.PI_SMOKE_ROOT }}",
+            },
+        )
+        text = "\n".join(
+            f"{step.get('name', '')}\n{step.get('run', '')}"
+            for step in release["steps"]
+        )
         self.assertIn('test -n "${PI_EXECUTABLE:-}"', text)
+        self.assertIn('test -n "${PI_SMOKE_ROOT:-}"', text)
         self.assertIn('case "$PI_EXECUTABLE" in', text)
         self.assertIn("PI_EXECUTABLE must be an absolute path", text)
         self.assertIn('test -x "$PI_EXECUTABLE"', text)
+        self.assertIn("scripts/bootstrap-developer.sh", text)
+        self.assertIn("scripts/run-pi-release-smoke.py", text)
+        self.assertIn("PI_SMOKE_ROOT must be an absolute path", text)
         self.assertIn("PiReleaseSmokeTests", text)
         self.assertIn("0.84.1", text)
 

@@ -358,6 +358,13 @@ class PiReleaseSmokeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 run_pi_smoke(executable, Path(temporary), release=True)
 
+    def test_release_selector_rejects_group_or_other_writable_executable(self):
+        with tempfile.TemporaryDirectory(prefix="pi-release-writable-") as temporary:
+            executable = _write_fake_pi(Path(temporary) / "pi")
+            executable.chmod(0o702)
+            with self.assertRaises(ValueError):
+                run_pi_smoke(executable, Path(temporary), release=True)
+
     def test_release_rejects_absent_installed_package(self):
         with tempfile.TemporaryDirectory(prefix="pi-release-no-package-") as temporary:
             root = Path(temporary)
