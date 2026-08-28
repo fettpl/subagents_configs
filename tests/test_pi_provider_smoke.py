@@ -299,6 +299,7 @@ class PiProviderSmokeTests(unittest.TestCase):
             with patch.dict(os.environ, {"OPENAI_API_KEY": "synthetic-provider-key"}):
                 public = root / "public"
                 public.mkdir(mode=0o755)
+                public.chmod(0o755)
                 with self.assertRaisesRegex(ProviderSmokeError, "OUTPUT_NOT_PRIVATE"):
                     run_provider_smoke(
                         executable,
