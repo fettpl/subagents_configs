@@ -154,3 +154,29 @@ git diff --check — passed
 No real Pi, provider, network, package installation, or download was
 performed. Release evidence objects in tests came only from fake executables
 and synthetic fixture data.
+
+## Review round 4 follow-up
+
+The remaining process-group cleanup defect is resolved. `_bounded_process()`
+now tears down its process group unconditionally in `finally`, including when
+the leader has already exited and closed its pipes. The regression uses a
+`SIGTERM`-resistant descendant with both stdout and stderr redirected to
+`DEVNULL`, and confirms it cannot create a marker after the helper returns.
+
+Verification after this scoped fix:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python -m unittest tests.test_pi_smoke.PiReleaseSmokeTests.test_term_resistant_descendant_is_killed_after_leader_exits -v — passed
+PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python -m unittest tests.test_pi_smoke -q — 25 passed
+PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -q — 895 passed, 1 skipped
+PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python scripts/validate-catalogs.py — passed
+/Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/ruff check subagents_configs scripts tests — passed
+/Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/ruff format --check subagents_configs scripts tests — passed (87 files)
+sh -n ./*.sh — passed
+shellcheck install.sh uninstall.sh install-codex.sh uninstall-codex.sh install-opencode.sh uninstall-opencode.sh install-claude-code.sh uninstall-claude-code.sh — passed
+PYTHONDONTWRITEBYTECODE=1 /Users/pawel/Documents/GitHub/subagents_configs/.venv/bin/python -m compileall -q subagents_configs scripts tests — passed
+git diff --check — passed
+```
+
+No real Pi, provider, network, package installation, or download was
+performed.

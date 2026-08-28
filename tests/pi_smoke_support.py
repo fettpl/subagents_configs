@@ -597,8 +597,10 @@ def _bounded_process(
             except subprocess.TimeoutExpired:
                 terminate_group()
     finally:
-        if child.poll() is None:
-            terminate_group()
+        # Always tear down the process group, including after the leader has
+        # exited and closed both pipes while a detached-output descendant
+        # remains alive in the same group.
+        terminate_group()
         child.stdout.close()
         child.stderr.close()
         selector.close()

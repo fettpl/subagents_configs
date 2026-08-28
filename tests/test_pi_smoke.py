@@ -405,7 +405,8 @@ class PiReleaseSmokeTests(unittest.TestCase):
             executable.write_text(
                 f"#!{sys.executable}\n"
                 "import os,subprocess,sys,time\n"
-                f"subprocess.Popen([sys.executable, '-c', {resistant!r}])\n"
+                f"subprocess.Popen([sys.executable, '-c', {resistant!r}], "
+                "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
                 "print('leader-complete', flush=True)\n"
                 "time.sleep(0.5)\n"
                 "os.close(sys.stdout.fileno())\n"
