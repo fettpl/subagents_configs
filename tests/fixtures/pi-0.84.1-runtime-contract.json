@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "pi_version": "0.84.1",
+  "cli": {
+    "argv": ["--offline", "--mode", "rpc", "--no-session", "--no-context-files"]
+  },
+  "rpc": {
+    "framing": "lf-delimited-json",
+    "request": {"type": "get_state"},
+    "response_type": "response",
+    "response_required_keys": ["type", "command", "success", "data"],
+    "response_data_required_keys": ["model", "thinkingLevel", "isStreaming", "isCompacting", "steeringMode", "followUpMode", "sessionFile", "sessionId", "autoCompactionEnabled", "messageCount", "pendingMessageCount"],
+    "response_data_optional_keys": ["sessionName", "version", "agents", "extensions", "tools", "packages", "package_tools"]
+  },
+  "extension": {
+    "loader": "extensions",
+    "validator_tool": "run_validation",
+    "validator_source": "pi/extensions/run-validation.ts",
+    "helper_relative_path": ".subagents_configs/validation/run-validation-isolated.py"
+  },
+  "identity": {
+    "safe_version_field": "version",
+    "version_argv": ["--offline", "--version"]
+  },
+  "limits": {"timeout_seconds": 30, "stream_bytes": 8192}
+}

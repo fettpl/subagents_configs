@@ -75,6 +75,12 @@ jobs:
         run: |
           set -euo pipefail
           scripts/bootstrap-developer.sh
+      - name: Verify Pi smoke is explicitly unavailable in ordinary CI
+        shell: bash
+        run: |
+          set -euo pipefail
+          PI_EXECUTABLE= .venv/bin/python -m unittest \
+            tests.test_pi_smoke.PiSmokeTests.test_selector_reports_explicit_unavailable -v
       - name: Run isolated repository checks
         shell: bash
         run: |

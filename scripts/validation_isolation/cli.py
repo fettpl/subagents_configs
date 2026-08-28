@@ -16,6 +16,8 @@ def parse_command(argv: Sequence[str]) -> tuple[str, ...]:
     command = tuple(str(item) for item in argv[1:])
     if not command or not command[0]:
         raise ValueError("validation command is empty")
+    if command[0].casefold() in {"bash", "sh", "/bin/bash", "/bin/sh"}:
+        raise ValueError("validation shell execution is not allowed")
     return command
 
 
