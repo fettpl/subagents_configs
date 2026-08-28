@@ -8,10 +8,11 @@ is the only version evidence used.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -40,6 +41,268 @@ COMPATIBILITY_REASONS = frozenset(
         "client_version_too_old",
     }
 )
+
+_RELEASE_EVIDENCE_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "pi_version",
+        "pi_executable_sha256",
+        "package_source",
+        "package_version",
+        "package_policy_sha256",
+        "upstream_commit",
+        "dist_integrity",
+        "package_manifest_sha256",
+        "package_lock_sha256",
+        "platform",
+        "backend",
+        "smoke_evidence",
+    }
+)
+_RELEASE_MARKERS = frozenset(
+    {"PI_SMOKE_OK", "VALIDATOR_HELPER_EXECUTED", "BASH_REJECTED"}
+)
+
+
+@dataclass(frozen=True)
+class _ReleaseProof:
+    binding: str
+
+
+def _release_binding(
+    *,
+    schema_version: int,
+    status: str,
+    pi_version: str,
+    pi_executable_sha256: str,
+    package_source: str,
+    package_version: str,
+    package_policy_sha256: str,
+    upstream_commit: str,
+    dist_integrity: str,
+    package_manifest_sha256: str,
+    package_lock_sha256: str,
+    platform: str,
+    backend: str,
+    smoke_evidence: tuple[str, ...],
+) -> str:
+    payload = {
+        "schema_version": schema_version,
+        "status": status,
+        "pi_version": pi_version,
+        "pi_executable_sha256": pi_executable_sha256,
+        "package_source": package_source,
+        "package_version": package_version,
+        "package_policy_sha256": package_policy_sha256,
+        "upstream_commit": upstream_commit,
+        "dist_integrity": dist_integrity,
+        "package_manifest_sha256": package_manifest_sha256,
+        "package_lock_sha256": package_lock_sha256,
+        "platform": platform,
+        "backend": backend,
+        "smoke_evidence": list(smoke_evidence),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+@dataclass(frozen=True)
+class PiReleaseEvidence:
+    """Validated, sealed evidence accepted by the release-only predicate."""
+
+    schema_version: int
+    status: Literal["ok"]
+    pi_version: Literal["0.84.1"]
+    pi_executable_sha256: str
+    package_source: Literal["npm:pi-subagents@0.56.0"]
+    package_version: Literal["0.56.0"]
+    package_policy_sha256: str
+    upstream_commit: str
+    dist_integrity: str
+    package_manifest_sha256: str
+    package_lock_sha256: str
+    platform: CompatibilityPlatform
+    backend: str
+    smoke_evidence: tuple[str, ...]
+    _proof: _ReleaseProof = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self._proof, _ReleaseProof):
+            raise ValueError("Pi release evidence is not sealed")
+        try:
+            expected_binding = _release_binding(
+                schema_version=self.schema_version,
+                status=self.status,
+                pi_version=self.pi_version,
+                pi_executable_sha256=self.pi_executable_sha256,
+                package_source=self.package_source,
+                package_version=self.package_version,
+                package_policy_sha256=self.package_policy_sha256,
+                upstream_commit=self.upstream_commit,
+                dist_integrity=self.dist_integrity,
+                package_manifest_sha256=self.package_manifest_sha256,
+                package_lock_sha256=self.package_lock_sha256,
+                platform=self.platform,
+                backend=self.backend,
+                smoke_evidence=self.smoke_evidence,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Pi release evidence is not sealed") from exc
+        if self._proof.binding != expected_binding:
+            raise ValueError("Pi release evidence binding is invalid")
+        if (
+            self.schema_version != 1
+            or self.status != "ok"
+            or self.pi_version != "0.84.1"
+            or self.package_source != "npm:pi-subagents@0.56.0"
+            or self.package_version != "0.56.0"
+            or self.package_policy_sha256
+            != "d0f902d54cda2f073215701b4c04a38480c29ef1a8a7f6e3d4981d70657e4722"
+            or self.upstream_commit != "a0e2b9e31de5970215a567e20e2d781bbbddf235"
+            or self.dist_integrity
+            != "sha512-XBmKqvrj4mCVQ6/uXiPqCmzHxGfBB+jjwmfNR3El+IfhnaJwZ+"
+            "W6evXYRI3lQEXe6Nf56xfzUXQExIzE8cT5BQ=="
+            or self.platform not in {"linux", "macos"}
+            or not self.backend
+            or not re.fullmatch(r"[0-9a-f]{64}", self.pi_executable_sha256)
+            or not re.fullmatch(r"[0-9a-f]{64}", self.package_manifest_sha256)
+            or not re.fullmatch(r"[0-9a-f]{64}", self.package_lock_sha256)
+            or not isinstance(self.smoke_evidence, tuple)
+            or any(
+                not isinstance(item, str) or not item for item in self.smoke_evidence
+            )
+            or len(set(self.smoke_evidence)) != len(self.smoke_evidence)
+            or not _RELEASE_MARKERS.issubset(self.smoke_evidence)
+        ):
+            raise ValueError("Pi release evidence facts are invalid")
+
+
+def validate_pi_release_evidence(value: Mapping[str, object]) -> PiReleaseEvidence:
+    """Validate exact release facts and seal them for the transition gate."""
+
+    if not isinstance(value, Mapping) or set(value) != _RELEASE_EVIDENCE_KEYS:
+        raise ValueError("Pi release evidence schema is invalid")
+    if value.get("schema_version") != 1 or value.get("status") != "ok":
+        raise ValueError("Pi release evidence identity is invalid")
+    if value.get("pi_version") != "0.84.1":
+        raise ValueError("Pi release runtime is invalid")
+    if value.get("package_source") != "npm:pi-subagents@0.56.0":
+        raise ValueError("Pi release package source is invalid")
+    if value.get("package_version") != "0.56.0":
+        raise ValueError("Pi release package version is invalid")
+    if value.get("package_policy_sha256") != (
+        "d0f902d54cda2f073215701b4c04a38480c29ef1a8a7f6e3d4981d70657e4722"
+    ):
+        raise ValueError("Pi release package policy is invalid")
+    if value.get("upstream_commit") != "a0e2b9e31de5970215a567e20e2d781bbbddf235":
+        raise ValueError("Pi release upstream source is invalid")
+    if value.get("dist_integrity") != (
+        "sha512-XBmKqvrj4mCVQ6/uXiPqCmzHxGfBB+jjwmfNR3El+IfhnaJwZ+"
+        "W6evXYRI3lQEXe6Nf56xfzUXQExIzE8cT5BQ=="
+    ):
+        raise ValueError("Pi release distribution integrity is invalid")
+    for key in (
+        "pi_executable_sha256",
+        "package_manifest_sha256",
+        "package_lock_sha256",
+    ):
+        item = value.get(key)
+        if not isinstance(item, str) or re.fullmatch(r"[0-9a-f]{64}", item) is None:
+            raise ValueError("Pi release hash is invalid")
+    commit = value.get("upstream_commit")
+    if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise ValueError("Pi release upstream source is invalid")
+    if value.get("platform") not in {"linux", "macos"}:
+        raise ValueError("Pi release platform is invalid")
+    if not isinstance(value.get("backend"), str) or not value["backend"]:
+        raise ValueError("Pi release backend is invalid")
+    markers = value.get("smoke_evidence")
+    if not isinstance(markers, (list, tuple)):
+        raise ValueError("Pi release smoke evidence is invalid")
+    if (
+        any(not isinstance(item, str) or not item for item in markers)
+        or len(set(markers)) != len(markers)
+        or not _RELEASE_MARKERS.issubset(markers)
+    ):
+        raise ValueError("Pi release smoke evidence is incomplete")
+    smoke_tuple = tuple(markers)
+    return PiReleaseEvidence(
+        schema_version=1,
+        status="ok",
+        pi_version="0.84.1",
+        pi_executable_sha256=value["pi_executable_sha256"],  # type: ignore[arg-type]
+        package_source="npm:pi-subagents@0.56.0",
+        package_version="0.56.0",
+        package_policy_sha256=value["package_policy_sha256"],  # type: ignore[arg-type]
+        upstream_commit=commit,
+        dist_integrity=value["dist_integrity"],  # type: ignore[arg-type]
+        package_manifest_sha256=value["package_manifest_sha256"],  # type: ignore[arg-type]
+        package_lock_sha256=value["package_lock_sha256"],  # type: ignore[arg-type]
+        platform=value["platform"],  # type: ignore[arg-type]
+        backend=value["backend"],  # type: ignore[arg-type]
+        smoke_evidence=smoke_tuple,
+        _proof=_ReleaseProof(
+            _release_binding(
+                schema_version=1,
+                status="ok",
+                pi_version="0.84.1",
+                pi_executable_sha256=value["pi_executable_sha256"],  # type: ignore[arg-type]
+                package_source="npm:pi-subagents@0.56.0",
+                package_version="0.56.0",
+                package_policy_sha256=value["package_policy_sha256"],  # type: ignore[arg-type]
+                upstream_commit=commit,
+                dist_integrity=value["dist_integrity"],  # type: ignore[arg-type]
+                package_manifest_sha256=value["package_manifest_sha256"],  # type: ignore[arg-type]
+                package_lock_sha256=value["package_lock_sha256"],  # type: ignore[arg-type]
+                platform=value["platform"],  # type: ignore[arg-type]
+                backend=value["backend"],  # type: ignore[arg-type]
+                smoke_evidence=smoke_tuple,
+            )
+        ),
+    )
+
+
+def release_evidence_record(evidence: PiReleaseEvidence) -> dict[str, object]:
+    """Return the complete safe JSON record for validated release evidence."""
+
+    if not isinstance(evidence, PiReleaseEvidence):
+        raise TypeError("Pi release evidence must be validated")
+    return {
+        "schema_version": evidence.schema_version,
+        "status": evidence.status,
+        "pi_version": evidence.pi_version,
+        "pi_executable_sha256": evidence.pi_executable_sha256,
+        "package_source": evidence.package_source,
+        "package_version": evidence.package_version,
+        "package_policy_sha256": evidence.package_policy_sha256,
+        "upstream_commit": evidence.upstream_commit,
+        "dist_integrity": evidence.dist_integrity,
+        "package_manifest_sha256": evidence.package_manifest_sha256,
+        "package_lock_sha256": evidence.package_lock_sha256,
+        "platform": evidence.platform,
+        "backend": evidence.backend,
+        "smoke_evidence": list(evidence.smoke_evidence),
+    }
+
+
+def pi_release_transition_allowed(evidence: object, *, all_gates_passed: bool) -> bool:
+    """Return whether release evidence permits a future Pi support change.
+
+    This predicate is intentionally side-effect free: it never changes the
+    checked-in matrix. The current repository remains truthful until an owner
+    supplies exact real-Pi evidence and confirms every release gate.
+    """
+
+    if type(all_gates_passed) is not bool or not all_gates_passed:
+        return False
+    # No caller-provided mapping, self-hashed record, or locally constructed
+    # evidence can authorize support.  An owner-reviewed transition commit is
+    # required to replace this deliberate fail-closed boundary.
+    return False
+
+
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _FORMATS = frozenset({"toml", "yaml-frontmatter", "markdown"})
 _PLATFORMS = frozenset({"linux", "macos"})

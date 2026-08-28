@@ -86,12 +86,12 @@ class CiContractTests(unittest.TestCase):
             if line == "      - name: Bootstrap developer environment"
         ]
         if (
-            len(setup_positions) != 1
+            len(setup_positions) != 2
             or len(bootstrap_positions) != 1
             or setup_positions[0] > bootstrap_positions[0]
         ):
             violations.append("unsafe setup/bootstrap ordering")
-        if text.count("scripts/bootstrap-developer.sh") != 1:
+        if text.count("scripts/bootstrap-developer.sh") != 2:
             violations.append("bootstrap mechanism count")
         if re.search(
             r"(?m)^\s*(?:run:\s*)?(?:(?:python3?|\.venv/bin/python)\s+-m\s+)?pip\s+install\b",
@@ -132,6 +132,8 @@ class CiContractTests(unittest.TestCase):
         self.assertEqual(
             actions,
             [
+                "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+                "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
                 "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
                 "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
             ],
@@ -528,6 +530,79 @@ class CiContractTests(unittest.TestCase):
         for mutation in mutations:
             with self.subTest(mutation=mutation[-80:]):
                 self.assertTrue(self._unsafe_mutations(mutation))
+
+    def test_ordinary_ci_runs_all_checked_in_pi_and_quality_contracts(self):
+        quality = self.workflow["jobs"]["quality"]
+        quality_text = "\n".join(
+            step.get("run", "") for step in quality.get("steps", [])
+        )
+        for module in (
+            "tests.test_pi_catalog",
+            "tests.test_pi_package",
+            "tests.test_pi_effective",
+            "tests.test_pi_integration",
+        ):
+            self.assertIn(module, quality_text)
+        self.assertIn("test_selector_reports_explicit_unavailable", quality_text)
+        self.assertIn("scripts/validate-catalogs.py", quality_text)
+        self.assertIn("ruff check subagents_configs scripts tests", quality_text)
+        self.assertIn(
+            "ruff format --check subagents_configs scripts tests", quality_text
+        )
+        self.assertIn(
+            "python -m compileall -q subagents_configs scripts tests", quality_text
+        )
+
+    def test_release_job_requires_external_exact_pi_and_full_release_smoke(self):
+        release = self.workflow["jobs"].get("pi-release")
+        self.assertIsNotNone(release)
+        self.assertEqual(release["needs"], "quality")
+        self.assertIn("github.event_name == 'workflow_dispatch'", release["if"])
+        self.assertIn("github.ref == 'refs/heads/main'", release["if"])
+        self.assertIn("github.ref_protected == true", release["if"])
+        self.assertEqual(
+            release["runs-on"], ["self-hosted", "linux", "x64", "pi-release"]
+        )
+        self.assertEqual(
+            release["env"],
+            {
+                "PI_EXECUTABLE": "${{ vars.PI_EXECUTABLE }}",
+                "PI_SMOKE_ROOT": "${{ vars.PI_SMOKE_ROOT }}",
+                "PI_RELEASE_EVIDENCE_OUTPUT": "${{ vars.PI_RELEASE_EVIDENCE_OUTPUT }}",
+                "PI_RELEASE_BACKEND": "${{ vars.PI_RELEASE_BACKEND }}",
+            },
+        )
+        text = "\n".join(
+            f"{step.get('name', '')}\n{step.get('run', '')}"
+            for step in release["steps"]
+        )
+        self.assertIn('test -n "${PI_EXECUTABLE:-}"', text)
+        self.assertIn('test -n "${PI_SMOKE_ROOT:-}"', text)
+        self.assertIn('test -n "${PI_RELEASE_EVIDENCE_OUTPUT:-}"', text)
+        self.assertIn('test -n "${PI_RELEASE_BACKEND:-}"', text)
+        self.assertIn("ref: ${{ github.sha }}", self.text)
+        self.assertIn("Verify protected reviewed main checkout", text)
+        self.assertIn('test "${GITHUB_REF:-}" = "$EXPECTED_REF"', text)
+        self.assertIn('test "${GITHUB_REF_PROTECTED:-false}" = true', text)
+        self.assertIn('test "$EXPECTED_SHA" = "$(git rev-parse HEAD)"', text)
+        self.assertIn("git status --porcelain=v1 --untracked-files=all", text)
+        self.assertIn('case "$PI_EXECUTABLE" in', text)
+        self.assertIn("PI_EXECUTABLE must be an absolute path", text)
+        self.assertIn("PI_RELEASE_EVIDENCE_OUTPUT must be an absolute path", text)
+        self.assertIn("PI_RELEASE_BACKEND must be the trusted bubblewrap backend", text)
+        self.assertIn('test -x "$PI_EXECUTABLE"', text)
+        self.assertIn("scripts/bootstrap-developer.sh", text)
+        self.assertIn("scripts/run-pi-release-smoke.py", text)
+        self.assertIn("PI_SMOKE_ROOT must be an absolute path", text)
+        self.assertIn("PiReleaseSmokeTests", text)
+        self.assertIn("0.84.1", text)
+
+    def test_provider_smoke_is_never_part_of_ordinary_ci(self):
+        quality_text = "\n".join(
+            step.get("run", "") for step in self.workflow["jobs"]["quality"]["steps"]
+        )
+        self.assertNotIn("run-pi-provider-smoke.py", quality_text)
+        self.assertNotIn("authorize-provider-smoke", quality_text)
 
 
 if __name__ == "__main__":

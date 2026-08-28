@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tests.pi_smoke_support import (
     EXPECTED_CLI_ARGS,
@@ -358,6 +359,13 @@ class PiReleaseSmokeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 run_pi_smoke(executable, Path(temporary), release=True)
 
+    def test_release_selector_rejects_group_or_other_writable_executable(self):
+        with tempfile.TemporaryDirectory(prefix="pi-release-writable-") as temporary:
+            executable = _write_fake_pi(Path(temporary) / "pi")
+            executable.chmod(0o702)
+            with self.assertRaises(ValueError):
+                run_pi_smoke(executable, Path(temporary), release=True)
+
     def test_release_rejects_absent_installed_package(self):
         with tempfile.TemporaryDirectory(prefix="pi-release-no-package-") as temporary:
             root = Path(temporary)
@@ -365,14 +373,57 @@ class PiReleaseSmokeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 run_pi_smoke(executable, root, release=True)
 
-    def test_release_requires_exact_installed_package_evidence(self):
+    def test_release_fails_closed_without_verified_sandbox(self):
         with tempfile.TemporaryDirectory(prefix="pi-release-package-") as temporary:
             root = Path(temporary)
             executable = _write_fake_pi(root / "pi")
             (root / "agent").mkdir(mode=0o700)
             self._write_exact_package(root / "agent")
-            evidence = run_pi_smoke(executable, root, release=True)
-            self.assertEqual(evidence.package_status, "exact")
+            with self.assertRaisesRegex(ValueError, "PI_RELEASE_SANDBOX_UNAVAILABLE"):
+                run_pi_smoke(executable, root, release=True)
+
+    def test_release_evidence_cannot_claim_an_unused_backend(self):
+        with tempfile.TemporaryDirectory(prefix="pi-release-evidence-") as temporary:
+            root = Path(temporary)
+            executable = _write_fake_pi(root / "pi")
+            (root / "agent").mkdir(mode=0o700)
+            self._write_exact_package(root / "agent")
+            with self.assertRaisesRegex(ValueError, "PI_RELEASE_SANDBOX_UNAVAILABLE"):
+                run_pi_smoke(executable, root, release=True)
+
+    def test_term_resistant_descendant_is_killed_after_leader_exits(self):
+        with tempfile.TemporaryDirectory(prefix="pi-smoke-term-resistant-") as raw:
+            root = Path(raw)
+            marker = root / "term-resistant-marker"
+            ready = root / "term-resistant-marker.ready"
+            resistant = (
+                "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"open({str(ready)!r}, 'w').close(); time.sleep(0.8); "
+                f"open({str(marker)!r}, 'w').close()"
+            )
+            executable = root / "leader.py"
+            executable.write_text(
+                f"#!{sys.executable}\n"
+                "import os,subprocess,sys,time\n"
+                f"subprocess.Popen([sys.executable, '-c', {resistant!r}], "
+                "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+                "print('leader-complete', flush=True)\n"
+                "time.sleep(0.5)\n"
+                "os.close(sys.stdout.fileno())\n"
+                "os.close(sys.stderr.fileno())\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o700)
+            with patch("tests.pi_smoke_support._TIMEOUT", 0.8):
+                _bounded_process(
+                    (str(executable),),
+                    b"",
+                    cwd=root,
+                    env={},
+                )
+            self.assertTrue(ready.exists())
+            time.sleep(1.0)
+            self.assertFalse(marker.exists())
 
     def test_unreviewed_effective_tool_role_is_rejected(self):
         with tempfile.TemporaryDirectory(prefix="pi-smoke-tools-") as temporary:

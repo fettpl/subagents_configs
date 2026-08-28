@@ -30,3 +30,6 @@ Task 11 is the sole support transition. It must complete the mandatory
 isolated real-Pi smoke for exact Pi 0.84.1 and the complete release gate before
 the JSON row may change to `supported: true`. A provider smoke is optional,
 separately authorized release evidence and is never implied by this row.
+The release-only transition predicate requires successful exact-version smoke,
+exact package evidence, the complete bounded evidence markers, and every other
+release gate; it has no side effects and cannot change this checked-in row.

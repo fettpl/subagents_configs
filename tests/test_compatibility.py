@@ -12,7 +12,9 @@ from subagents_configs.compatibility import (
     ClientCompatibility,
     CompatibilityResult,
     load_compatibility_matrix,
+    pi_release_transition_allowed,
     validate_client_compatibility,
+    validate_pi_release_evidence,
 )
 from subagents_configs.errors import CliError
 from subagents_configs.models import Target
@@ -266,6 +268,64 @@ class CompatibilityLoaderTests(unittest.TestCase):
         self.assertIsNone(pi.package_source)
         self.assertEqual(pi.supported_platforms, ())
         self.assertIsNone(pi.scope)
+
+    def test_pi_transition_is_release_only_and_requires_complete_evidence(self):
+        evidence = {
+            "schema_version": 1,
+            "status": "ok",
+            "pi_version": "0.84.1",
+            "pi_executable_sha256": "a" * 64,
+            "package_source": "npm:pi-subagents@0.56.0",
+            "package_version": "0.56.0",
+            "package_policy_sha256": (
+                "d0f902d54cda2f073215701b4c04a38480c29ef1a8a7f6e3d4981d70657e4722"
+            ),
+            "upstream_commit": "a0e2b9e31de5970215a567e20e2d781bbbddf235",
+            "dist_integrity": (
+                "sha512-XBmKqvrj4mCVQ6/uXiPqCmzHxGfBB+jjwmfNR3El+IfhnaJwZ+"
+                "W6evXYRI3lQEXe6Nf56xfzUXQExIzE8cT5BQ=="
+            ),
+            "package_manifest_sha256": (
+                "e35c5acf7f2c75fcfd182b1eaa67f8485abc5ea81ac63598ef8ad637d3e788be"
+            ),
+            "package_lock_sha256": (
+                "76b359ad4a8ecf20892d169ba5cce7892a54d8217024b115bff9262c5a1d4f04"
+            ),
+            "platform": "macos",
+            "backend": "sandbox-exec",
+            "smoke_evidence": (
+                "PI_SMOKE_OK",
+                "VALIDATOR_HELPER_EXECUTED",
+                "BASH_REJECTED",
+            ),
+        }
+        validated = validate_pi_release_evidence(evidence)
+        self.assertFalse(
+            pi_release_transition_allowed(validated, all_gates_passed=False)
+        )
+        self.assertFalse(
+            pi_release_transition_allowed(validated, all_gates_passed=True)
+        )
+        with self.assertRaises(ValueError):
+            replace(validated, pi_version="0.84.0")
+        for field, value in {
+            "pi_executable_sha256": "b" * 64,
+            "package_manifest_sha256": "c" * 64,
+            "package_lock_sha256": "d" * 64,
+            "backend": "forged-backend",
+        }.items():
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    replace(validated, **{field: value})
+        self.assertFalse(pi_release_transition_allowed(evidence, all_gates_passed=True))
+        incomplete = dict(evidence, smoke_evidence=("PI_SMOKE_OK",))
+        with self.assertRaises(ValueError):
+            validate_pi_release_evidence(incomplete)
+        rows = load_compatibility_matrix(
+            Path(__file__).parents[1] / "catalogs/client-compatibility.json"
+        )
+        pi = next(row for row in rows if row.target == "pi")
+        self.assertEqual((pi.supported, pi.status), (False, "unreleased"))
 
     def test_status_is_required_and_closed(self):
         valid = _row(status="released")

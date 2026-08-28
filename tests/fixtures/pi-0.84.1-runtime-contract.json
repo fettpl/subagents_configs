@@ -10,7 +10,10 @@
     "response_type": "response",
     "response_required_keys": ["type", "command", "success", "data"],
     "response_data_required_keys": ["model", "thinkingLevel", "isStreaming", "isCompacting", "steeringMode", "followUpMode", "sessionFile", "sessionId", "autoCompactionEnabled", "messageCount", "pendingMessageCount"],
-    "response_data_optional_keys": ["sessionName", "version", "agents", "extensions", "tools", "packages", "package_tools"]
+    "response_data_optional_keys": ["sessionName", "version", "agents", "extensions", "tools", "packages", "package_tools"],
+    "provider_request": {"type": "prompt", "prompt": "PI provider compatibility check\n"},
+    "provider_response_data_keys": ["text"],
+    "provider_argv": ["--mode", "rpc", "--no-session", "--no-context-files", "--no-tools", "--no-project-context", "--no-telemetry", "--no-update-check", "--model", "<MODEL>"]
   },
   "extension": {
     "loader": "extensions",

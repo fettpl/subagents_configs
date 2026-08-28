@@ -27,6 +27,9 @@ ACTIVE_PYTHON = tuple(
             *((REPOSITORY / "subagents_configs").rglob("*.py")),
             *(REPOSITORY / "scripts/validation_isolation").rglob("*.py"),
             REPOSITORY / "scripts/run-validation-isolated.py",
+            REPOSITORY / "scripts/run_pi_provider_smoke.py",
+            REPOSITORY / "scripts/run-pi-provider-smoke.py",
+            REPOSITORY / "scripts/run-pi-release-smoke.py",
             REPOSITORY / "scripts/manage-subagents-configs.py",
             REPOSITORY / "scripts/generate-catalogs.py",
             REPOSITORY / "scripts/validate-catalogs.py",
@@ -66,6 +69,9 @@ EXPECTED_ACTIVE_PYTHON = frozenset(
         "scripts/generate-catalogs.py",
         "scripts/validate-catalogs.py",
         "scripts/run-validation-isolated.py",
+        "scripts/run_pi_provider_smoke.py",
+        "scripts/run-pi-provider-smoke.py",
+        "scripts/run-pi-release-smoke.py",
         "scripts/validation_isolation/__init__.py",
         "scripts/validation_isolation/backend.py",
         "scripts/validation_isolation/cli.py",
@@ -233,6 +239,30 @@ def _pi_static_issues_from_source(source: str) -> list[str]:
         "shutil.rmtree",
     }
     forbidden_names = {"npm", "npx", "node", "git", "install.mjs"}
+    direct_network_modules = {
+        "http",
+        "http.client",
+        "httpx",
+        "requests",
+        "socket",
+        "urllib",
+        "urllib.request",
+        "urllib3",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported = (item.name for item in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported = (node.module or "",)
+        else:
+            continue
+        if any(
+            module in direct_network_modules
+            or module.startswith("urllib.")
+            or module.startswith("http.")
+            for module in imported
+        ):
+            issues.append("direct network client")
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -460,6 +490,12 @@ class StaticSecurityTests(unittest.TestCase):
                 "import subprocess\n"
                 "subprocess.Popen(['/opt/pi', 'install', 'npm:pi-subagents@0.56.0'])"
             ),
+            "urllib": "import urllib.request\nurllib.request.urlopen('https://example.invalid')",
+            "requests": "import requests\nrequests.get('https://example.invalid')",
+            "http-client": (
+                "import http.client\nhttp.client.HTTPSConnection('example.invalid')"
+            ),
+            "socket": "import socket\nsocket.socket()",
         }
         for name, source in fixtures.items():
             with self.subTest(fixture=name):
@@ -483,6 +519,29 @@ class StaticSecurityTests(unittest.TestCase):
         self.assertNotIn("subprocess.run", source)
         self.assertNotIn("subprocess.call", source)
         self.assertNotRegex(source, r"(?<![A-Za-z])(?:npm|npx|node|git)\s")
+
+    def test_provider_smoke_harness_is_bounded_authorized_and_no_fallback(self):
+        source = (REPOSITORY / "scripts/run_pi_provider_smoke.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(_pi_static_issues_from_source(source), [])
+        self.assertIn("authorize-provider-smoke", source)
+        self.assertIn('EXPECTED_PI_VERSION = "0.84.1"', source)
+        self.assertIn("--no-session", source)
+        self.assertIn("--no-context-files", source)
+        self.assertIn("--no-tools", source)
+        self.assertIn("--no-project-context", source)
+        self.assertIn("--no-telemetry", source)
+        self.assertIn("--no-update-check", source)
+        self.assertIn("_MAX_STREAM = 8192", source)
+        self.assertIn("shell=False", source)
+        self.assertIn("close_fds=True", source)
+        self.assertIn("start_new_session=True", source)
+        self.assertIn("os.killpg", source)
+        self.assertIn("filesystem.atomic_write", source)
+        self.assertIn("filesystem.expected_atomic_identity", source)
+        self.assertNotIn("subprocess.run", source)
+        self.assertNotRegex(source, r"(?<![A-Za-z])(?:npx|node|git)\s")
 
     def test_negative_fixture_and_policy_prose_are_outside_executable_scan_scope(self):
         with private_tempdir() as directory:

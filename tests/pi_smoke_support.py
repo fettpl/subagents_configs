@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import selectors
+import signal
 import stat
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from subagents_configs.pi_effective import inspect_effective_catalog
 from subagents_configs.pi_package import (
     inspect_pi_package_state,
     load_pi_package_policy,
+    pi_package_policy_hash,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +75,16 @@ _RESPONSE_DATA_OPTIONAL = (
     "package_tools",
 )
 _VALIDATOR_REQUEST = ("--", "bash", "-c", "pi-smoke-forbidden")
+_EXPECTED_RELEASE_SMOKE_EVIDENCE = (
+    "PI_SMOKE_OK",
+    "state-redacted",
+    "PI_VERSION_0.84.1",
+    "RPC_GET_STATE",
+    "OFFLINE",
+    "helper-present;bash-rejected",
+    "VALIDATOR_HELPER_EXECUTED",
+    "BASH_REJECTED",
+)
 _ENV_KEYS = (
     "HOME",
     "PI_CODING_AGENT_DIR",
@@ -108,6 +120,7 @@ class PiSmokeEvidence:
     validator: str
     package_status: str
     evidence: tuple[str, ...]
+    sandbox_backend: str | None = None
     error: str | None = None
 
     @property
@@ -220,15 +233,79 @@ def _file_digest(path: Path) -> tuple[int, int, int, int, int, str]:
     )
 
 
+def _owned_private_file_digest(path: Path) -> str:
+    """Hash an already-selected private file without following its final link."""
+
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        item = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(item.st_mode)
+            or item.st_uid != os.getuid()
+            or item.st_nlink != 1
+            or stat.S_IMODE(item.st_mode) & 0o077
+        ):
+            raise ValueError("Pi release package evidence is unsafe")
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        if (item.st_dev, item.st_ino, item.st_size, item.st_nlink) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_nlink,
+        ):
+            raise ValueError("Pi release package evidence changed")
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
 def _executable_digest(path: Path) -> tuple[int, int, int, int, int, str]:
     if not path.is_absolute() or path != Path(os.path.normpath(path)):
         raise ValueError("Pi executable must be an absolute canonical path")
-    item = os.lstat(path)
-    if stat.S_ISLNK(item.st_mode) or not stat.S_ISREG(item.st_mode):
-        raise ValueError("Pi executable must be a regular file")
-    if item.st_uid != os.getuid() or item.st_nlink != 1 or not item.st_mode & 0o111:
-        raise ValueError("Pi executable identity is unsafe")
-    return _file_digest(path)
+    current = Path(path.anchor)
+    for component in path.parts[1:-1]:
+        current /= component
+        item = os.lstat(current)
+        if stat.S_ISLNK(item.st_mode) and not (
+            current == Path("/var")
+            and Path(os.path.realpath(current)) == Path("/private/var")
+        ):
+            raise ValueError("Pi executable identity is unsafe")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        item = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(item.st_mode)
+            or item.st_uid != os.getuid()
+            or item.st_nlink != 1
+            or not item.st_mode & 0o111
+            or stat.S_IMODE(item.st_mode) & 0o022
+        ):
+            raise ValueError("Pi executable identity is unsafe")
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        if (item.st_dev, item.st_ino, item.st_size, item.st_nlink) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_nlink,
+        ):
+            raise ValueError("Pi executable identity changed")
+        return (
+            item.st_dev,
+            item.st_ino,
+            item.st_size,
+            stat.S_IMODE(item.st_mode),
+            item.st_nlink,
+            digest.hexdigest(),
+        )
+    finally:
+        os.close(descriptor)
 
 
 def _tree_signature(root: Path) -> tuple[tuple[str, int, int, str], ...]:
@@ -446,6 +523,7 @@ def _bounded_process(
         stderr=subprocess.PIPE,
         shell=False,
         close_fds=True,
+        start_new_session=True,
     )
     assert (
         child.stdin is not None
@@ -461,6 +539,37 @@ def _bounded_process(
     chunks = {"stdout": bytearray(), "stderr": bytearray()}
     deadline = time.monotonic() + _TIMEOUT
     timed_out = False
+
+    def terminate_group() -> None:
+        def group_exists() -> bool:
+            try:
+                os.killpg(child.pid, 0)
+            except ProcessLookupError:
+                return False
+            except OSError:
+                return True
+            return True
+
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except OSError:
+            if child.poll() is None:
+                child.terminate()
+        try:
+            child.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
+        if group_exists():
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except OSError:
+                if child.poll() is None:
+                    child.kill()
+        try:
+            child.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
+
     try:
         while selector.get_map():
             remaining = deadline - time.monotonic()
@@ -481,15 +590,17 @@ def _bounded_process(
             if timed_out:
                 break
         if timed_out:
-            child.terminate()
-            try:
-                child.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait(timeout=1)
+            terminate_group()
         else:
-            child.wait(timeout=max(0.1, deadline - time.monotonic()))
+            try:
+                child.wait(timeout=max(0.1, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                terminate_group()
     finally:
+        # Always tear down the process group, including after the leader has
+        # exited and closed both pipes while a detached-output descendant
+        # remains alive in the same group.
+        terminate_group()
         child.stdout.close()
         child.stderr.close()
         selector.close()
@@ -581,6 +692,70 @@ def _require_release_package(package) -> None:
     policy = load_pi_package_policy()
     if package.manifest_hash != policy.get("packageJsonSha256"):
         raise ValueError("PI_PACKAGE_INCOMPATIBLE")
+
+
+def build_release_evidence(
+    executable: Path,
+    root: Path,
+    smoke: PiSmokeEvidence,
+    *,
+    backend: str,
+) -> dict[str, object]:
+    """Build the complete safe release record from one successful smoke.
+
+    The record contains only the hashes and reviewed identifiers consumed by
+    the release transition predicate.  Paths, process output, credentials,
+    and Pi state are intentionally excluded.
+    """
+
+    if (
+        not isinstance(smoke, PiSmokeEvidence)
+        or smoke.status != "ok"
+        or smoke.version != "0.84.1"
+        or smoke.package_status != "exact"
+        or smoke.sandbox_backend != backend
+        or not isinstance(backend, str)
+    ):
+        raise ValueError("PI_RELEASE_EVIDENCE_INCOMPLETE")
+    if type(smoke.evidence) is not tuple or smoke.evidence != (
+        _EXPECTED_RELEASE_SMOKE_EVIDENCE
+    ):
+        raise ValueError("PI_RELEASE_EVIDENCE_INCOMPLETE")
+    if sys.platform == "linux":
+        platform = "linux"
+        if backend != "bubblewrap":
+            raise ValueError("PI_RELEASE_BACKEND_INVALID")
+    elif sys.platform == "darwin":
+        platform = "macos"
+        if backend != "sandbox-exec":
+            raise ValueError("PI_RELEASE_BACKEND_INVALID")
+    else:
+        raise ValueError("PI_RELEASE_PLATFORM_UNSUPPORTED")
+
+    if not isinstance(executable, Path) or not isinstance(root, Path):
+        raise TypeError("Pi release paths must be Path values")
+    root = _private_directory(root, "Pi smoke root")
+    agent = _private_directory(root / "agent", "Pi agent directory")
+    package = _package_evidence(agent)
+    _require_release_package(package)
+    policy = load_pi_package_policy()
+    executable_hash = _executable_digest(executable)[-1]
+    return {
+        "schema_version": 1,
+        "status": "ok",
+        "pi_version": "0.84.1",
+        "pi_executable_sha256": executable_hash,
+        "package_source": policy["source"],
+        "package_version": policy["version"],
+        "package_policy_sha256": pi_package_policy_hash(),
+        "upstream_commit": policy["upstreamCommit"],
+        "dist_integrity": policy["distIntegrity"],
+        "package_manifest_sha256": package.manifest_hash,
+        "package_lock_sha256": _owned_private_file_digest(package.installed_lock_path),
+        "platform": platform,
+        "backend": backend,
+        "smoke_evidence": list(smoke.evidence),
+    }
 
 
 def _redact(text: str, agent: Path) -> str:
@@ -743,6 +918,11 @@ def run_pi_smoke(
     load_runtime_contract()
     if not isinstance(executable, Path):
         raise TypeError("Pi executable must be a Path")
+    if release:
+        # This release path is intentionally closed until a reviewed wrapper
+        # executes the Pi child through a verified Bubblewrap/Seatbelt backend
+        # and supplies the matching sandbox proof to the evidence builder.
+        raise ValueError("PI_RELEASE_SANDBOX_UNAVAILABLE")
     root = _private_directory(root, "Pi smoke root")
     agent = _private_directory(root / "agent", "Pi agent directory")
     project = _private_directory(root / "project", "Pi project directory")

@@ -64,18 +64,76 @@ denial/helper behavior, and cleanup evidence. An unavailable or wrong-version
 executable is a release failure, not support evidence. Windows remains
 fail-closed and unsupported.
 
+The manual `workflow_dispatch` release job runs only on the explicitly
+pre-provisioned trusted runner labeled `self-hosted`, `linux`, `x64`,
+`pi-release`; it is not a hosted runner with path-shaped inputs. The runner
+owner must supply `PI_EXECUTABLE`, `PI_SMOKE_ROOT`,
+`PI_RELEASE_EVIDENCE_OUTPUT`, and `PI_RELEASE_BACKEND` as repository variables.
+`PI_EXECUTABLE` is the externally supplied absolute Pi binary;
+`PI_SMOKE_ROOT` is an existing private disposable smoke root containing the
+exact package receipt/manifest evidence required by `PiReleaseSmokeTests`;
+`PI_RELEASE_EVIDENCE_OUTPUT` is an existing-private-parent path for the new
+owner-only evidence file; and `PI_RELEASE_BACKEND` is `bubblewrap` on this
+Linux runner (a macOS runner must use `sandbox-exec`). The release helper
+invokes the selector with `release=True`, so it never creates package evidence
+or falls back to an unpinned install.
+
+The release helper currently fails closed before starting Pi because this
+revision does not yet wire a verified Bubblewrap/Seatbelt wrapper into the
+Pi smoke harness. No backend name is recorded as evidence for an unsandboxed
+child, and no release artifact is produced in that state. A separately
+reviewed owner change must add the actual wrapper and a matching
+`SANDBOX_VERIFIED` smoke marker before a release can proceed. Once that gate
+exists, the helper will emit and durably record one bounded JSON object
+containing the exact runtime, executable, package-policy, package-manifest/
+lock, platform/backend, and smoke-marker evidence required by the compatibility
+record. It uses an owner-only (`0600`) atomic write and prints no executable
+paths, package paths, credentials, prompts, responses, or transcripts.
+
+For the release record, preserve the literal command outputs for `python
+--version`, `pi --offline --version`, and `pi --help` only after reviewing them
+for secrets. Also record the exact package-policy SHA-256, upstream source
+commit, distribution SHA-512 integrity, package-manifest and lock-file
+SHA-256 values, manifest/dependency/lifecycle checks, operating system,
+isolation backend, ShellCheck version, and the bounded real-Pi smoke result.
+The real-Pi smoke must use the externally supplied absolute executable for
+exact Pi 0.84.1 and the complete `PiReleaseSmokeTests` suite. Never substitute
+an installed package-manager binary, `npx`, an install script, a source clone,
+or a network probe when evidence is unavailable.
+
 Provider smoke is optional and separate from the base Pi support claim. If it
 is run, or if release notes claim live provider interoperability, it requires
 separate manual consent and explicit provider-smoke authorization. Record only
 the reviewed bounded safe result; never record credentials, raw environment
 values, prompts, responses, or transcripts.
 
+The separately authorized command is:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python scripts/run-pi-provider-smoke.py \
+  --authorize-provider-smoke \
+  --pi-executable /absolute/path/to/pi-0.84.1 \
+  --model PROVIDER/ID \
+  --output /private/tmp/pi-provider-smoke.json
+```
+
+Run it only from an interactive terminal with a reviewed provider credential
+allowlist. The JSON artifact contains schema/version/package/model
+identifiers, start/end status, exit code, and a response-hash match; it does
+not contain the prompt, response, credentials, environment, or transcript.
+Treat a missing, non-private, non-interactive, unreviewed-provider, or
+wrong-version input as a release failure. Provider smoke is never run by
+ordinary CI and is not required for the base Pi support claim.
+
 Normal package/catalog work is not atomic and does not imply automatic package
 rollback. Package removal is a separate manual action using the unversioned
 `npm:pi-subagents` command only after exact pinned receipt evidence. The owner
 must manually inspect the complete diff, approve third-party execution and
 publication, obtain independent security/documentation review, and sign the
-commit/tag before changing `supported: false` to `supported: true`.
+commit/tag before changing `supported: false` to `supported: true`. The
+compatibility transition predicate remains deliberately false until that
+owner-reviewed transition commit; a self-hashed caller record cannot
+authorize support.
 
 ## Clean-tree verification
 
